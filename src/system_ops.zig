@@ -1,0 +1,291 @@
+const std = @import("std");
+
+/// System operations for gathering system metrics
+pub const SystemOps = struct {
+    allocator: std.mem.Allocator,
+    last_cpu_times: ?CpuTimes = null,
+
+    const CpuTimes = struct {
+        user: u64,
+        nice: u64,
+        system: u64,
+        idle: u64,
+        iowait: u64,
+        irq: u64,
+        softirq: u64,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) SystemOps {
+        return .{
+            .allocator = allocator,
+            .last_cpu_times = null,
+        };
+    }
+
+    /// Get CPU temperature in Celsius from thermal zone
+    pub fn getCpuTemperature(self: *SystemOps) !u32 {
+        _ = self;
+        // Try multiple thermal zones
+        const zones = [_][]const u8{
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/class/thermal/thermal_zone1/temp",
+        };
+
+        var buf: [32]u8 = undefined;
+        for (zones) |zone_path| {
+            const file = std.fs.openFileAbsolute(zone_path, .{}) catch continue;
+            defer file.close();
+
+            const bytes_read = file.readAll(&buf) catch continue;
+            const temp_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
+
+            // Temperature is in millidegrees, convert to degrees
+            const temp_milli = std.fmt.parseInt(u32, temp_str, 10) catch continue;
+            return temp_milli / 1000;
+        }
+
+        return error.ThermalZoneNotFound;
+    }
+
+    /// Get CPU load percentage using cached measurements
+    pub fn getCpuLoad(self: *SystemOps) !u8 {
+        const file = try std.fs.openFileAbsolute("/proc/stat", .{});
+        defer file.close();
+
+        var buf: [1024]u8 = undefined;
+        const bytes_read = try file.readAll(&buf);
+        const content = buf[0..bytes_read];
+
+        // Parse first line: "cpu  user nice system idle iowait irq softirq ..."
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        const first_line = lines.next() orelse return error.InvalidFormat;
+
+        if (!std.mem.startsWith(u8, first_line, "cpu ")) {
+            return error.InvalidFormat;
+        }
+
+        var parts = std.mem.tokenizeAny(u8, first_line, " ");
+        _ = parts.next(); // skip "cpu"
+
+        const current = CpuTimes{
+            .user = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .nice = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .system = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .idle = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .iowait = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .irq = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+            .softirq = try std.fmt.parseInt(u64, parts.next() orelse "0", 10),
+        };
+
+        // First call - initialize cache
+        if (self.last_cpu_times == null) {
+            self.last_cpu_times = current;
+            return 0;
+        }
+
+        const prev = self.last_cpu_times.?;
+        self.last_cpu_times = current;
+
+        // Calculate deltas
+        const delta_user = current.user - prev.user;
+        const delta_nice = current.nice - prev.nice;
+        const delta_system = current.system - prev.system;
+        const delta_idle = current.idle - prev.idle;
+        const delta_iowait = current.iowait - prev.iowait;
+        const delta_irq = current.irq - prev.irq;
+        const delta_softirq = current.softirq - prev.softirq;
+
+        const total = delta_user + delta_nice + delta_system + delta_idle +
+            delta_iowait + delta_irq + delta_softirq;
+
+        if (total == 0) return 0;
+
+        const idle_total = delta_idle + delta_iowait;
+        const cpu_usage = (100 * (total - idle_total)) / total;
+
+        return @intCast(@min(100, cpu_usage));
+    }
+
+    /// Get fan speed in RPM
+    pub fn getFanSpeed(_: *SystemOps) !u32 {
+        // Try direct hwmon paths (hwmon0-hwmon9)
+        var i: u8 = 0;
+        while (i < 10) : (i += 1) {
+            var path_buf: [64]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
+
+            const file = std.fs.openFileAbsolute(path, .{}) catch continue;
+            defer file.close();
+
+            var buf: [32]u8 = undefined;
+            const bytes_read = file.readAll(&buf) catch continue;
+            const rpm_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
+            const rpm = std.fmt.parseInt(u32, rpm_str, 10) catch continue;
+
+            if (rpm > 0) return rpm;
+        }
+
+        return 0; // No fan found
+    }
+
+    /// Get memory usage percentage
+    pub fn getMemory(_: *SystemOps) !u8 {
+        const file = try std.fs.openFileAbsolute("/proc/meminfo", .{});
+        defer file.close();
+
+        var buf: [2048]u8 = undefined;
+        const bytes_read = try file.readAll(&buf);
+        const content = buf[0..bytes_read];
+
+        var mem_total: ?u64 = null;
+        var mem_available: ?u64 = null;
+
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "MemTotal:")) {
+                var parts = std.mem.tokenizeAny(u8, line, " ");
+                _ = parts.next(); // skip "MemTotal:"
+                if (parts.next()) |val| {
+                    mem_total = std.fmt.parseInt(u64, val, 10) catch null;
+                }
+            } else if (std.mem.startsWith(u8, line, "MemAvailable:")) {
+                var parts = std.mem.tokenizeAny(u8, line, " ");
+                _ = parts.next(); // skip "MemAvailable:"
+                if (parts.next()) |val| {
+                    mem_available = std.fmt.parseInt(u64, val, 10) catch null;
+                }
+            }
+
+            if (mem_total != null and mem_available != null) break;
+        }
+
+        if (mem_total == null or mem_available == null) {
+            return error.InvalidMeminfo;
+        }
+
+        const used = mem_total.? - mem_available.?;
+        const percent = (100 * used) / mem_total.?;
+        return @intCast(@min(100, percent));
+    }
+
+    /// Get NVMe/root filesystem usage percentage
+    pub fn getNvmeUsage(_: *SystemOps) !u8 {
+        const c = @cImport({
+            @cInclude("sys/statvfs.h");
+        });
+
+        var stat: c.struct_statvfs = undefined;
+        if (c.statvfs("/", &stat) != 0) {
+            return error.StatvfsFailed;
+        }
+
+        const total = stat.f_blocks * stat.f_frsize;
+        const free = stat.f_bfree * stat.f_frsize;
+        const used = total - free;
+
+        if (total == 0) return 0;
+
+        const percent = (100 * used) / total;
+        return @intCast(@min(100, percent));
+    }
+
+    /// Get NVMe temperature in Celsius
+    pub fn getNvmeTemp(_: *SystemOps) !u32 {
+        // Try direct hwmon paths (hwmon0-hwmon9)
+        var i: u8 = 0;
+        while (i < 10) : (i += 1) {
+            var name_path_buf: [64]u8 = undefined;
+            const name_path = std.fmt.bufPrint(&name_path_buf, "/sys/class/hwmon/hwmon{d}/name", .{i}) catch continue;
+
+            // Check if this is nvme sensor
+            const name_file = std.fs.openFileAbsolute(name_path, .{}) catch continue;
+            defer name_file.close();
+
+            var name_buf: [64]u8 = undefined;
+            const name_len = name_file.readAll(&name_buf) catch continue;
+            const name = std.mem.trim(u8, name_buf[0..name_len], &std.ascii.whitespace);
+
+            if (std.mem.indexOf(u8, name, "nvme") != null) {
+                // Found nvme sensor, read temp1_input
+                var temp_path_buf: [64]u8 = undefined;
+                const temp_path = std.fmt.bufPrint(&temp_path_buf, "/sys/class/hwmon/hwmon{d}/temp1_input", .{i}) catch continue;
+
+                const temp_file = std.fs.openFileAbsolute(temp_path, .{}) catch continue;
+                defer temp_file.close();
+
+                var buf: [32]u8 = undefined;
+                const bytes_read = temp_file.readAll(&buf) catch continue;
+                const temp_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
+
+                // Temperature is in millidegrees
+                const temp_milli = std.fmt.parseInt(u32, temp_str, 10) catch continue;
+                return temp_milli / 1000;
+            }
+        }
+
+        return 0; // No NVMe sensor found
+    }
+
+    /// Get system uptime in days, hours, and minutes
+    pub fn getUptime(_: *SystemOps) !struct { days: u32, hours: u32, minutes: u32 } {
+        const file = try std.fs.openFileAbsolute("/proc/uptime", .{});
+        defer file.close();
+
+        var buf: [64]u8 = undefined;
+        const bytes_read = try file.readAll(&buf);
+        const content = buf[0..bytes_read];
+
+        // Format: "uptime_seconds idle_seconds"
+        var parts = std.mem.tokenizeAny(u8, content, " ");
+        const uptime_str = parts.next() orelse return error.InvalidFormat;
+
+        // Parse as float, get integer part
+        const dot_pos = std.mem.indexOf(u8, uptime_str, ".") orelse uptime_str.len;
+        const uptime_seconds = try std.fmt.parseInt(u64, uptime_str[0..dot_pos], 10);
+
+        const days: u32 = @intCast(uptime_seconds / 86400);
+        const hours: u32 = @intCast((uptime_seconds % 86400) / 3600);
+        const minutes: u32 = @intCast((uptime_seconds % 3600) / 60);
+
+        return .{ .days = days, .hours = hours, .minutes = minutes };
+    }
+
+    /// Check for available APT updates
+    /// Returns number of packages that can be upgraded
+    pub fn checkUpdates(self: *SystemOps, is_root: bool, has_internet: bool) u32 {
+        // Only check if root and internet is available
+        if (!is_root or !has_internet) {
+            return 0;
+        }
+
+        // Run apt list --upgradable and count lines
+        const result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &[_][]const u8{ "/usr/bin/apt", "list", "--upgradable" },
+            .max_output_bytes = 1024 * 1024, // 1MB should be enough
+        }) catch |err| {
+            std.log.warn("Failed to check APT updates: {}", .{err});
+            return 0;
+        };
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
+
+        if (result.term.Exited != 0) {
+            return 0;
+        }
+
+        // Count lines (excluding header "Listing...")
+        var count: u32 = 0;
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (line.len > 0 and !std.mem.startsWith(u8, line, "Listing")) {
+                count += 1;
+            }
+        }
+
+        // Subtract 1 if there was content (for empty trailing line)
+        if (count > 0) count -= 1;
+
+        return count;
+    }
+};
