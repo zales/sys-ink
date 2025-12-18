@@ -4,6 +4,8 @@ const std = @import("std");
 pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     last_cpu_times: ?CpuTimes = null,
+    cached_cpu_temp_path: ?[]const u8 = null,
+    cached_nvme_temp_path: ?[]const u8 = null,
 
     const CpuTimes = struct {
         user: u64,
@@ -19,32 +21,47 @@ pub const SystemOps = struct {
         return .{
             .allocator = allocator,
             .last_cpu_times = null,
+            .cached_cpu_temp_path = null,
+            .cached_nvme_temp_path = null,
         };
     }
 
     /// Get CPU temperature in Celsius from thermal zone
     pub fn getCpuTemperature(self: *SystemOps) !u32 {
-        _ = self;
+        // Use cached path if available
+        if (self.cached_cpu_temp_path) |path| {
+            return self.readTempFromFile(path);
+        }
+
         // Try multiple thermal zones
         const zones = [_][]const u8{
             "/sys/class/thermal/thermal_zone0/temp",
             "/sys/class/thermal/thermal_zone1/temp",
         };
 
-        var buf: [32]u8 = undefined;
         for (zones) |zone_path| {
-            const file = std.fs.openFileAbsolute(zone_path, .{}) catch continue;
-            defer file.close();
-
-            const bytes_read = file.readAll(&buf) catch continue;
-            const temp_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
-
-            // Temperature is in millidegrees, convert to degrees
-            const temp_milli = std.fmt.parseInt(u32, temp_str, 10) catch continue;
-            return temp_milli / 1000;
+            if (self.readTempFromFile(zone_path)) |temp| {
+                self.cached_cpu_temp_path = zone_path;
+                return temp;
+            } else |_| {
+                continue;
+            }
         }
 
         return error.ThermalZoneNotFound;
+    }
+
+    fn readTempFromFile(_: *SystemOps, path: []const u8) !u32 {
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+
+        var buf: [32]u8 = undefined;
+        const bytes_read = try file.readAll(&buf);
+        const temp_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
+
+        // Temperature is in millidegrees, convert to degrees
+        const temp_milli = try std.fmt.parseInt(u32, temp_str, 10);
+        return temp_milli / 1000;
     }
 
     /// Get CPU load percentage using cached measurements
@@ -207,7 +224,12 @@ pub const SystemOps = struct {
     }
 
     /// Get NVMe temperature in Celsius
-    pub fn getNvmeTemp(_: *SystemOps) !u32 {
+    pub fn getNvmeTemp(self: *SystemOps) !u32 {
+        // Use cached path if available
+        if (self.cached_nvme_temp_path) |path| {
+            return self.readTempFromFile(path);
+        }
+
         // Try direct hwmon paths (hwmon0-hwmon9)
         var i: u8 = 0;
         while (i < 10) : (i += 1) {
@@ -227,16 +249,10 @@ pub const SystemOps = struct {
                 var temp_path_buf: [64]u8 = undefined;
                 const temp_path = std.fmt.bufPrint(&temp_path_buf, "/sys/class/hwmon/hwmon{d}/temp1_input", .{i}) catch continue;
 
-                const temp_file = std.fs.openFileAbsolute(temp_path, .{}) catch continue;
-                defer temp_file.close();
+                // Cache the path (need to duplicate it because buf is on stack)
+                self.cached_nvme_temp_path = try self.allocator.dupe(u8, temp_path);
 
-                var buf: [32]u8 = undefined;
-                const bytes_read = temp_file.readAll(&buf) catch continue;
-                const temp_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
-
-                // Temperature is in millidegrees
-                const temp_milli = std.fmt.parseInt(u32, temp_str, 10) catch continue;
-                return temp_milli / 1000;
+                return self.readTempFromFile(self.cached_nvme_temp_path.?);
             }
         }
 
