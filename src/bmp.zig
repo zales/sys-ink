@@ -26,7 +26,7 @@ pub const BmpExporter = struct {
         const file = std.fs.createFileAbsolute(path, .{}) catch |err| {
             // If primary path fails, try fallback to /tmp
             if (!std.mem.startsWith(u8, path, "/tmp")) {
-                const fallback_path = "/tmp/display.bmp";
+                const fallback_path = "/tmp/sys-ink.bmp";
                 std.log.warn("Failed to create {s}: {}, trying {s}", .{ path, err, fallback_path });
                 return self.saveInternal(buffer, width, height, fallback_path);
             }

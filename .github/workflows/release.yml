@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-musl
+            deb_arch: arm64
+            asset_name: sys-ink-aarch64
+          - target: arm-linux-musleabihf
+            deb_arch: armhf
+            asset_name: sys-ink-armhf
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
+
+      - name: Build for ${{ matrix.target }}
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
+
+      - name: Package Debian (.deb)
+        run: |
+          chmod +x package_deb.sh
+          VERSION=${{ github.ref_name }}
+          # Strip 'v' prefix if present
+          VERSION=${VERSION#v}
+          
+          export VERSION
+          export TARGET_ARCH=${{ matrix.deb_arch }}
+          export BINARY_PATH=zig-out/bin/sys-ink
+          
+          ./package_deb.sh
+
+      - name: Rename Binary
+        run: mv zig-out/bin/sys-ink ${{ matrix.asset_name }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ matrix.asset_name }}
+            *.deb
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

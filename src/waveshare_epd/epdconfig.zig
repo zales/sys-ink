@@ -12,7 +12,7 @@ pub const EpdConfig = struct {
 
     allocator: std.mem.Allocator,
     spi_fd: std.posix.fd_t,
-    
+
     line_rst: ?GpioNative.Handle,
     line_dc: ?GpioNative.Handle,
     line_pwr: ?GpioNative.Handle,
@@ -36,7 +36,7 @@ pub const EpdConfig = struct {
             return error.UnsupportedPlatform;
         }
 
-        const chip_path = "/dev/gpiochip0";
+        const chip_path = std.posix.getenv("GPIO_CHIP") orelse "/dev/gpiochip0";
         std.log.info("Requesting GPIO lines from {s}...", .{chip_path});
 
         // Request pins
@@ -128,7 +128,7 @@ pub const EpdConfig = struct {
         if (@import("builtin").target.os.tag != .linux) return 0;
 
         if (pin != BUSY_PIN) return error.InvalidPin;
-        
+
         if (self.line_busy) |h| {
             return try h.getValue();
         } else {

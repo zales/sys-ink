@@ -42,7 +42,7 @@ pub fn main() !u8 {
     _ = c.signal(c.SIGTERM, signalHandler);
     _ = c.signal(c.SIGHUP, signalHandler);
 
-    std.log.info("ZlsNasDisplay Zig starting...", .{});
+    std.log.info("SysInk starting...", .{});
 
     // Initialize modules
     var sys_ops = SystemOps.init(allocator);
@@ -57,7 +57,7 @@ pub fn main() !u8 {
     // Initialize display renderer
     var renderer = DisplayRenderer.init(allocator) catch |err| {
         std.log.err("Failed to initialize display: {}", .{err});
-        std.log.err("Make sure you are running as root and the display is connected", .{});
+        std.log.err("Make sure you have permission to access GPIO/SPI devices (e.g. gpio/spi groups)", .{});
         return 1;
     };
     defer renderer.deinit();

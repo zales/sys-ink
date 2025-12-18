@@ -60,7 +60,7 @@ pub const Config = struct {
     pub var export_bmp: bool = false;
 
     /// BMP export path
-    pub var bmp_export_path: []const u8 = "/mnt/web-display/tmp/display.bmp";
+    pub var bmp_export_path: []const u8 = "/tmp/sys-ink.bmp";
 
     /// Scheduler interval for fast updates (CPU, RAM, etc.) in seconds
     pub var interval_fast: u32 = 30;
