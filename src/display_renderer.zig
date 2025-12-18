@@ -55,7 +55,7 @@ pub const DisplayRenderer = struct {
     /// Render grid layout
     pub fn renderGrid(self: *DisplayRenderer) void {
         if (self.grid_cached) return;
-        
+
         self.bitmap.clear(.White);
 
         const v_line1: i32 = display_config.VERTICAL_LINE_1;
@@ -76,7 +76,7 @@ pub const DisplayRenderer = struct {
         self.drawText(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, false);
         self.drawText(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, false);
         self.drawText(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, false);
-        
+
         // APT section
         const apt_line_y: i32 = display_config.APT_LINE_Y;
         self.drawText(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, false);
@@ -132,7 +132,7 @@ pub const DisplayRenderer = struct {
 
     fn drawText(self: *DisplayRenderer, x: i32, y: i32, text: []const u8, font: FontType, inverted: bool) void {
         const color: Graphics.Color = if (inverted) .White else .Black;
-        
+
         if (inverted) {
             // Draw black background
             const w = self.bitmap.measureText(text, font);
@@ -146,12 +146,12 @@ pub const DisplayRenderer = struct {
                 .Ubuntu34 => 36,
                 else => 20,
             };
-            
+
             // Adjust Y for background (Y is baseline)
             const bg_y = y - @as(i32, @intCast(h)) + 4; // Approximate
             self.bitmap.fillRect(x - 2, bg_y, w + 4, h + 2, .Black);
         }
-        
+
         self.bitmap.drawTextFont(x, y, text, font, color);
     }
 
@@ -241,9 +241,9 @@ pub const DisplayRenderer = struct {
         const y_load: i32 = display_config.CPU_VALUE_Y_LOAD;
         const y_temp: i32 = display_config.CPU_VALUE_Y_TEMP;
 
-        // Clear areas
-        self.bitmap.fillRect(x, y_load, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
-        self.bitmap.fillRect(x, y_temp, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.fillRect(x, y_load - ascent, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
+        self.bitmap.fillRect(x, y_temp - ascent, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
 
         var buf1: [16]u8 = undefined;
         const load_text = std.fmt.bufPrint(&buf1, "{d}%", .{load}) catch "?";
@@ -260,7 +260,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.MEM_VALUE_X;
         const y: i32 = display_config.MEM_VALUE_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu26);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, .White);
 
         var buf: [16]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
@@ -276,8 +277,9 @@ pub const DisplayRenderer = struct {
         const y_disk: i32 = display_config.NVME_VALUE_Y_DISK;
         const y_temp: i32 = display_config.NVME_VALUE_Y_TEMP;
 
-        self.bitmap.fillRect(x, y_disk, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
-        self.bitmap.fillRect(x, y_temp, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu26);
+        self.bitmap.fillRect(x, y_disk - ascent, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
+        self.bitmap.fillRect(x, y_temp - ascent, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
 
         var buf1: [16]u8 = undefined;
         const usage_text = std.fmt.bufPrint(&buf1, "{d}%", .{usage}) catch "?";
@@ -293,7 +295,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.FAN_VALUE_X;
         const y: i32 = display_config.FAN_VALUE_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
         var buf: [16]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch "?";
@@ -305,7 +308,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.IP_VALUE_X;
         const y: i32 = display_config.IP_VALUE_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
         const display_ip = if (ip.len > 15) ip[0..15] else ip;
         self.drawText(x, y, display_ip, .Ubuntu14, false);
     }
@@ -315,7 +319,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.UPTIME_VALUE_X;
         const y: i32 = display_config.UPTIME_VALUE_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
 
         var buf: [32]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
@@ -329,7 +334,8 @@ pub const DisplayRenderer = struct {
         const icon_x: i32 = display_config.SIGNAL_ICON_X;
         const icon_y: i32 = display_config.SIGNAL_ICON_Y;
 
-        self.bitmap.fillRect(val_x - 20, val_y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
+        self.bitmap.fillRect(val_x - 20, val_y - ascent, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
 
         // Draw WiFi icon
         const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
@@ -355,9 +361,12 @@ pub const DisplayRenderer = struct {
         const up_unit_x: i32 = display_config.TRAFFIC_UP_UNIT_X;
         const up_unit_y: i32 = display_config.TRAFFIC_UP_UNIT_Y;
 
+        const ascent20 = self.bitmap.getFontAscent(.Ubuntu20);
+        const ascent14 = self.bitmap.getFontAscent(.Ubuntu14);
+
         // Clear value and unit areas
-        self.bitmap.fillRect(down_val_x, down_val_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(down_unit_x, down_unit_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+        self.bitmap.fillRect(down_val_x, down_val_y - ascent20, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(down_unit_x, down_unit_y - ascent14, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
 
         var buf1: [16]u8 = undefined;
         const down_text = std.fmt.bufPrint(&buf1, "{d:.2}", .{download_speed}) catch "?";
@@ -368,8 +377,8 @@ pub const DisplayRenderer = struct {
         self.drawText(down_unit_x, down_unit_y, down_unit_text, .Ubuntu14, false);
 
         // Clear upload areas
-        self.bitmap.fillRect(up_val_x, up_val_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(up_unit_x, up_unit_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+        self.bitmap.fillRect(up_val_x, up_val_y - ascent20, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(up_unit_x, up_unit_y - ascent14, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
 
         var buf2: [16]u8 = undefined;
         const up_text = std.fmt.bufPrint(&buf2, "{d:.2}", .{upload_speed}) catch "?";
@@ -385,7 +394,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.APT_VALUE_X;
         const y: i32 = display_config.APT_VALUE_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
 
         if (count == 0) {
             // Show checkmark icon
@@ -403,7 +413,8 @@ pub const DisplayRenderer = struct {
         const x: i32 = display_config.NET_ICON_X;
         const y: i32 = display_config.NET_ICON_Y;
 
-        self.bitmap.fillRect(x, y, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
+        const ascent = self.bitmap.getFontAscent(.Material24);
+        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
 
         // Show WiFi OK or WiFi OFF icon
         const icon = if (connected) display_config.ICON_WIFI_OK else display_config.ICON_WIFI_OFF;

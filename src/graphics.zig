@@ -142,6 +142,11 @@ pub const Bitmap = struct {
         return 1; // Scale is handled by font data now
     }
 
+    pub fn getFontAscent(self: *Bitmap, font_type: FontType) i32 {
+        const font = self.getFont(font_type);
+        return @intCast(font.ascent);
+    }
+
     fn getFont(self: *Bitmap, font_type: FontType) *font_data.Font {
         return switch (font_type) {
             .Ubuntu14 => &self.fonts.ubuntu14,

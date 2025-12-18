@@ -31,11 +31,8 @@ pub fn main() !u8 {
     // Load configuration from environment
     config.Config.load();
 
-    // Check if running as root
-    if (!config.Config.isRoot()) {
-        std.log.err("Must run as root for GPIO/SPI access!", .{});
-        return 1;
-    }
+    // Root check removed to allow running as non-root user with proper permissions (gpio/spi groups)
+    // if (!config.Config.isRoot()) { ... }
 
     // Install signal handlers
     const c = @cImport({
