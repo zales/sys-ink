@@ -1,0 +1,16 @@
+# Zig
+zig-cache/
+zig-out/
+
+# Binaries
+tools/fontgen
+check_ioctl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*~
