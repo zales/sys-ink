@@ -31,6 +31,7 @@ pub const Config = struct {
     };
 
     pub var log_level: LogLevel = .info;
+    pub var log_level_std: std.log.Level = .info;
 
     /// Enable/disable BMP export
     pub var export_bmp: bool = false;
@@ -78,6 +79,17 @@ pub const Config = struct {
         if (std.posix.getenv("LOG_LEVEL")) |val| {
             log_level = LogLevel.parse(val);
         }
+
+        log_level_std = toStdLogLevel(log_level);
+    }
+
+    fn toStdLogLevel(level: LogLevel) std.log.Level {
+        return switch (level) {
+            .debug => .debug,
+            .info => .info,
+            .warn => .warn,
+            .err => .err,
+        };
     }
 
     /// Check if running as root user

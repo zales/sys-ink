@@ -6,6 +6,16 @@ const TrafficMonitor = @import("network_ops.zig").TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
 
+pub const std_options: std.Options = .{
+    .logFn = customLogFn,
+};
+
+fn customLogFn(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral), comptime message: []const u8, args: anytype) void {
+    // Filter logs by runtime-configured level
+    if (@intFromEnum(level) > @intFromEnum(config.Config.log_level_std)) return;
+    std.log.defaultLog(level, scope, message, args);
+}
+
 // Global state - atomic for signal handler thread-safety
 var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var g_sys_ops: ?*SystemOps = null;

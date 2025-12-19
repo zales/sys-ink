@@ -38,14 +38,14 @@ Section: utils
 Priority: optional
 Architecture: $TARGET_ARCH
 Maintainer: Zales <zales@example.com>
-Description: ZLS NAS Display Driver
+Description: SysInk Display Driver
  A Zig implementation of the NAS display driver for Waveshare e-Paper display.
 EOF
 
 # 5. Create systemd service
 cat > "$PKG_DIR/lib/systemd/system/$APP_NAME.service" <<EOF
 [Unit]
-Description=ZLS NAS Display Service
+Description=SysInk Display Service
 After=network.target
 
 [Service]

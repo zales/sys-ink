@@ -36,6 +36,10 @@ pub const EpdConfig = struct {
             return error.UnsupportedPlatform;
         }
 
+        // Ensure partial initialization is cleaned up on failure
+        errdefer self.moduleExit();
+        self.spi_fd = -1;
+
         const chip_path = std.posix.getenv("GPIO_CHIP") orelse "/dev/gpiochip0";
         std.log.info("Requesting GPIO lines from {s}...", .{chip_path});
 

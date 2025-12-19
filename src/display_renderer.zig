@@ -436,10 +436,10 @@ pub const DisplayRenderer = struct {
         const icon_y: i32 = display_config.SLEEP_ICON_Y;
         self.drawText(icon_x, icon_y, display_config.ICON_SLEEP_NET, .Material50, true);
 
-        // Draw white "ZlsNas" text
+        // Draw white title text
         const title_x: i32 = display_config.SLEEP_TEXT_TITLE_X;
         const title_y: i32 = display_config.SLEEP_TEXT_TITLE_Y;
-        self.drawText(title_x, title_y, "ZlsNas", .Ubuntu34, true);
+        self.drawText(title_x, title_y, "SysInk", .Ubuntu34, true);
 
         // Draw white "Sleeping..." text
         const sub_x: i32 = display_config.SLEEP_TEXT_SUB_X;

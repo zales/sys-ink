@@ -8,7 +8,7 @@ pub const GpioNative = struct {
 
     pub const Handle = struct {
         fd: std.posix.fd_t,
-        
+
         pub fn deinit(self: Handle) void {
             std.posix.close(self.fd);
         }
@@ -17,7 +17,7 @@ pub const GpioNative = struct {
             var data = GpioHandleData{ .values = undefined };
             @memset(&data.values, 0);
             data.values[0] = value;
-            
+
             if (std.os.linux.ioctl(self.fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, @intFromPtr(&data)) != 0) {
                 return error.GpioSetFailed;
             }
@@ -68,14 +68,14 @@ pub const GpioNative = struct {
         @memset(&req.lineoffsets, 0);
         @memset(&req.default_values, 0);
         @memset(&req.consumer_label, 0);
-        
+
         req.lineoffsets[0] = pin;
         req.flags = switch (direction) {
             .Input => GPIOHANDLE_REQUEST_INPUT,
             .Output => GPIOHANDLE_REQUEST_OUTPUT,
         };
-        
-        const label = "zlsnas";
+
+        const label = "sys-ink";
         @memcpy(req.consumer_label[0..label.len], label);
 
         if (std.os.linux.ioctl(chip_fd, GPIO_GET_LINEHANDLE_IOCTL, @intFromPtr(&req)) != 0) {

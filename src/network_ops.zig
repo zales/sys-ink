@@ -8,12 +8,8 @@ const c = @cImport({
     @cInclude("arpa/inet.h");
 });
 
-// Architecture-aware O_NONBLOCK constant
-const O_NONBLOCK: u32 = if (@import("builtin").target.cpu.arch == .aarch64 or
-    @import("builtin").target.cpu.arch == .arm)
-    0x800 // ARM/ARM64
-else
-    0x4000; // x86/x86_64
+// Linux O_NONBLOCK flag (0x800) applies across supported arches
+const O_NONBLOCK: u32 = 0x800;
 
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {

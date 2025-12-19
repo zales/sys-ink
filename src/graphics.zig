@@ -176,6 +176,7 @@ pub const Bitmap = struct {
         var i: usize = 0;
         while (i < text.len) {
             const cp_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            if (i + cp_len > text.len) break;
             const cp = std.unicode.utf8Decode(text[i .. i + cp_len]) catch '?';
             i += cp_len;
 
@@ -228,6 +229,7 @@ pub const Bitmap = struct {
         var i: usize = 0;
         while (i < text.len) {
             const cp_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            if (i + cp_len > text.len) break;
             const cp = std.unicode.utf8Decode(text[i .. i + cp_len]) catch '?';
             i += cp_len;
 
