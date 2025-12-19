@@ -80,18 +80,13 @@ pub fn main() !u8 {
         return 1;
     };
 
+    std.log.info("Showing loading screen...", .{});
+    renderer.showLoading() catch |err| {
+        std.log.err("Failed to show loading screen: {}", .{err});
+    };
+
     std.log.info("Rendering grid...", .{});
     renderer.renderGrid();
-
-    // First update - use displayBase to set base image for partial updates
-    renderer.convertTo1Bit(renderer.epd_buffer);
-    try renderer.epd.displayBase(renderer.epd_buffer);
-
-    // Export initial BMP (before display updates)
-    std.log.info("Exporting initial BMP...", .{});
-    renderer.exportBmp() catch |err| {
-        std.log.err("Failed to export initial BMP: {}", .{err});
-    };
 
     // Initialize scheduler
     var scheduler = Scheduler.init(allocator);
@@ -112,6 +107,19 @@ pub fn main() !u8 {
     try scheduler.every(config.Config.interval_slow, "ip", updateIp);
     try scheduler.every(config.Config.interval_slow, "apt", updateApt);
     try scheduler.every(config.Config.interval_slow, "internet", updateInternet);
+
+    // Run once to fill all stats before first display update
+    scheduler.runAll();
+
+    // First update - use displayBase to set base image for partial updates with populated stats
+    renderer.convertTo1Bit(renderer.epd_buffer);
+    try renderer.epd.displayBase(renderer.epd_buffer);
+
+    // Export initial BMP (before display updates)
+    std.log.info("Exporting initial BMP...", .{});
+    renderer.exportBmp() catch |err| {
+        std.log.err("Failed to export initial BMP: {}", .{err});
+    };
 
     // Display update (matches fast refresh rate)
     try scheduler.every(config.Config.interval_fast, "display", updateDisplayPartial);

@@ -52,6 +52,52 @@ pub const DisplayRenderer = struct {
         try self.epd.clear(0xFF);
     }
 
+    /// Show a transient loading screen while metrics initialize
+    pub fn showLoading(self: *DisplayRenderer) !void {
+        // Inverted colors vs sleep: white background, black line/text/icon
+        self.bitmap.clear(.White);
+
+        const screen_w: u32 = display_config.DISPLAY_WIDTH;
+        const screen_h: u32 = display_config.DISPLAY_HEIGHT;
+        const cx: i32 = @intCast(screen_w / 2);
+        const cy: i32 = @intCast(screen_h / 2);
+        const right_cx: i32 = cx + @as(i32, @intCast(screen_w / 4));
+
+        // Line centered horizontally
+        const line_w: u32 = display_config.SLEEP_LINE_W;
+        const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
+        const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
+        const line_y: i32 = display_config.SLEEP_LINE_Y;
+        self.bitmap.fillRect(line_x, line_y, line_w, line_h, .Black);
+
+        // Icon centered horizontally, left of center line
+        const icon = display_config.ICON_SLEEP_NET;
+        const icon_w = self.bitmap.measureText(icon, .Material50);
+        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 12 - 30;
+        const icon_y: i32 = cy - 12 + 30;
+        self.drawText(icon_x, icon_y, icon, .Material50, false);
+
+        // Title centered on the right side
+        const title = "SysInk";
+        const title_w = self.bitmap.measureText(title, .Ubuntu34);
+        const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
+        const title_y: i32 = cy - 4;
+        self.drawText(title_x, title_y, title, .Ubuntu34, false);
+
+        // Subtitle centered on the right side
+        const subtitle = "Loading...";
+        const sub_x: i32 = title_x;
+        const sub_y: i32 = cy + 18;
+        self.drawText(sub_x, sub_y, subtitle, .Ubuntu14, false);
+
+        self.convertTo1Bit(self.epd_buffer);
+        try self.epd.display(self.epd_buffer);
+
+        self.exportBmp() catch |err| {
+            std.log.err("Failed to export loading BMP: {}", .{err});
+        };
+    }
+
     /// Render grid layout
     pub fn renderGrid(self: *DisplayRenderer) void {
         if (self.grid_cached) return;
@@ -424,27 +470,38 @@ pub const DisplayRenderer = struct {
         // Clear to black
         self.bitmap.clear(.Black);
 
-        // Draw white vertical line
-        const line_x: i32 = display_config.SLEEP_LINE_X;
-        const line_y: i32 = display_config.SLEEP_LINE_Y;
+        const screen_w: u32 = display_config.DISPLAY_WIDTH;
+        const screen_h: u32 = display_config.DISPLAY_HEIGHT;
+        const cx: i32 = @intCast(screen_w / 2);
+        const cy: i32 = @intCast(screen_h / 2);
+        const right_cx: i32 = cx + @as(i32, @intCast(screen_w / 4));
+
+        // White vertical line centered
         const line_w: u32 = display_config.SLEEP_LINE_W;
         const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
+        const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
+        const line_y: i32 = display_config.SLEEP_LINE_Y;
         self.bitmap.fillRect(line_x, line_y, line_w, line_h, .White);
 
-        // Draw white network icon
-        const icon_x: i32 = display_config.SLEEP_ICON_X;
-        const icon_y: i32 = display_config.SLEEP_ICON_Y;
-        self.drawText(icon_x, icon_y, display_config.ICON_SLEEP_NET, .Material50, true);
+        // Icon centered horizontally, left of center line
+        const icon = display_config.ICON_SLEEP_NET;
+        const icon_w = self.bitmap.measureText(icon, .Material50);
+        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 12 - 30;
+        const icon_y: i32 = cy - 12 + 30;
+        self.drawText(icon_x, icon_y, icon, .Material50, true);
 
-        // Draw white title text
-        const title_x: i32 = display_config.SLEEP_TEXT_TITLE_X;
-        const title_y: i32 = display_config.SLEEP_TEXT_TITLE_Y;
-        self.drawText(title_x, title_y, "SysInk", .Ubuntu34, true);
+        // Title centered on the right side
+        const title = "SysInk";
+        const title_w = self.bitmap.measureText(title, .Ubuntu34);
+        const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
+        const title_y: i32 = cy - 4;
+        self.drawText(title_x, title_y, title, .Ubuntu34, true);
 
-        // Draw white "Sleeping..." text
-        const sub_x: i32 = display_config.SLEEP_TEXT_SUB_X;
-        const sub_y: i32 = display_config.SLEEP_TEXT_SUB_Y;
-        self.drawText(sub_x, sub_y, "Sleeping...", .Ubuntu14, true);
+        // Subtitle centered on the right side
+        const subtitle = "Sleeping...";
+        const sub_x: i32 = title_x;
+        const sub_y: i32 = cy + 18;
+        self.drawText(sub_x, sub_y, subtitle, .Ubuntu14, true);
 
         // Convert and display
         self.convertTo1Bit(self.epd_buffer);
