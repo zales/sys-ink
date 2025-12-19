@@ -1,5 +1,20 @@
 const std = @import("std");
 
+// C interop for network functions
+const c = @cImport({
+    @cInclude("ifaddrs.h");
+    @cInclude("sys/socket.h");
+    @cInclude("netinet/in.h");
+    @cInclude("arpa/inet.h");
+});
+
+// Architecture-aware O_NONBLOCK constant
+const O_NONBLOCK: u32 = if (@import("builtin").target.cpu.arch == .aarch64 or
+    @import("builtin").target.cpu.arch == .arm)
+    0x800 // ARM/ARM64
+else
+    0x4000; // x86/x86_64
+
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
     allocator: std.mem.Allocator,
@@ -8,15 +23,17 @@ pub const NetworkOps = struct {
         return .{ .allocator = allocator };
     }
 
+    pub fn deinit(_: *NetworkOps) void {
+        // No resources to free - allocator is borrowed, not owned
+    }
+
     /// Check internet connection with a 1s bounded TCP connect (non-blocking)
     pub fn checkInternetConnection(_: *NetworkOps) bool {
         const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP) catch return false;
         defer std.posix.close(fd);
 
         // Make socket non-blocking using linux syscall interface
-        // O_NONBLOCK value for aarch64/arm is 0x800 (2048)
         const linux = std.os.linux;
-        const O_NONBLOCK: u32 = 0x800;
         const flags = linux.fcntl(@intCast(fd), linux.F.GETFL, 0);
         if (@as(isize, @bitCast(flags)) < 0) return false;
         const set_result = linux.fcntl(@intCast(fd), linux.F.SETFL, flags | O_NONBLOCK);
@@ -78,14 +95,6 @@ pub const NetworkOps = struct {
 
     /// Get IP address for the specified interface
     pub fn getIpAddress(self: *NetworkOps, interface: []const u8) !?[]u8 {
-        // Use getifaddrs via C interop
-        const c = @cImport({
-            @cInclude("ifaddrs.h");
-            @cInclude("sys/socket.h");
-            @cInclude("netinet/in.h");
-            @cInclude("arpa/inet.h");
-        });
-
         var ifap: ?*c.ifaddrs = null;
         if (c.getifaddrs(&ifap) != 0) {
             return error.GetifaddrsFailed;
@@ -125,13 +134,6 @@ pub const NetworkOps = struct {
             return ip;
         }
         // Finally try any interface except lo
-        const c = @cImport({
-            @cInclude("ifaddrs.h");
-            @cInclude("sys/socket.h");
-            @cInclude("netinet/in.h");
-            @cInclude("arpa/inet.h");
-        });
-
         var ifap: ?*c.ifaddrs = null;
         if (c.getifaddrs(&ifap) != 0) {
             return error.GetifaddrsFailed;
@@ -164,16 +166,16 @@ pub const NetworkOps = struct {
 
 /// Traffic monitor for tracking network traffic
 pub const TrafficMonitor = struct {
-    allocator: std.mem.Allocator,
     last_rx_bytes: ?u64 = null,
     last_tx_bytes: ?u64 = null,
     last_time: ?i64 = null,
-    mutex: std.Thread.Mutex = .{},
 
-    pub fn init(allocator: std.mem.Allocator) TrafficMonitor {
-        return .{
-            .allocator = allocator,
-        };
+    pub fn init(_: std.mem.Allocator) TrafficMonitor {
+        return .{};
+    }
+
+    pub fn deinit(_: *TrafficMonitor) void {
+        // No resources to free
     }
 
     const TrafficResult = struct {
@@ -185,9 +187,6 @@ pub const TrafficMonitor = struct {
 
     /// Get current network traffic using cached measurements
     pub fn getCurrentTraffic(self: *TrafficMonitor) !TrafficResult {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
         const file = try std.fs.openFileAbsolute("/proc/net/dev", .{});
         defer file.close();
 

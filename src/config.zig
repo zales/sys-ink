@@ -2,40 +2,16 @@ const std = @import("std");
 
 /// Application configuration loaded from environment variables
 pub const Config = struct {
-    /// Display update timeout in seconds
-    pub var display_update_timeout: u32 = 30;
-
-    /// Cache TTL for internet connection check (seconds)
-    pub var cache_ttl_internet: u32 = 30;
-
-    /// Cache TTL for signal strength (seconds)
-    pub var cache_ttl_signal: u32 = 60;
-
-    /// Cache TTL for IP address (seconds)
-    pub var cache_ttl_ip: u32 = 3600;
-
-    /// CPU load high threshold (%)
-    pub var threshold_cpu_high: u8 = 70;
-
-    /// CPU load critical threshold (%)
+    /// CPU load critical threshold (%) - values above this are highlighted
     pub var threshold_cpu_critical: u8 = 90;
 
-    /// Temperature high threshold (°C)
-    pub var threshold_temp_high: u8 = 70;
-
-    /// Temperature critical threshold (°C)
+    /// Temperature critical threshold (°C) - values above this are highlighted
     pub var threshold_temp_critical: u8 = 85;
 
-    /// Memory high threshold (%)
-    pub var threshold_mem_high: u8 = 80;
-
-    /// Memory critical threshold (%)
+    /// Memory critical threshold (%) - values above this are highlighted
     pub var threshold_mem_critical: u8 = 95;
 
-    /// Disk usage high threshold (%)
-    pub var threshold_disk_high: u8 = 85;
-
-    /// Disk usage critical threshold (%)
+    /// Disk usage critical threshold (%) - values above this are highlighted
     pub var threshold_disk_critical: u8 = 95;
 
     /// Log level
@@ -82,48 +58,17 @@ pub const Config = struct {
         if (std.posix.getenv("INTERVAL_SLOW")) |val| {
             interval_slow = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_slow);
         }
-        if (std.posix.getenv("DISPLAY_UPDATE_TIMEOUT")) |val| {
-            display_update_timeout = std.fmt.parseInt(u32, val, 10) catch display_update_timeout;
-        }
-
-        if (std.posix.getenv("DISPLAY_CACHE_TTL_INTERNET")) |val| {
-            cache_ttl_internet = std.fmt.parseInt(u32, val, 10) catch cache_ttl_internet;
-        }
-
-        if (std.posix.getenv("DISPLAY_CACHE_TTL_SIGNAL")) |val| {
-            cache_ttl_signal = std.fmt.parseInt(u32, val, 10) catch cache_ttl_signal;
-        }
-
-        if (std.posix.getenv("DISPLAY_CACHE_TTL_IP")) |val| {
-            cache_ttl_ip = std.fmt.parseInt(u32, val, 10) catch cache_ttl_ip;
-        }
-
-        if (std.posix.getenv("THRESHOLD_CPU_HIGH")) |val| {
-            threshold_cpu_high = std.fmt.parseInt(u8, val, 10) catch threshold_cpu_high;
-        }
 
         if (std.posix.getenv("THRESHOLD_CPU_CRITICAL")) |val| {
             threshold_cpu_critical = std.fmt.parseInt(u8, val, 10) catch threshold_cpu_critical;
-        }
-
-        if (std.posix.getenv("THRESHOLD_TEMP_HIGH")) |val| {
-            threshold_temp_high = std.fmt.parseInt(u8, val, 10) catch threshold_temp_high;
         }
 
         if (std.posix.getenv("THRESHOLD_TEMP_CRITICAL")) |val| {
             threshold_temp_critical = std.fmt.parseInt(u8, val, 10) catch threshold_temp_critical;
         }
 
-        if (std.posix.getenv("THRESHOLD_MEM_HIGH")) |val| {
-            threshold_mem_high = std.fmt.parseInt(u8, val, 10) catch threshold_mem_high;
-        }
-
         if (std.posix.getenv("THRESHOLD_MEM_CRITICAL")) |val| {
             threshold_mem_critical = std.fmt.parseInt(u8, val, 10) catch threshold_mem_critical;
-        }
-
-        if (std.posix.getenv("THRESHOLD_DISK_HIGH")) |val| {
-            threshold_disk_high = std.fmt.parseInt(u8, val, 10) catch threshold_disk_high;
         }
 
         if (std.posix.getenv("THRESHOLD_DISK_CRITICAL")) |val| {

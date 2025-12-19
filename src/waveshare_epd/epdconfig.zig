@@ -106,7 +106,8 @@ pub const EpdConfig = struct {
     pub fn digitalWrite(self: *EpdConfig, pin: u32, value: u8) !void {
         if (@import("builtin").target.os.tag != .linux) return;
 
-        // CS_PIN is controlled by SPI hardware, ignore manual control
+        // CS_PIN (Chip Select) is automatically controlled by SPI hardware driver
+        // when using /dev/spidev. Manual GPIO control would interfere with SPI timing.
         if (pin == CS_PIN) return;
 
         const handle = switch (pin) {

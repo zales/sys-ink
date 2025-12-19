@@ -6,8 +6,8 @@ const TrafficMonitor = @import("network_ops.zig").TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
 
-// Global state
-var should_exit = false;
+// Global state - atomic for signal handler thread-safety
+var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var g_sys_ops: ?*SystemOps = null;
 var g_net_ops: ?*NetworkOps = null;
 var g_traffic_mon: ?*TrafficMonitor = null;
@@ -15,7 +15,7 @@ var g_renderer: ?*DisplayRenderer = null;
 var g_full_refresh_counter: u32 = 0; // Counter for periodic full refresh
 
 fn signalHandler(_: c_int) callconv(.c) void {
-    should_exit = true;
+    should_exit.store(true, .release);
 }
 
 pub fn main() !u8 {
@@ -112,7 +112,7 @@ pub fn main() !u8 {
     scheduler.runAll();
 
     // Main event loop
-    while (!should_exit) {
+    while (!should_exit.load(.acquire)) {
         scheduler.runPending();
 
         // Sleep until next task or max 1 second
@@ -137,8 +137,14 @@ pub fn main() !u8 {
 fn updateCpu() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
-    const load = g_sys_ops.?.getCpuLoad() catch 0;
-    const temp = g_sys_ops.?.getCpuTemperature() catch 0;
+    const load = g_sys_ops.?.getCpuLoad() catch |err| {
+        std.log.warn("getCpuLoad failed: {}", .{err});
+        return;
+    };
+    const temp = g_sys_ops.?.getCpuTemperature() catch |err| {
+        std.log.warn("getCpuTemperature failed: {}", .{err});
+        return;
+    };
 
     g_renderer.?.renderCpuLoad(load, temp);
     std.log.debug("CPU: {}% / {}°C", .{ load, temp });
@@ -147,7 +153,10 @@ fn updateCpu() void {
 fn updateMemory() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
-    const mem = g_sys_ops.?.getMemory() catch 0;
+    const mem = g_sys_ops.?.getMemory() catch |err| {
+        std.log.warn("getMemory failed: {}", .{err});
+        return;
+    };
     g_renderer.?.renderMemory(mem);
     std.log.debug("Memory: {}%", .{mem});
 }
@@ -155,8 +164,14 @@ fn updateMemory() void {
 fn updateNvme() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
-    const usage = g_sys_ops.?.getNvmeUsage() catch 0;
-    const temp = g_sys_ops.?.getNvmeTemp() catch 0;
+    const usage = g_sys_ops.?.getNvmeUsage() catch |err| {
+        std.log.warn("getNvmeUsage failed: {}", .{err});
+        return;
+    };
+    const temp = g_sys_ops.?.getNvmeTemp() catch |err| {
+        std.log.warn("getNvmeTemp failed: {}", .{err});
+        return;
+    };
 
     g_renderer.?.renderNvmeStats(usage, temp);
     std.log.debug("NVMe: {}% / {}°C", .{ usage, temp });
@@ -165,7 +180,10 @@ fn updateNvme() void {
 fn updateFan() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
-    const rpm = g_sys_ops.?.getFanSpeed() catch 0;
+    const rpm = g_sys_ops.?.getFanSpeed() catch |err| {
+        std.log.warn("getFanSpeed failed: {}", .{err});
+        return;
+    };
     g_renderer.?.renderFanSpeed(rpm);
     std.log.debug("Fan: {} RPM", .{rpm});
 }
@@ -204,13 +222,18 @@ fn updateUptime() void {
     if (g_sys_ops.?.getUptime()) |uptime| {
         g_renderer.?.renderUptime(uptime.days, uptime.hours, uptime.minutes);
         std.log.debug("Uptime: {}d {}h {}m", .{ uptime.days, uptime.hours, uptime.minutes });
-    } else |_| {}
+    } else |err| {
+        std.log.warn("getUptime failed: {}", .{err});
+    }
 }
 
 fn updateTraffic() void {
     if (g_traffic_mon == null or g_renderer == null) return;
 
-    const traffic = g_traffic_mon.?.getCurrentTraffic() catch return;
+    const traffic = g_traffic_mon.?.getCurrentTraffic() catch |err| {
+        std.log.warn("getCurrentTraffic failed: {}", .{err});
+        return;
+    };
     std.log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
         traffic.download_speed,
         traffic.download_unit,
@@ -239,22 +262,6 @@ fn updateDisplayPartial() void {
 
     g_renderer.?.updateDisplay(use_partial) catch |err| {
         std.log.warn("Failed to update display: {}", .{err});
-    };
-}
-
-fn updateDisplayFull() void {
-    if (g_renderer == null) return;
-
-    g_renderer.?.updateDisplay(false) catch |err| {
-        std.log.warn("Failed to update display: {}", .{err});
-    };
-}
-
-fn exportBmp() void {
-    if (g_renderer == null) return;
-
-    g_renderer.?.exportBmp() catch |err| {
-        std.log.warn("Failed to export BMP: {}", .{err});
     };
 }
 

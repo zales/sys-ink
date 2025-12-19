@@ -50,7 +50,7 @@ pub const Scheduler = struct {
 
         for (self.tasks.items) |*task| {
             const elapsed: i64 = now - task.last_run;
-            if (elapsed >= task.interval_seconds) {
+            if (elapsed >= @as(i64, @intCast(task.interval_seconds))) {
                 task.func();
                 task.last_run = now;
             }
