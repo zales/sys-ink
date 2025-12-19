@@ -8,15 +8,43 @@ pub const NetworkOps = struct {
         return .{ .allocator = allocator };
     }
 
-    /// Check internet connection via DNS query to 8.8.8.8:53 with timeout
+    /// Check internet connection with a 1s bounded TCP connect (non-blocking)
     pub fn checkInternetConnection(_: *NetworkOps) bool {
-        const addr = std.net.Address.parseIp4("8.8.8.8", 53) catch return false;
+        const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP) catch return false;
+        defer std.posix.close(fd);
 
-        // Fast connection check with timeout handled by OS
-        const stream = std.net.tcpConnectToAddress(addr) catch return false;
-        stream.close();
+        // Make socket non-blocking using linux syscall interface
+        // O_NONBLOCK value for aarch64/arm is 0x800 (2048)
+        const linux = std.os.linux;
+        const O_NONBLOCK: u32 = 0x800;
+        const flags = linux.fcntl(@intCast(fd), linux.F.GETFL, 0);
+        if (@as(isize, @bitCast(flags)) < 0) return false;
+        const set_result = linux.fcntl(@intCast(fd), linux.F.SETFL, flags | O_NONBLOCK);
+        if (@as(isize, @bitCast(set_result)) < 0) return false;
 
-        return true;
+        // sockaddr_in for 8.8.8.8:53
+        const ip_num: u32 = (@as(u32, 8) << 24) | (@as(u32, 8) << 16) | (@as(u32, 8) << 8) | 8;
+        var addr = linux.sockaddr.in{
+            .family = linux.AF.INET,
+            .port = std.mem.nativeToBig(u16, 53),
+            .addr = std.mem.nativeToBig(u32, ip_num),
+        };
+
+        _ = std.posix.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) catch |err| switch (err) {
+            error.WouldBlock => {},
+            else => return false,
+        };
+
+        // Non-blocking connect always goes through poll (even if it succeeds immediately on some systems)
+
+        var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+        const ready = std.posix.poll(&fds, 1_000) catch return false; // 1s timeout
+        if (ready <= 0) return false;
+        if ((fds[0].revents & std.posix.POLL.OUT) == 0) return false;
+
+        var so_error: c_int = 0;
+        _ = std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error)) catch return false;
+        return so_error == 0;
     }
 
     /// Get WiFi signal strength from /proc/net/wireless
@@ -226,8 +254,9 @@ pub const TrafficMonitor = struct {
             };
         }
 
-        const rx_diff = total_rx - self.last_rx_bytes.?;
-        const tx_diff = total_tx - self.last_tx_bytes.?;
+        // Use saturating subtraction to handle counter resets (reboot, overflow)
+        const rx_diff = total_rx -| self.last_rx_bytes.?;
+        const tx_diff = total_tx -| self.last_tx_bytes.?;
 
         self.last_rx_bytes = total_rx;
         self.last_tx_bytes = total_tx;

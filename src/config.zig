@@ -77,10 +77,10 @@ pub const Config = struct {
             bmp_export_path = val;
         }
         if (std.posix.getenv("INTERVAL_FAST")) |val| {
-            interval_fast = std.fmt.parseInt(u32, val, 10) catch interval_fast;
+            interval_fast = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_fast);
         }
         if (std.posix.getenv("INTERVAL_SLOW")) |val| {
-            interval_slow = std.fmt.parseInt(u32, val, 10) catch interval_slow;
+            interval_slow = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_slow);
         }
         if (std.posix.getenv("DISPLAY_UPDATE_TIMEOUT")) |val| {
             display_update_timeout = std.fmt.parseInt(u32, val, 10) catch display_update_timeout;

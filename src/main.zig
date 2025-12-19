@@ -46,6 +46,7 @@ pub fn main() !u8 {
 
     // Initialize modules
     var sys_ops = SystemOps.init(allocator);
+    defer sys_ops.deinit();
     var net_ops = NetworkOps.init(allocator);
     var traffic_mon = TrafficMonitor.init(allocator);
 

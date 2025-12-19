@@ -160,14 +160,11 @@ pub const Bitmap = struct {
         };
     }
 
+    /// @deprecated Use drawTextFont instead
     pub fn drawText(self: *Bitmap, x: i32, y: i32, text: []const u8, color: Color, scale: u32) void {
-        _ = self;
-        _ = x;
-        _ = y;
-        _ = text;
-        _ = color;
+        // Forward to new API
         _ = scale;
-        // Deprecated, use drawTextFont
+        self.drawTextFont(x, y, text, .Ubuntu14, color);
     }
 
     // New API for text drawing

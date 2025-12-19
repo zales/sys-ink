@@ -126,8 +126,6 @@ pub const DisplayRenderer = struct {
         self.drawText(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, false);
 
         self.grid_cached = true;
-
-        self.grid_cached = true;
     }
 
     fn drawText(self: *DisplayRenderer, x: i32, y: i32, text: []const u8, font: FontType, inverted: bool) void {

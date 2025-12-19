@@ -4,6 +4,7 @@ const EpdConfig = @import("epdconfig.zig").EpdConfig;
 // Display resolution - Portrait (hardware orientation)
 pub const EPD_WIDTH = 128;
 pub const EPD_HEIGHT = 296;
+pub const EPD_BUFFER_SIZE = (EPD_WIDTH / 8) * EPD_HEIGHT; // 4736 bytes
 
 // Partial update LUT for V2 (159 bytes) - from C reference
 const WF_PARTIAL_2IN9 = [_]u8{
@@ -228,12 +229,12 @@ pub const EPD = struct {
     /// Clear screen - from C reference EPD_2IN9_V2_Clear
     pub fn clear(self: *EPD, color: u8) !void {
         try self.sendCommand(WRITE_RAM); // black/white
-        for (0..4736) |_| {
+        for (0..EPD_BUFFER_SIZE) |_| {
             try self.sendData(color);
         }
 
         try self.sendCommand(WRITE_RAM_BASE); // base
-        for (0..4736) |_| {
+        for (0..EPD_BUFFER_SIZE) |_| {
             try self.sendData(color);
         }
 
@@ -243,7 +244,7 @@ pub const EPD = struct {
     /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
     pub fn display(self: *EPD, image: []const u8) !void {
         try self.sendCommand(WRITE_RAM);
-        for (0..4736) |i| {
+        for (0..EPD_BUFFER_SIZE) |i| {
             try self.sendData(image[i]);
         }
         try self.turnOnDisplay();
@@ -252,12 +253,12 @@ pub const EPD = struct {
     /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
     pub fn displayBase(self: *EPD, image: []const u8) !void {
         try self.sendCommand(WRITE_RAM); // Write to black RAM
-        for (0..4736) |i| {
+        for (0..EPD_BUFFER_SIZE) |i| {
             try self.sendData(image[i]);
         }
 
         try self.sendCommand(WRITE_RAM_BASE); // Write to base RAM
-        for (0..4736) |i| {
+        for (0..EPD_BUFFER_SIZE) |i| {
             try self.sendData(image[i]);
         }
 
@@ -297,7 +298,7 @@ pub const EPD = struct {
 
         // Write to RAM (only 0x24, NOT 0x26!)
         try self.sendCommand(WRITE_RAM);
-        for (0..4736) |i| {
+        for (0..EPD_BUFFER_SIZE) |i| {
             try self.sendData(image[i]);
         }
 

@@ -26,6 +26,15 @@ pub const SystemOps = struct {
         };
     }
 
+    pub fn deinit(self: *SystemOps) void {
+        // Free cached NVMe temp path if allocated
+        if (self.cached_nvme_temp_path) |path| {
+            self.allocator.free(path);
+            self.cached_nvme_temp_path = null;
+        }
+        // cached_cpu_temp_path points to static string, no need to free
+    }
+
     /// Get CPU temperature in Celsius from thermal zone
     pub fn getCpuTemperature(self: *SystemOps) !u32 {
         // Use cached path if available
@@ -288,10 +297,10 @@ pub const SystemOps = struct {
     pub fn checkUpdates(self: *SystemOps, is_root: bool, has_internet: bool) u32 {
         // If running as root and internet is available, refresh package lists
         if (is_root and has_internet) {
-            // We ignore the output of apt update, just run it
+            // Run update with a timeout to avoid blocking the scheduler for long periods
             _ = std.process.Child.run(.{
                 .allocator = self.allocator,
-                .argv = &[_][]const u8{ "/usr/bin/apt", "update" },
+                .argv = &[_][]const u8{ "/usr/bin/timeout", "15", "/usr/bin/apt", "update" },
                 .max_output_bytes = 5 * 1024 * 1024,
             }) catch |err| {
                 std.log.warn("Failed to run apt update: {}", .{err});
@@ -302,7 +311,7 @@ pub const SystemOps = struct {
         // This works for non-root users too (using cached lists)
         const result = std.process.Child.run(.{
             .allocator = self.allocator,
-            .argv = &[_][]const u8{ "/usr/bin/apt", "list", "--upgradable" },
+            .argv = &[_][]const u8{ "/usr/bin/timeout", "10", "/usr/bin/apt", "list", "--upgradable" },
             .max_output_bytes = 1024 * 1024, // 1MB should be enough
         }) catch |err| {
             std.log.warn("Failed to check APT updates: {}", .{err});
@@ -311,8 +320,14 @@ pub const SystemOps = struct {
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        if (result.term.Exited != 0) {
-            return 0;
+        switch (result.term) {
+            .Exited => |code| {
+                if (code != 0) return 0;
+            },
+            .Signal, .Stopped, .Unknown => {
+                std.log.warn("APT check terminated unexpectedly", .{});
+                return 0;
+            },
         }
 
         // Count lines (excluding header "Listing...")

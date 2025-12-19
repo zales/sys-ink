@@ -13,10 +13,12 @@ pub const Scheduler = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) Scheduler {
-        return .{
-            .tasks = .{},
+        var scheduler = Scheduler{
+            .tasks = undefined,
             .allocator = allocator,
         };
+        scheduler.tasks = .{};
+        return scheduler;
     }
 
     pub fn deinit(self: *Scheduler) void {
