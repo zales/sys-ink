@@ -64,8 +64,8 @@ pub const DisplayRenderer = struct {
         const display_w: i32 = display_config.DISPLAY_WIDTH;
 
         // Draw vertical divider lines
-        self.bitmap.drawLine(v_line1, 10, v_line1, h_line_main, .Black);
-        self.bitmap.drawLine(v_line2, 10, v_line2, h_line_main, .Black);
+        self.bitmap.drawLine(v_line1, display_config.CPU_LINE_Y, v_line1, h_line_main, .Black);
+        self.bitmap.drawLine(v_line2, display_config.CPU_LINE_Y, v_line2, h_line_main, .Black);
 
         // Draw main horizontal divider
         self.bitmap.drawLine(0, h_line_main, display_w, h_line_main, .Black);
