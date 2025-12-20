@@ -73,16 +73,33 @@ The resulting binary will be located at `zig-out/bin/sys-ink`.
 
 ## Installation
 
-### Option A: Debian Package (Recommended)
+### Option A: APT Repository (Recommended)
 
-1. **Download the `.deb` package** for your architecture (`arm64` for Pi 3/4/5, `armhf` for Pi Zero/2) from the [Releases](https://github.com/yourusername/sys-ink/releases) page.
+The easiest way to install and keep SysInk updated is using our APT repository.
+
+1. **Add the repository**:
+   ```bash
+   echo "deb [trusted=yes] https://zales.github.io/sys-ink/ ./" | sudo tee /etc/apt/sources.list.d/sys-ink.list
+   ```
+
+2. **Update and Install**:
+   ```bash
+   sudo apt update
+   sudo apt install sys-ink
+   ```
+
+   The service will start automatically after installation.
+
+### Option B: Debian Package (.deb)
+
+1. **Download the `.deb` package** for your architecture (`arm64` for Pi 3/4/5, `armhf` for Pi Zero/2) from the [Releases](https://github.com/zales/sys-ink/releases) page.
 2. **Install**:
    ```bash
    sudo dpkg -i sys-ink_*.deb
    ```
    The service will start automatically.
 
-### Option B: Manual Binary Installation
+### Option C: Manual Binary Installation
 
 1. **Download the binary** (`sys-ink-aarch64` or `sys-ink-armhf`) from the Releases page.
 2. **Transfer to Raspberry Pi**:

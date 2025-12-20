@@ -114,6 +114,9 @@ jobs:
           sudo apt-get install -y dpkg-dev
           
           cd public
+          # Disable Jekyll processing
+          touch .nojekyll
+          
           # Generate Packages and Packages.gz
           dpkg-scanpackages -m . /dev/null > Packages
           gzip -k -f Packages
