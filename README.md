@@ -10,11 +10,50 @@ A high-performance, lightweight system monitor for Raspberry Pi with Waveshare e
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.
 - **Standalone**: Statically linked binary, no external runtime dependencies (libc-free/musl).
 
+## Screenshots
+
+| Main Screen | Loading Screen |
+|:-----------:|:--------------:|
+| ![Main](assets/sys-ink_base.png) | ![Loading](assets/sys-ink_loading.png) |
+
+| Sleep Screen | Threshold Alert |
+|:------------:|:---------------:|
+| ![Sleep](assets/sys-ink_sleeping.png) | ![Threshold](assets/sys-ink_trashold.png) |
+
 ## Hardware Requirements
 
-- Raspberry Pi (tested on Pi 4/5)
-- Waveshare 2.9inch e-Paper Module (B/W)
-- Enabled SPI and GPIO interfaces
+- **Raspberry Pi**: Tested on Pi 4 and Pi 5 (should work on others with GPIO header).
+- **Display**: [Waveshare 2.9inch e-Paper Module (B/W) V2](https://www.waveshare.com/wiki/2.9inch_e-Paper_Module).
+  - *Note: This project is specifically tuned for the V2 version of the display.*
+- **Connections**: SPI interface and GPIO pins (RST, DC, BUSY, PWR).
+
+## Development
+
+You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_64 Linux) by using the BMP export feature. This allows you to visualize what would be sent to the display without the actual hardware.
+
+1. **Build the project**:
+   ```bash
+   zig build
+   ```
+
+2. **Run with BMP export enabled**:
+   ```bash
+   EXPORT_BMP=true BMP_EXPORT_PATH=/tmp/display.bmp ./zig-out/bin/sys-ink
+   ```
+
+3. **View the output**:
+   Open `/tmp/display.bmp` in an image viewer. It will update whenever the display would update.
+
+## Project Structure
+
+- `src/main.zig`: Entry point, signal handling, and main event loop.
+- `src/scheduler.zig`: Task scheduler for periodic updates.
+- `src/display_renderer.zig`: High-level rendering logic (drawing text, icons, graphs).
+- `src/display_config.zig`: Layout constants and configuration.
+- `src/system_ops.zig`: System metrics collection (CPU, RAM, Disk, etc.).
+- `src/network_ops.zig`: Network status and traffic monitoring.
+- `src/waveshare_epd/`: Low-level driver for the e-Paper display.
+- `src/graphics.zig`: Bitmap drawing primitives.
 
 ## Build Instructions
 
@@ -97,6 +136,21 @@ The application is configured via environment variables. You can set these in th
 | `THRESHOLD_DISK_CRITICAL` | `95` | Disk usage critical threshold (%) |
 | `EXPORT_BMP` | `false` | Enable BMP export for web debugging |
 | `BMP_EXPORT_PATH` | `/tmp/sys-ink.bmp` | Path for exported BMP |
+
+## Troubleshooting
+
+### "Failed to initialize display"
+- Ensure SPI is enabled (`sudo raspi-config` -> Interface Options -> SPI).
+- Check wiring connections.
+- Verify the user has permissions to access `/dev/spidev0.0` and `/dev/gpiochip*`.
+  - Add user to groups: `sudo usermod -a -G spi,gpio <username>`
+
+### Display not updating or showing garbage
+- Ensure you have the **V2** version of the Waveshare 2.9" display. V1 uses different LUTs and commands.
+- Check if the display is correctly seated in the HAT or if wires are loose.
+
+### "Memory leak detected on exit!"
+- This is a warning from the Zig GeneralPurposeAllocator in debug/release-safe modes. It usually indicates a clean shutdown didn't happen (e.g., `kill -9`). Use `Ctrl+C` or `SIGINT` for a graceful shutdown.
 
 ## License
 
