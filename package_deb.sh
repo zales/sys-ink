@@ -87,6 +87,11 @@ THRESHOLD_DISK_CRITICAL=95
 LOG_LEVEL=INFO
 EOF
 
+# 5.6 Create conffiles to prevent overwriting config
+cat > "$PKG_DIR/DEBIAN/conffiles" <<EOF
+/etc/default/$APP_NAME
+EOF
+
 # 6. Create postinst script
 cat > "$PKG_DIR/DEBIAN/postinst" <<EOF
 #!/bin/sh

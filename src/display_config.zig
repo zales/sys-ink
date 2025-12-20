@@ -155,7 +155,7 @@ pub const ICON_WIFI_SIGNAL = "\u{e63e}";
 pub const ICON_WIFI_NO_SIGNAL = "\u{e1da}";
 
 // Sleep/Loading screen constants
-pub const SLEEP_LINE_X = 116;
+pub const SLEEP_LINE_X = 124;
 pub const SLEEP_LINE_Y = 15;
 pub const SLEEP_LINE_W = 3;
 pub const SLEEP_LINE_H = 95;
