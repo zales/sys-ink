@@ -1,6 +1,6 @@
 # SysInk
 
-A high-performance, lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, written in Zig.
+A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, written in Zig.
 
 ## Features
 
@@ -59,7 +59,7 @@ You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_6
 
 ### Prerequisites
 
-- [Zig Compiler](https://ziglang.org/download/) (latest master or 0.12+)
+- [Zig Compiler](https://ziglang.org/download/) (0.15+)
 
 ### Building for Raspberry Pi (AArch64)
 
