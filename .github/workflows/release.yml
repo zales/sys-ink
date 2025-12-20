@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -50,6 +52,22 @@ jobs:
       - name: Rename Binary
         run: mv zig-out/bin/sys-ink ${{ matrix.asset_name }}
 
+      - name: Generate Changelog
+        run: |
+          # Get previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          echo "Generating changelog from ${PREVIOUS_TAG} to HEAD"
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            git log --pretty=format:"- %s (%h)" > changelog.txt
+          else
+            git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" > changelog.txt
+          fi
+          
+          # Add a header
+          sed -i '1iChanges in this release:\n' changelog.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -57,6 +75,7 @@ jobs:
             ${{ matrix.asset_name }}
             *.deb
           name: Release ${{ github.ref_name }}
+          body_path: changelog.txt
           draft: false
           prerelease: false
         env:
