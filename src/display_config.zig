@@ -49,10 +49,10 @@ pub const NVME_LINE_Y = 7;
 pub const NVME_ICON_X = 103;
 pub const NVME_ICON_Y_DISK = 37;
 pub const NVME_ICON_Y_TEMP = 66;
-pub const NVME_VALUE_X = 139;
+pub const NVME_VALUE_X = 132;
 pub const NVME_VALUE_Y_DISK = 35;
 pub const NVME_VALUE_Y_TEMP = 64;
-pub const NVME_AREA_X = 137;
+pub const NVME_AREA_X = 130;
 pub const NVME_AREA_Y_DISK = 13;
 pub const NVME_AREA_Y_TEMP = 42;
 
@@ -106,28 +106,28 @@ pub const TRAFFIC_UP_UNIT_Y = 45;
 pub const TRAFFIC_UP_UNIT_AREA_Y = 34; // UNIT_Y(45) - ascent(11) = 34
 
 // Bottom bar coordinates
-pub const IP_ICON_X = 5;
+pub const IP_ICON_X = 0;
 pub const IP_ICON_Y = 127;
-pub const IP_VALUE_X = 20;
+pub const IP_VALUE_X = 15;
 pub const IP_VALUE_Y = 125;
-pub const IP_AREA_Y = 115; // VALUE_Y(125) - ascent(11) + 1 = 115
+pub const IP_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
 pub const SIGNAL_ICON_X = 125;
 pub const SIGNAL_ICON_Y = 127;
 pub const SIGNAL_VALUE_X = 140;
 pub const SIGNAL_VALUE_Y = 125;
-pub const SIGNAL_AREA_Y = 115; // VALUE_Y(125) - ascent(11) + 1 = 115
+pub const SIGNAL_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
 pub const UPTIME_ICON_X = 205;
 pub const UPTIME_ICON_Y = 127;
 pub const UPTIME_VALUE_X = 220;
 pub const UPTIME_VALUE_Y = 125;
-pub const UPTIME_AREA_Y = 115; // VALUE_Y(125) - ascent(11) + 1 = 115
+pub const UPTIME_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
 // Text area sizes for clearing (width x height)
 pub const TEXT_AREA_CPU = .{ .width = 66, .height = 27 };
 pub const TEXT_AREA_MEM = .{ .width = 65, .height = 25 };
-pub const TEXT_AREA_NVME = .{ .width = 60, .height = 27 };
+pub const TEXT_AREA_NVME = .{ .width = 70, .height = 27 };
 pub const TEXT_AREA_FAN = .{ .width = 60, .height = 27 };
 pub const TEXT_AREA_IP = .{ .width = 105, .height = 14 };
 pub const TEXT_AREA_UPTIME = .{ .width = 76, .height = 14 };
