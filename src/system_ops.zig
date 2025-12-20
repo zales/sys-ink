@@ -6,6 +6,8 @@ pub const SystemOps = struct {
     last_cpu_times: ?CpuTimes = null,
     cached_cpu_temp_path: ?[]const u8 = null,
     cached_disk_temp_path: ?[]const u8 = null,
+    apt_check_running: std.atomic.Value(bool),
+    apt_updates_count: std.atomic.Value(u32),
 
     const CpuTimes = struct {
         user: u64,
@@ -23,6 +25,8 @@ pub const SystemOps = struct {
             .last_cpu_times = null,
             .cached_cpu_temp_path = null,
             .cached_disk_temp_path = null,
+            .apt_check_running = std.atomic.Value(bool).init(false),
+            .apt_updates_count = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -293,41 +297,57 @@ pub const SystemOps = struct {
     }
 
     /// Check for available APT updates
-    /// Returns number of packages that can be upgraded
+    /// Check for APT updates in a background thread
+    /// Returns the last known number of available updates immediately
     pub fn checkUpdates(self: *SystemOps, is_root: bool, has_internet: bool) u32 {
-        // If running as root and internet is available, refresh package lists
-        if (is_root and has_internet) {
-            // Run update with a timeout to avoid blocking the scheduler for long periods
+        // If a check is already running, just return the last known count
+        if (self.apt_check_running.load(.monotonic)) {
+            return self.apt_updates_count.load(.monotonic);
+        }
+
+        // Start a new check in a background thread
+        self.apt_check_running.store(true, .monotonic);
+
+        const run_update = is_root and has_internet;
+        const thread = std.Thread.spawn(.{}, aptCheckThread, .{ self, run_update }) catch |err| {
+            std.log.err("Failed to spawn APT check thread: {}", .{err});
+            self.apt_check_running.store(false, .monotonic);
+            return self.apt_updates_count.load(.monotonic);
+        };
+        thread.detach();
+
+        return self.apt_updates_count.load(.monotonic);
+    }
+
+    fn aptCheckThread(self: *SystemOps, run_update: bool) void {
+        defer self.apt_check_running.store(false, .monotonic);
+
+        if (run_update) {
+            // Run update with a timeout
             _ = std.process.Child.run(.{
                 .allocator = self.allocator,
-                .argv = &[_][]const u8{ "/usr/bin/timeout", "15", "/usr/bin/apt", "update" },
+                .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
                 .max_output_bytes = 5 * 1024 * 1024,
             }) catch |err| {
                 std.log.warn("Failed to run apt update: {}", .{err});
+                // Continue to check upgradable even if update failed (might have old lists)
             };
         }
 
         // Run apt list --upgradable and count lines
-        // This works for non-root users too (using cached lists)
         const result = std.process.Child.run(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "/usr/bin/timeout", "10", "/usr/bin/apt", "list", "--upgradable" },
-            .max_output_bytes = 1024 * 1024, // 1MB should be enough
+            .max_output_bytes = 1024 * 1024,
         }) catch |err| {
             std.log.warn("Failed to check APT updates: {}", .{err});
-            return 0;
+            return;
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        switch (result.term) {
-            .Exited => |code| {
-                if (code != 0) return 0;
-            },
-            .Signal, .Stopped, .Unknown => {
-                std.log.warn("APT check terminated unexpectedly", .{});
-                return 0;
-            },
+        if (result.term != .Exited or result.term.Exited != 0) {
+            return;
         }
 
         // Count lines (excluding header "Listing...")
@@ -342,6 +362,6 @@ pub const SystemOps = struct {
         // Subtract 1 if there was content (for empty trailing line)
         if (count > 0) count -= 1;
 
-        return count;
+        self.apt_updates_count.store(count, .monotonic);
     }
 };
