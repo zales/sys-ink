@@ -115,7 +115,7 @@ jobs:
           
           cd public
           # Generate Packages and Packages.gz
-          dpkg-scanpackages . /dev/null > Packages
+          dpkg-scanpackages -m . /dev/null > Packages
           gzip -k -f Packages
           
           # Create Release file

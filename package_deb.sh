@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="sys-ink"
-VERSION="${VERSION:-1.0.4}"
+VERSION="${VERSION:-1.0.5}"
 TARGET_ARCH="${TARGET_ARCH:-amd64}" # debian architecture name: amd64, arm64, armhf
 BINARY_PATH="${BINARY_PATH:-zig-out/bin/sys-ink}"
 
