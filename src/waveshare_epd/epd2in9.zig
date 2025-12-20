@@ -195,9 +195,8 @@ pub const EPD = struct {
         try self.readBusy();
     }
 
-    /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
-    pub fn initDisplay(self: *EPD) !void {
-        try self.config.moduleInit();
+    /// Re-initialize the e-Paper register (without module init)
+    pub fn reInit(self: *EPD) !void {
         try self.reset();
         EpdConfig.delayMs(100);
 
@@ -224,6 +223,12 @@ pub const EPD = struct {
         try self.readBusy();
 
         try self.loadLutByHost(&WS_20_30);
+    }
+
+    /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
+    pub fn initDisplay(self: *EPD) !void {
+        try self.config.moduleInit();
+        try self.reInit();
     }
 
     /// Clear screen - from C reference EPD_2IN9_V2_Clear

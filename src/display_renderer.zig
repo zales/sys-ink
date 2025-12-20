@@ -56,34 +56,17 @@ pub const DisplayRenderer = struct {
     pub fn showLoading(self: *DisplayRenderer) !void {
         self.bitmap.clear(.White);
 
-        const cx: i32 = @intCast(display_config.DISPLAY_WIDTH / 2);
-        const cy: i32 = @intCast(display_config.DISPLAY_HEIGHT / 2);
-        const right_cx: i32 = cx + @as(i32, @intCast(display_config.DISPLAY_WIDTH / 4));
+        // Vertical line
+        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, .Black);
 
-        // Centered vertical line
-        const line_w: u32 = display_config.SLEEP_LINE_W;
-        const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
-        const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
-        self.bitmap.fillRect(line_x, display_config.SLEEP_LINE_Y, line_w, line_h, .Black);
+        // Icon on the left
+        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, .Black);
 
-        // Icon centered horizontally, left of center line
-        const icon = display_config.ICON_SLEEP_NET;
-        const icon_w = self.bitmap.measureText(icon, .Material50);
-        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 42;
-        const icon_y: i32 = cy + 18;
-        self.bitmap.drawTextFont(icon_x, icon_y, icon, .Material50, .Black);
-
-        // Title centered on the right side
-        const title = "SysInk";
-        const title_w = self.bitmap.measureText(title, .Ubuntu34);
-        const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
-        const title_y: i32 = cy - 4;
-        self.bitmap.drawTextFont(title_x, title_y, title, .Ubuntu34, .Black);
+        // Title on the right
+        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, .Black);
 
         // Subtitle
-        const subtitle = "Loading...";
-        const sub_y: i32 = cy + 18;
-        self.bitmap.drawTextFont(title_x, sub_y, subtitle, .Ubuntu14, .Black);
+        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, "Loading...", .Ubuntu14, .Black);
 
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.display(self.epd_buffer);
@@ -123,18 +106,18 @@ pub const DisplayRenderer = struct {
 
         // MEM section
         self.bitmap.drawTextFont(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, .Black);
-        self.bitmap.drawLine(34, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
+        self.bitmap.drawLine(38, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
         self.bitmap.drawTextFont(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, .Black);
 
-        // NVME section
-        self.bitmap.drawTextFont(display_config.NVME_LABEL_X, display_config.NVME_LABEL_Y, "nvme", .Ubuntu14, .Black);
-        self.bitmap.drawLine(140, display_config.NVME_LINE_Y, display_config.SECTION_NVME_RIGHT, display_config.NVME_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
-        self.bitmap.drawTextFont(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
+        // Disk section
+        self.bitmap.drawTextFont(display_config.DISK_LABEL_X, display_config.DISK_LABEL_Y, "disk", .Ubuntu14, .Black);
+        self.bitmap.drawLine(130, display_config.DISK_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.DISK_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
+        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
 
         // FAN section
         self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
-        self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.SECTION_NVME_RIGHT, display_config.FAN_LINE_Y, .Black);
+        self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.FAN_LINE_Y, .Black);
         self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
 
         // Traffic section
@@ -201,9 +184,9 @@ pub const DisplayRenderer = struct {
         // MEM
         self.bitmap.drawRect(display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, color);
 
-        // NVMe
-        self.bitmap.drawRect(display_config.NVME_AREA_X, display_config.NVME_AREA_Y_DISK, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, color);
-        self.bitmap.drawRect(display_config.NVME_AREA_X, display_config.NVME_AREA_Y_TEMP, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, color);
+        // Disk
+        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
+        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
 
         // FAN
         const ascent_fan = self.bitmap.getFontAscent(.Ubuntu24);
@@ -315,18 +298,18 @@ pub const DisplayRenderer = struct {
         self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
     }
 
-    /// Render NVMe stats
-    pub fn renderNvmeStats(self: *DisplayRenderer, usage: u8, temp: u32) void {
+    /// Render disk stats
+    pub fn renderDiskStats(self: *DisplayRenderer, usage: u8, temp: u32) void {
         const is_usage_critical = usage >= config.Config.threshold_disk_critical;
         const is_temp_critical = temp >= config.Config.threshold_temp_critical;
 
         var buf1: [16]u8 = undefined;
         const usage_text = std.fmt.bufPrint(&buf1, "{d}%", .{usage}) catch "?";
-        self.drawTextInArea(usage_text, .Ubuntu26, display_config.NVME_VALUE_X, display_config.NVME_VALUE_Y_DISK, display_config.NVME_AREA_X, display_config.NVME_AREA_Y_DISK, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, is_usage_critical);
+        self.drawTextInArea(usage_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_usage_critical);
 
         var buf2: [16]u8 = undefined;
         const temp_text = std.fmt.bufPrint(&buf2, "{d}C", .{temp}) catch "?";
-        self.drawTextInArea(temp_text, .Ubuntu26, display_config.NVME_VALUE_X, display_config.NVME_VALUE_Y_TEMP, display_config.NVME_AREA_X, display_config.NVME_AREA_Y_TEMP, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, is_temp_critical);
+        self.drawTextInArea(temp_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_temp_critical);
     }
 
     /// Render fan speed
@@ -420,44 +403,37 @@ pub const DisplayRenderer = struct {
 
     /// Go to sleep
     pub fn goToSleep(self: *DisplayRenderer) !void {
+        std.log.info("Rendering sleep screen...", .{});
+
+        // Re-initialize display to ensure Full LUT is loaded (needed after partial updates)
+        self.epd.reInit() catch |err| {
+            std.log.err("Failed to re-init display for sleep: {}", .{err});
+        };
+
         self.bitmap.clear(.Black);
 
-        const cx: i32 = @intCast(display_config.DISPLAY_WIDTH / 2);
-        const cy: i32 = @intCast(display_config.DISPLAY_HEIGHT / 2);
-        const right_cx: i32 = cx + @as(i32, @intCast(display_config.DISPLAY_WIDTH / 4));
+        // White vertical line
+        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, .White);
 
-        // Centered white vertical line
-        const line_w: u32 = display_config.SLEEP_LINE_W;
-        const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
-        const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
-        self.bitmap.fillRect(line_x, display_config.SLEEP_LINE_Y, line_w, line_h, .White);
+        // Icon on the left
+        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, .White);
 
-        // Icon centered horizontally, left of center line
-        const icon = display_config.ICON_SLEEP_NET;
-        const icon_w = self.bitmap.measureText(icon, .Material50);
-        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 42;
-        const icon_y: i32 = cy + 18;
-        self.bitmap.drawTextFont(icon_x, icon_y, icon, .Material50, .White);
-
-        // Title centered on the right side
-        const title = "SysInk";
-        const title_w = self.bitmap.measureText(title, .Ubuntu34);
-        const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
-        const title_y: i32 = cy - 4;
-        self.bitmap.drawTextFont(title_x, title_y, title, .Ubuntu34, .White);
+        // Title on the right
+        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, .White);
 
         // Subtitle
-        const subtitle = "Sleeping...";
-        const sub_y: i32 = cy + 18;
-        self.bitmap.drawTextFont(title_x, sub_y, subtitle, .Ubuntu14, .White);
+        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, "Sleeping...", .Ubuntu14, .White);
 
+        std.log.info("Converting to 1-bit...", .{});
         self.convertTo1Bit(self.epd_buffer);
-        try self.epd.display(self.epd_buffer);
+
+        std.log.info("Sending to EPD display with full refresh...", .{});
+        // Use displayBase to reset the display state after partial updates
+        try self.epd.displayBase(self.epd_buffer);
+        std.log.info("EPD display updated successfully", .{});
 
         self.exportBmp() catch |err| {
             std.log.err("Failed to export sleep screen BMP: {}", .{err});
         };
-
-        try self.epd.sleep();
     }
 };

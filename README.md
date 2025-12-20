@@ -4,7 +4,7 @@ A high-performance, lightweight system monitor for Raspberry Pi with Waveshare e
 
 ## Features
 
-- **Real-time Monitoring**: CPU load, temperature, memory usage, disk usage (NVMe), fan speed.
+- **Real-time Monitoring**: CPU load, temperature, memory usage, disk usage, fan speed.
 - **Network Stats**: IP address, signal strength (WiFi), upload/download speeds.
 - **System Info**: Uptime, APT updates availability, Internet connection status.
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.

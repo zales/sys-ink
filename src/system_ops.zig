@@ -5,7 +5,7 @@ pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     last_cpu_times: ?CpuTimes = null,
     cached_cpu_temp_path: ?[]const u8 = null,
-    cached_nvme_temp_path: ?[]const u8 = null,
+    cached_disk_temp_path: ?[]const u8 = null,
 
     const CpuTimes = struct {
         user: u64,
@@ -22,15 +22,15 @@ pub const SystemOps = struct {
             .allocator = allocator,
             .last_cpu_times = null,
             .cached_cpu_temp_path = null,
-            .cached_nvme_temp_path = null,
+            .cached_disk_temp_path = null,
         };
     }
 
     pub fn deinit(self: *SystemOps) void {
-        // Free cached NVMe temp path if allocated
-        if (self.cached_nvme_temp_path) |path| {
+        // Free cached disk temp path if allocated
+        if (self.cached_disk_temp_path) |path| {
             self.allocator.free(path);
-            self.cached_nvme_temp_path = null;
+            self.cached_disk_temp_path = null;
         }
         // cached_cpu_temp_path points to static string, no need to free
     }
@@ -194,8 +194,8 @@ pub const SystemOps = struct {
         return @intCast(@min(100, percent));
     }
 
-    /// Get NVMe/root filesystem usage percentage
-    pub fn getNvmeUsage(_: *SystemOps) !u8 {
+    /// Get disk/root filesystem usage percentage
+    pub fn getDiskUsage(_: *SystemOps) !u8 {
         // Manual definition of statvfs struct for aarch64/musl
         const struct_statvfs = extern struct {
             f_bsize: c_ulong,
@@ -232,10 +232,10 @@ pub const SystemOps = struct {
         return @intCast(@min(100, percent));
     }
 
-    /// Get NVMe temperature in Celsius
-    pub fn getNvmeTemp(self: *SystemOps) !u32 {
+    /// Get disk temperature in Celsius
+    pub fn getDiskTemp(self: *SystemOps) !u32 {
         // Use cached path if available
-        if (self.cached_nvme_temp_path) |path| {
+        if (self.cached_disk_temp_path) |path| {
             return self.readTempFromFile(path);
         }
 
@@ -245,7 +245,7 @@ pub const SystemOps = struct {
             var name_path_buf: [64]u8 = undefined;
             const name_path = std.fmt.bufPrint(&name_path_buf, "/sys/class/hwmon/hwmon{d}/name", .{i}) catch continue;
 
-            // Check if this is nvme sensor
+            // Check if this is disk sensor (nvme)
             const name_file = std.fs.openFileAbsolute(name_path, .{}) catch continue;
             defer name_file.close();
 
@@ -254,18 +254,18 @@ pub const SystemOps = struct {
             const name = std.mem.trim(u8, name_buf[0..name_len], &std.ascii.whitespace);
 
             if (std.mem.indexOf(u8, name, "nvme") != null) {
-                // Found nvme sensor, read temp1_input
+                // Found disk sensor, read temp1_input
                 var temp_path_buf: [64]u8 = undefined;
                 const temp_path = std.fmt.bufPrint(&temp_path_buf, "/sys/class/hwmon/hwmon{d}/temp1_input", .{i}) catch continue;
 
                 // Cache the path (need to duplicate it because buf is on stack)
-                self.cached_nvme_temp_path = try self.allocator.dupe(u8, temp_path);
+                self.cached_disk_temp_path = try self.allocator.dupe(u8, temp_path);
 
-                return self.readTempFromFile(self.cached_nvme_temp_path.?);
+                return self.readTempFromFile(self.cached_disk_temp_path.?);
             }
         }
 
-        return 0; // No NVMe sensor found
+        return 0; // No disk sensor found
     }
 
     /// Get system uptime in days, hours, and minutes

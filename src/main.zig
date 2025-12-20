@@ -97,7 +97,7 @@ pub fn main() !u8 {
     // Fast updates (CPU, RAM, etc.)
     try scheduler.every(config.Config.interval_fast, "cpu", updateCpu);
     try scheduler.every(config.Config.interval_fast, "memory", updateMemory);
-    try scheduler.every(config.Config.interval_fast, "nvme", updateNvme);
+    try scheduler.every(config.Config.interval_fast, "disk", updateDisk);
     try scheduler.every(config.Config.interval_fast, "fan", updateFan);
     try scheduler.every(config.Config.interval_fast, "traffic", updateTraffic);
     try scheduler.every(config.Config.interval_fast, "signal", updateSignal);
@@ -141,9 +141,10 @@ pub fn main() !u8 {
 
     std.log.info("Shutting down gracefully...", .{});
 
-    // Display sleep screen
     if (g_renderer) |r| {
-        r.goToSleep() catch {};
+        r.goToSleep() catch |err| {
+            std.log.err("Failed to show sleep screen: {}", .{err});
+        };
     }
 
     scheduler.clear();
@@ -179,20 +180,20 @@ fn updateMemory() void {
     std.log.debug("Memory: {}%", .{mem});
 }
 
-fn updateNvme() void {
+fn updateDisk() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
-    const usage = g_sys_ops.?.getNvmeUsage() catch |err| {
-        std.log.warn("getNvmeUsage failed: {}", .{err});
+    const usage = g_sys_ops.?.getDiskUsage() catch |err| {
+        std.log.warn("getDiskUsage failed: {}", .{err});
         return;
     };
-    const temp = g_sys_ops.?.getNvmeTemp() catch |err| {
-        std.log.warn("getNvmeTemp failed: {}", .{err});
+    const temp = g_sys_ops.?.getDiskTemp() catch |err| {
+        std.log.warn("getDiskTemp failed: {}", .{err});
         return;
     };
 
-    g_renderer.?.renderNvmeStats(usage, temp);
-    std.log.debug("NVMe: {}% / {}°C", .{ usage, temp });
+    g_renderer.?.renderDiskStats(usage, temp);
+    std.log.debug("Disk: {}% / {}°C", .{ usage, temp });
 }
 
 fn updateFan() void {
