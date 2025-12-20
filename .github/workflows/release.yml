@@ -80,3 +80,55 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.deb_arch }}
+          path: "*.deb"
+
+  deploy-repository:
+    name: Deploy APT Repository
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: Create Repository Structure
+        run: |
+          mkdir -p public
+          cp artifacts/*.deb public/
+          
+          # Install dpkg-dev for scanpackages
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+          
+          cd public
+          # Generate Packages and Packages.gz
+          dpkg-scanpackages . /dev/null > Packages
+          gzip -k -f Packages
+          
+          # Create Release file
+          echo "Label: SysInk Repo" > Release
+          echo "Suite: stable" >> Release
+          echo "Codename: stable" >> Release
+          echo "Architectures: amd64 arm64 armhf" >> Release
+          echo "Components: main" >> Release
+          echo "Description: SysInk Debian Repository" >> Release
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          force_orphan: true
