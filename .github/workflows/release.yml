@@ -121,13 +121,25 @@ jobs:
           dpkg-scanpackages -m . /dev/null > Packages
           gzip -k -f Packages
           
-          # Create Release file
-          echo "Label: SysInk Repo" > Release
-          echo "Suite: stable" >> Release
-          echo "Codename: stable" >> Release
-          echo "Architectures: amd64 arm64 armhf" >> Release
-          echo "Components: main" >> Release
-          echo "Description: SysInk Debian Repository" >> Release
+          # Generate Release file with hashes and date
+          {
+            echo "Origin: SysInk"
+            echo "Label: SysInk Repo"
+            echo "Suite: stable"
+            echo "Codename: stable"
+            echo "Architectures: amd64 arm64 armhf"
+            echo "Components: main"
+            echo "Description: SysInk Debian Repository"
+            echo "Date: $(date -R)"
+            echo "MD5Sum:"
+            for f in Packages Packages.gz; do
+              echo " $(md5sum "$f" | cut -d' ' -f1) $(wc -c "$f" | cut -d' ' -f1) $f"
+            done
+            echo "SHA256:"
+            for f in Packages Packages.gz; do
+              echo " $(sha256sum "$f" | cut -d' ' -f1) $(wc -c "$f" | cut -d' ' -f1) $f"
+            done
+          } > Release
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
