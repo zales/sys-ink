@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 // Output file
 FILE *out;
@@ -30,9 +31,10 @@ void write_header() {
 }
 
 // Helper to render a single glyph and write its data
-void render_glyph(cairo_t *cr, cairo_font_face_t *face, double size, uint32_t codepoint, const char* font_name_suffix) {
+void render_glyph(cairo_t *cr, cairo_font_face_t *face, double size, uint32_t codepoint, const char* font_name_suffix, cairo_font_options_t *font_opts) {
     cairo_set_font_face(cr, face);
     cairo_set_font_size(cr, size);
+    cairo_set_font_options(cr, font_opts);
 
     // Get extents
     cairo_text_extents_t extents;
@@ -57,14 +59,15 @@ void render_glyph(cairo_t *cr, cairo_font_face_t *face, double size, uint32_t co
     
     cairo_text_extents(cr, utf8, &extents);
 
-    int width = (int)extents.width + 2; // Add padding
-    int height = (int)extents.height + 2;
+    int width = (int)ceil(extents.width) + 2; // Add padding
+    int height = (int)ceil(extents.height) + 2;
     if (width <= 2) width = (int)extents.x_advance; // For space
     if (height <= 2) height = (int)size;
 
     // Create surface for glyph
     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_A8, width, height);
     cairo_t *g_cr = cairo_create(surface);
+    cairo_set_font_options(g_cr, font_opts);
     
     // Clear
     cairo_set_source_rgba(g_cr, 0, 0, 0, 0);
@@ -133,6 +136,11 @@ void generate_font(const char* font_path, const char* name, int* sizes, int size
     // Dummy surface for context
     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 10, 10);
     cairo_t *cr = cairo_create(surface);
+
+    cairo_font_options_t *font_opts = cairo_font_options_create();
+    cairo_font_options_set_antialias(font_opts, CAIRO_ANTIALIAS_NONE);
+    cairo_font_options_set_hint_style(font_opts, CAIRO_HINT_STYLE_FULL);
+    cairo_font_options_set_hint_metrics(font_opts, CAIRO_HINT_METRICS_ON);
     
     for (int s = 0; s < sizes_count; s++) {
         int size = sizes[s];
@@ -147,7 +155,7 @@ void generate_font(const char* font_path, const char* name, int* sizes, int size
         
         // Generate glyphs
         for (int i = 0; i < cp_count; i++) {
-            render_glyph(cr, cairo_face, size, codepoints[i], name);
+            render_glyph(cr, cairo_face, size, codepoints[i], name, font_opts);
         }
         
         // Generate map function
@@ -165,8 +173,8 @@ void generate_font(const char* font_path, const char* name, int* sizes, int size
             else { utf8[0] = 0xE0 | (cp >> 12); utf8[1] = 0x80 | ((cp >> 6) & 0x3F); utf8[2] = 0x80 | (cp & 0x3F); utf8[3] = 0; }
             
             cairo_text_extents(cr, utf8, &extents);
-            int width = (int)extents.width + 2;
-            int height = (int)extents.height + 2;
+            int width = (int)ceil(extents.width) + 2;
+            int height = (int)ceil(extents.height) + 2;
             if (width <= 2) width = (int)extents.x_advance;
             if (height <= 2) height = (int)size;
             
@@ -180,6 +188,7 @@ void generate_font(const char* font_path, const char* name, int* sizes, int size
     }
     
     cairo_destroy(cr);
+    cairo_font_options_destroy(font_opts);
     cairo_surface_destroy(surface);
     cairo_font_face_destroy(cairo_face);
     FT_Done_Face(ft_face);
