@@ -54,41 +54,36 @@ pub const DisplayRenderer = struct {
 
     /// Show a transient loading screen while metrics initialize
     pub fn showLoading(self: *DisplayRenderer) !void {
-        // Inverted colors vs sleep: white background, black line/text/icon
         self.bitmap.clear(.White);
 
-        const screen_w: u32 = display_config.DISPLAY_WIDTH;
-        const screen_h: u32 = display_config.DISPLAY_HEIGHT;
-        const cx: i32 = @intCast(screen_w / 2);
-        const cy: i32 = @intCast(screen_h / 2);
-        const right_cx: i32 = cx + @as(i32, @intCast(screen_w / 4));
+        const cx: i32 = @intCast(display_config.DISPLAY_WIDTH / 2);
+        const cy: i32 = @intCast(display_config.DISPLAY_HEIGHT / 2);
+        const right_cx: i32 = cx + @as(i32, @intCast(display_config.DISPLAY_WIDTH / 4));
 
-        // Line centered horizontally
+        // Centered vertical line
         const line_w: u32 = display_config.SLEEP_LINE_W;
         const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
         const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
-        const line_y: i32 = display_config.SLEEP_LINE_Y;
-        self.bitmap.fillRect(line_x, line_y, line_w, line_h, .Black);
+        self.bitmap.fillRect(line_x, display_config.SLEEP_LINE_Y, line_w, line_h, .Black);
 
         // Icon centered horizontally, left of center line
         const icon = display_config.ICON_SLEEP_NET;
         const icon_w = self.bitmap.measureText(icon, .Material50);
-        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 12 - 30;
-        const icon_y: i32 = cy - 12 + 30;
-        self.drawText(icon_x, icon_y, icon, .Material50, false);
+        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 42;
+        const icon_y: i32 = cy + 18;
+        self.bitmap.drawTextFont(icon_x, icon_y, icon, .Material50, .Black);
 
         // Title centered on the right side
         const title = "SysInk";
         const title_w = self.bitmap.measureText(title, .Ubuntu34);
         const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
         const title_y: i32 = cy - 4;
-        self.drawText(title_x, title_y, title, .Ubuntu34, false);
+        self.bitmap.drawTextFont(title_x, title_y, title, .Ubuntu34, .Black);
 
-        // Subtitle centered on the right side
+        // Subtitle
         const subtitle = "Loading...";
-        const sub_x: i32 = title_x;
         const sub_y: i32 = cy + 18;
-        self.drawText(sub_x, sub_y, subtitle, .Ubuntu14, false);
+        self.bitmap.drawTextFont(title_x, sub_y, subtitle, .Ubuntu14, .Black);
 
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.display(self.epd_buffer);
@@ -104,104 +99,81 @@ pub const DisplayRenderer = struct {
 
         self.bitmap.clear(.White);
 
-        const v_line1: i32 = display_config.VERTICAL_LINE_1;
-        const v_line2: i32 = display_config.VERTICAL_LINE_2;
-        const h_line_main: i32 = display_config.HORIZONTAL_LINE_MAIN;
-        const display_w: i32 = display_config.DISPLAY_WIDTH;
-
         // Draw vertical divider lines
-        self.bitmap.drawLine(v_line1, display_config.CPU_LINE_Y, v_line1, h_line_main, .Black);
-        self.bitmap.drawLine(v_line2, display_config.CPU_LINE_Y, v_line2, h_line_main, .Black);
+        self.bitmap.drawLine(display_config.VERTICAL_LINE_1, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_1, display_config.HORIZONTAL_LINE_MAIN, .Black);
+        self.bitmap.drawLine(display_config.VERTICAL_LINE_2, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_2, display_config.HORIZONTAL_LINE_MAIN, .Black);
 
         // Draw main horizontal divider
-        self.bitmap.drawLine(0, h_line_main, display_w, h_line_main, .Black);
+        self.bitmap.drawLine(0, display_config.HORIZONTAL_LINE_MAIN, display_config.DISPLAY_WIDTH, display_config.HORIZONTAL_LINE_MAIN, .Black);
 
         // CPU section
-        const cpu_line_y: i32 = display_config.CPU_LINE_Y;
-        self.bitmap.drawLine(26, cpu_line_y, 99, cpu_line_y, .Black);
-        self.drawText(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, false);
-        self.drawText(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, false);
-        self.drawText(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, false);
+        self.bitmap.drawLine(26, display_config.CPU_LINE_Y, 99, display_config.CPU_LINE_Y, .Black);
+        self.bitmap.drawTextFont(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, .Black);
+        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, .Black);
+        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
 
         // APT section
-        const apt_line_y: i32 = display_config.APT_LINE_Y;
-        self.drawText(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, false);
-        self.bitmap.drawLine(226, apt_line_y, 248, apt_line_y, .Black);
+        self.bitmap.drawTextFont(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, .Black);
+        self.bitmap.drawLine(226, display_config.APT_LINE_Y, 248, display_config.APT_LINE_Y, .Black);
 
         // NET section
-        const net_line_x: i32 = display_config.NET_LINE_X;
-        const net_line_y: i32 = display_config.NET_LINE_Y;
-        self.drawText(display_config.NET_LABEL_X, display_config.NET_LABEL_Y, "net", .Ubuntu14, false);
-        self.bitmap.drawLine(net_line_x, net_line_y, net_line_x, h_line_main, .Black);
-        self.bitmap.drawLine(272, net_line_y, display_w, net_line_y, .Black);
+        self.bitmap.drawTextFont(display_config.NET_LABEL_X, display_config.NET_LABEL_Y, "net", .Ubuntu14, .Black);
+        self.bitmap.drawLine(display_config.NET_LINE_X, display_config.NET_LINE_Y, display_config.NET_LINE_X, display_config.HORIZONTAL_LINE_MAIN, .Black);
+        self.bitmap.drawLine(272, display_config.NET_LINE_Y, display_config.DISPLAY_WIDTH, display_config.NET_LINE_Y, .Black);
 
         // MEM section
-        const mem_line_y: i32 = display_config.MEM_LINE_Y;
-        const cpu_right: i32 = display_config.SECTION_CPU_RIGHT;
-        self.drawText(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, false);
-        self.bitmap.drawLine(34, mem_line_y, cpu_right, mem_line_y, .Black);
-        self.drawText(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, false);
+        self.bitmap.drawTextFont(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, .Black);
+        self.bitmap.drawLine(34, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, .Black);
 
         // NVME section
-        const nvme_line_y: i32 = display_config.NVME_LINE_Y;
-        const nvme_right: i32 = display_config.SECTION_NVME_RIGHT;
-        self.drawText(display_config.NVME_LABEL_X, display_config.NVME_LABEL_Y, "nvme", .Ubuntu14, false);
-        self.bitmap.drawLine(140, nvme_line_y, nvme_right, nvme_line_y, .Black);
-        self.drawText(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, false);
-        self.drawText(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, false);
+        self.bitmap.drawTextFont(display_config.NVME_LABEL_X, display_config.NVME_LABEL_Y, "nvme", .Ubuntu14, .Black);
+        self.bitmap.drawLine(140, display_config.NVME_LINE_Y, display_config.SECTION_NVME_RIGHT, display_config.NVME_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
+        self.bitmap.drawTextFont(display_config.NVME_ICON_X, display_config.NVME_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
 
         // FAN section
-        const fan_line_y: i32 = display_config.FAN_LINE_Y;
-        self.drawText(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, false);
-        self.bitmap.drawLine(124, fan_line_y, nvme_right, fan_line_y, .Black);
-        self.drawText(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, false);
+        self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
+        self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.SECTION_NVME_RIGHT, display_config.FAN_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
 
         // Traffic section
-        const down_line_y: i32 = display_config.TRAFFIC_DOWN_LINE_Y;
-        self.drawText(display_config.TRAFFIC_DOWN_LABEL_X, display_config.TRAFFIC_DOWN_LABEL_Y, "down", .Ubuntu14, false);
-        self.bitmap.drawLine(242, down_line_y, 261, down_line_y, .Black);
-        self.drawText(display_config.TRAFFIC_DOWN_ICON_X, display_config.TRAFFIC_DOWN_ICON_Y, display_config.ICON_DOWNLOAD, .Material24, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_LABEL_X, display_config.TRAFFIC_DOWN_LABEL_Y, "down", .Ubuntu14, .Black);
+        self.bitmap.drawLine(242, display_config.TRAFFIC_DOWN_LINE_Y, 261, display_config.TRAFFIC_DOWN_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_ICON_X, display_config.TRAFFIC_DOWN_ICON_Y, display_config.ICON_DOWNLOAD, .Material24, .Black);
 
-        const up_line_y: i32 = display_config.TRAFFIC_UP_LINE_Y;
-        self.drawText(display_config.TRAFFIC_UP_LABEL_X, display_config.TRAFFIC_UP_LABEL_Y, "up", .Ubuntu14, false);
-        self.bitmap.drawLine(222, up_line_y, 261, up_line_y, .Black);
-        self.drawText(display_config.TRAFFIC_UP_ICON_X, display_config.TRAFFIC_UP_ICON_Y, display_config.ICON_UPLOAD, .Material24, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_LABEL_X, display_config.TRAFFIC_UP_LABEL_Y, "up", .Ubuntu14, .Black);
+        self.bitmap.drawLine(222, display_config.TRAFFIC_UP_LINE_Y, 261, display_config.TRAFFIC_UP_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_ICON_X, display_config.TRAFFIC_UP_ICON_Y, display_config.ICON_UPLOAD, .Material24, .Black);
 
         // Status bar icons
-        self.drawText(display_config.IP_ICON_X, display_config.IP_ICON_Y, display_config.ICON_NETWORK, .Material14, false);
-        self.drawText(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, false);
+        self.bitmap.drawTextFont(display_config.IP_ICON_X, display_config.IP_ICON_Y, display_config.ICON_NETWORK, .Material14, .Black);
+        self.bitmap.drawTextFont(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, .Black);
 
         self.grid_cached = true;
     }
 
-    fn drawText(self: *DisplayRenderer, x: i32, y: i32, text: []const u8, font: FontType, inverted: bool) void {
-        const color: Graphics.Color = if (inverted) .White else .Black;
+    /// Simple unified text rendering in a defined area with optional inversion
+    fn drawTextInArea(self: *DisplayRenderer, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
+        // Clear the area
+        self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
 
-        if (inverted) {
-            // Draw black background
-            const w = self.bitmap.measureText(text, font);
-            // Height is approximate based on font name, or we can get it from font data
-            // Let's use a safe height
-            const h: u32 = switch (font) {
-                .Ubuntu14 => 16,
-                .Ubuntu20 => 22,
-                .Ubuntu24 => 26,
-                .Ubuntu26 => 28,
-                .Ubuntu34 => 36,
-                else => 20,
-            };
+        // Draw text
+        self.bitmap.drawTextFont(text_x, text_y, text, font, .Black);
 
-            // Adjust Y for background (Y is baseline)
-            const bg_y = y - @as(i32, @intCast(h)) + 4; // Approximate
-            self.bitmap.fillRect(x - 2, bg_y, w + 4, h + 2, .Black);
+        // Invert if critical
+        if (invert) {
+            self.bitmap.invertRect(area_x, area_y, area_w, area_h);
         }
-
-        self.bitmap.drawTextFont(x, y, text, font, color);
     }
 
     /// Update display
     pub fn updateDisplay(self: *DisplayRenderer, partial: bool) !void {
         std.log.info("updateDisplay: START (Native)", .{});
+
+        if (display_config.DEBUG_TEXT_AREAS) {
+            self.drawTextAreaFrames();
+        }
 
         // Convert Bitmap to 1-bit
         self.convertTo1Bit(self.epd_buffer);
@@ -217,6 +189,50 @@ pub const DisplayRenderer = struct {
         self.exportBmp() catch |err| {
             std.log.err("Failed to export BMP: {}", .{err});
         };
+    }
+
+    fn drawTextAreaFrames(self: *DisplayRenderer) void {
+        const color: Graphics.Color = .Black;
+
+        // CPU
+        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
+        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
+
+        // MEM
+        self.bitmap.drawRect(display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, color);
+
+        // NVMe
+        self.bitmap.drawRect(display_config.NVME_AREA_X, display_config.NVME_AREA_Y_DISK, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, color);
+        self.bitmap.drawRect(display_config.NVME_AREA_X, display_config.NVME_AREA_Y_TEMP, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, color);
+
+        // FAN
+        const ascent_fan = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.drawRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent_fan, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, color);
+
+        // APT
+        const ascent_apt = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.drawRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent_apt, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, color);
+
+        // NET icon/state
+        const ascent_net = self.bitmap.getFontAscent(.Material24);
+        self.bitmap.drawRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent_net, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, color);
+
+        // IP
+        self.bitmap.drawRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, color);
+
+        // UPTIME
+        self.bitmap.drawRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, color);
+
+        // SIGNAL
+        self.bitmap.drawRect(display_config.SIGNAL_VALUE_X - 20, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
+
+        // Traffic down
+        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
+        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
+
+        // Traffic up
+        self.bitmap.drawRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
+        self.bitmap.drawRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
     }
 
     /// Convert Bitmap to 1-bit packed format for EPD (with rotation)
@@ -281,35 +297,22 @@ pub const DisplayRenderer = struct {
         const is_load_critical = load >= config.Config.threshold_cpu_critical;
         const is_temp_critical = temp >= config.Config.threshold_temp_critical;
 
-        const x: i32 = display_config.CPU_VALUE_X;
-        const y_load: i32 = display_config.CPU_VALUE_Y_LOAD;
-        const y_temp: i32 = display_config.CPU_VALUE_Y_TEMP;
-
-        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.fillRect(x, y_load - ascent, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
-        self.bitmap.fillRect(x, y_temp - ascent, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, .White);
-
         var buf1: [16]u8 = undefined;
         const load_text = std.fmt.bufPrint(&buf1, "{d}%", .{load}) catch "?";
-        self.drawText(x, y_load, load_text, .Ubuntu24, is_load_critical);
+        self.drawTextInArea(load_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
 
         var buf2: [16]u8 = undefined;
         const temp_text = std.fmt.bufPrint(&buf2, "{d}C", .{temp}) catch "?";
-        self.drawText(x, y_temp, temp_text, .Ubuntu24, is_temp_critical);
+        self.drawTextInArea(temp_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
     }
 
     /// Render memory usage
     pub fn renderMemory(self: *DisplayRenderer, usage: u8) void {
         const is_critical = usage >= config.Config.threshold_mem_critical;
-        const x: i32 = display_config.MEM_VALUE_X;
-        const y: i32 = display_config.MEM_VALUE_Y;
-
-        const ascent = self.bitmap.getFontAscent(.Ubuntu26);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, .White);
 
         var buf: [16]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
-        self.drawText(x, y, text, .Ubuntu26, is_critical);
+        self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
     }
 
     /// Render NVMe stats
@@ -317,197 +320,140 @@ pub const DisplayRenderer = struct {
         const is_usage_critical = usage >= config.Config.threshold_disk_critical;
         const is_temp_critical = temp >= config.Config.threshold_temp_critical;
 
-        const x: i32 = display_config.NVME_VALUE_X;
-        const y_disk: i32 = display_config.NVME_VALUE_Y_DISK;
-        const y_temp: i32 = display_config.NVME_VALUE_Y_TEMP;
-
-        const ascent = self.bitmap.getFontAscent(.Ubuntu26);
-        self.bitmap.fillRect(x, y_disk - ascent, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
-        self.bitmap.fillRect(x, y_temp - ascent, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, .White);
-
         var buf1: [16]u8 = undefined;
         const usage_text = std.fmt.bufPrint(&buf1, "{d}%", .{usage}) catch "?";
-        self.drawText(x, y_disk, usage_text, .Ubuntu26, is_usage_critical);
+        self.drawTextInArea(usage_text, .Ubuntu26, display_config.NVME_VALUE_X, display_config.NVME_VALUE_Y_DISK, display_config.NVME_AREA_X, display_config.NVME_AREA_Y_DISK, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, is_usage_critical);
 
         var buf2: [16]u8 = undefined;
         const temp_text = std.fmt.bufPrint(&buf2, "{d}C", .{temp}) catch "?";
-        self.drawText(x, y_temp, temp_text, .Ubuntu26, is_temp_critical);
+        self.drawTextInArea(temp_text, .Ubuntu26, display_config.NVME_VALUE_X, display_config.NVME_VALUE_Y_TEMP, display_config.NVME_AREA_X, display_config.NVME_AREA_Y_TEMP, display_config.TEXT_AREA_NVME.width, display_config.TEXT_AREA_NVME.height, is_temp_critical);
     }
 
     /// Render fan speed
     pub fn renderFanSpeed(self: *DisplayRenderer, rpm: u32) void {
-        const x: i32 = display_config.FAN_VALUE_X;
-        const y: i32 = display_config.FAN_VALUE_Y;
-
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+        self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
         var buf: [16]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch "?";
-        self.drawText(x, y, text, .Ubuntu24, false);
+        self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
     }
 
     /// Render IP address
     pub fn renderIpAddress(self: *DisplayRenderer, ip: []const u8) void {
-        const x: i32 = display_config.IP_VALUE_X;
-        const y: i32 = display_config.IP_VALUE_Y;
+        self.bitmap.fillRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
 
-        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
         const display_ip = if (ip.len > 15) ip[0..15] else ip;
-        self.drawText(x, y, display_ip, .Ubuntu14, false);
+        self.bitmap.drawTextFont(display_config.IP_VALUE_X, display_config.IP_VALUE_Y, display_ip, .Ubuntu14, .Black);
     }
 
     /// Render uptime
     pub fn renderUptime(self: *DisplayRenderer, days: u32, hours: u32, minutes: u32) void {
-        const x: i32 = display_config.UPTIME_VALUE_X;
-        const y: i32 = display_config.UPTIME_VALUE_Y;
-
-        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
+        self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
 
         var buf: [32]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
-        self.drawText(x, y, text, .Ubuntu14, false);
+        self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
     }
 
     /// Render signal strength
     pub fn renderSignalStrength(self: *DisplayRenderer, signal: ?i32) void {
-        const val_x: i32 = display_config.SIGNAL_VALUE_X;
-        const val_y: i32 = display_config.SIGNAL_VALUE_Y;
-        const icon_x: i32 = display_config.SIGNAL_ICON_X;
-        const icon_y: i32 = display_config.SIGNAL_ICON_Y;
+        self.bitmap.fillRect(display_config.SIGNAL_VALUE_X - 20, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
 
-        const ascent = self.bitmap.getFontAscent(.Ubuntu14);
-        self.bitmap.fillRect(val_x - 20, val_y - ascent, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
-
-        // Draw WiFi icon
         const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
-        self.drawText(icon_x, icon_y, icon, .Material14, false);
+        self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);
 
         var buf: [16]u8 = undefined;
-        const text = if (signal) |s|
-            std.fmt.bufPrint(&buf, "{d} dBm", .{s}) catch "?"
-        else
-            "N/A";
-        self.drawText(val_x, val_y, text, .Ubuntu14, false);
+        const text = if (signal) |s| std.fmt.bufPrint(&buf, "{d} dBm", .{s}) catch "?" else "N/A";
+        self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
     }
 
     /// Render network traffic
     pub fn renderTraffic(self: *DisplayRenderer, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
-        const down_val_x: i32 = display_config.TRAFFIC_DOWN_VALUE_X;
-        const down_val_y: i32 = display_config.TRAFFIC_DOWN_VALUE_Y;
-        const down_unit_x: i32 = display_config.TRAFFIC_DOWN_UNIT_X;
-        const down_unit_y: i32 = display_config.TRAFFIC_DOWN_UNIT_Y;
-
-        const up_val_x: i32 = display_config.TRAFFIC_UP_VALUE_X;
-        const up_val_y: i32 = display_config.TRAFFIC_UP_VALUE_Y;
-        const up_unit_x: i32 = display_config.TRAFFIC_UP_UNIT_X;
-        const up_unit_y: i32 = display_config.TRAFFIC_UP_UNIT_Y;
-
-        const ascent20 = self.bitmap.getFontAscent(.Ubuntu20);
-        const ascent14 = self.bitmap.getFontAscent(.Ubuntu14);
-
-        // Clear value and unit areas
-        self.bitmap.fillRect(down_val_x, down_val_y - ascent20, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(down_unit_x, down_unit_y - ascent14, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+        // Download
+        self.bitmap.fillRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
 
         var buf1: [16]u8 = undefined;
         const down_text = std.fmt.bufPrint(&buf1, "{d:.2}", .{download_speed}) catch "?";
-        self.drawText(down_val_x, down_val_y, down_text, .Ubuntu20, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_VALUE_Y, down_text, .Ubuntu20, .Black);
 
         var unit_buf1: [16]u8 = undefined;
         const down_unit_text = std.fmt.bufPrint(&unit_buf1, "{s}/s", .{download_unit}) catch "?";
-        self.drawText(down_unit_x, down_unit_y, down_unit_text, .Ubuntu14, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_Y, down_unit_text, .Ubuntu14, .Black);
 
-        // Clear upload areas
-        self.bitmap.fillRect(up_val_x, up_val_y - ascent20, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(up_unit_x, up_unit_y - ascent14, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+        // Upload
+        self.bitmap.fillRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
 
         var buf2: [16]u8 = undefined;
         const up_text = std.fmt.bufPrint(&buf2, "{d:.2}", .{upload_speed}) catch "?";
-        self.drawText(up_val_x, up_val_y, up_text, .Ubuntu20, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_VALUE_Y, up_text, .Ubuntu20, .Black);
 
         var unit_buf2: [16]u8 = undefined;
         const up_unit_text = std.fmt.bufPrint(&unit_buf2, "{s}/s", .{upload_unit}) catch "?";
-        self.drawText(up_unit_x, up_unit_y, up_unit_text, .Ubuntu14, false);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_Y, up_unit_text, .Ubuntu14, .Black);
     }
 
     /// Render APT updates count
     pub fn renderAptUpdates(self: *DisplayRenderer, count: u32) void {
-        const x: i32 = display_config.APT_VALUE_X;
-        const y: i32 = display_config.APT_VALUE_Y;
-
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
+        self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
 
         if (count == 0) {
-            // Show checkmark icon
-            self.drawText(x, y, display_config.ICON_CHECK, .Material24, false);
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
         } else {
-            // Show number
             var buf: [16]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "{d}", .{count}) catch "?";
-            self.drawText(x, y, text, .Ubuntu24, false);
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, text, .Ubuntu24, .Black);
         }
     }
 
     /// Render internet connection status
     pub fn renderInternetStatus(self: *DisplayRenderer, connected: bool) void {
-        const x: i32 = display_config.NET_ICON_X;
-        const y: i32 = display_config.NET_ICON_Y;
-
         const ascent = self.bitmap.getFontAscent(.Material24);
-        self.bitmap.fillRect(x, y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
+        self.bitmap.fillRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
 
-        // Show WiFi OK or WiFi OFF icon
         const icon = if (connected) display_config.ICON_WIFI_OK else display_config.ICON_WIFI_OFF;
-        self.drawText(x, y, icon, .Material24, false);
+        self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
     }
 
     /// Go to sleep
     pub fn goToSleep(self: *DisplayRenderer) !void {
-        // Clear to black
         self.bitmap.clear(.Black);
 
-        const screen_w: u32 = display_config.DISPLAY_WIDTH;
-        const screen_h: u32 = display_config.DISPLAY_HEIGHT;
-        const cx: i32 = @intCast(screen_w / 2);
-        const cy: i32 = @intCast(screen_h / 2);
-        const right_cx: i32 = cx + @as(i32, @intCast(screen_w / 4));
+        const cx: i32 = @intCast(display_config.DISPLAY_WIDTH / 2);
+        const cy: i32 = @intCast(display_config.DISPLAY_HEIGHT / 2);
+        const right_cx: i32 = cx + @as(i32, @intCast(display_config.DISPLAY_WIDTH / 4));
 
-        // White vertical line centered
+        // Centered white vertical line
         const line_w: u32 = display_config.SLEEP_LINE_W;
         const line_h: u32 = display_config.HORIZONTAL_LINE_MAIN - display_config.SLEEP_LINE_Y;
         const line_x: i32 = cx - @as(i32, @intCast(line_w / 2));
-        const line_y: i32 = display_config.SLEEP_LINE_Y;
-        self.bitmap.fillRect(line_x, line_y, line_w, line_h, .White);
+        self.bitmap.fillRect(line_x, display_config.SLEEP_LINE_Y, line_w, line_h, .White);
 
         // Icon centered horizontally, left of center line
         const icon = display_config.ICON_SLEEP_NET;
         const icon_w = self.bitmap.measureText(icon, .Material50);
-        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 12 - 30;
-        const icon_y: i32 = cy - 12 + 30;
-        self.drawText(icon_x, icon_y, icon, .Material50, true);
+        const icon_x: i32 = cx - @as(i32, @intCast(icon_w / 2)) - 42;
+        const icon_y: i32 = cy + 18;
+        self.bitmap.drawTextFont(icon_x, icon_y, icon, .Material50, .White);
 
         // Title centered on the right side
         const title = "SysInk";
         const title_w = self.bitmap.measureText(title, .Ubuntu34);
         const title_x: i32 = right_cx - @as(i32, @intCast(title_w / 2));
         const title_y: i32 = cy - 4;
-        self.drawText(title_x, title_y, title, .Ubuntu34, true);
+        self.bitmap.drawTextFont(title_x, title_y, title, .Ubuntu34, .White);
 
-        // Subtitle centered on the right side
+        // Subtitle
         const subtitle = "Sleeping...";
-        const sub_x: i32 = title_x;
         const sub_y: i32 = cy + 18;
-        self.drawText(sub_x, sub_y, subtitle, .Ubuntu14, true);
+        self.bitmap.drawTextFont(title_x, sub_y, subtitle, .Ubuntu14, .White);
 
-        // Convert and display
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.display(self.epd_buffer);
 
-        // Export BMP
         self.exportBmp() catch |err| {
             std.log.err("Failed to export sleep screen BMP: {}", .{err});
         };

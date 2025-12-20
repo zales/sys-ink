@@ -136,10 +136,19 @@ pub const Bitmap = struct {
         }
     }
 
-    pub fn getScale(self: *Bitmap, font_type: FontType) u32 {
-        _ = self;
-        _ = font_type;
-        return 1; // Scale is handled by font data now
+    pub fn invertRect(self: *Bitmap, x: i32, y: i32, w: u32, h: u32) void {
+        var py: i32 = 0;
+        while (py < h) : (py += 1) {
+            var px: i32 = 0;
+            while (px < w) : (px += 1) {
+                const px_abs = x + px;
+                const py_abs = y + py;
+                if (px_abs >= 0 and px_abs < self.width and py_abs >= 0 and py_abs < self.height) {
+                    const idx = @as(usize, @intCast(py_abs)) * self.stride + @as(usize, @intCast(px_abs));
+                    self.data[idx] = 255 - self.data[idx];
+                }
+            }
+        }
     }
 
     pub fn getFontAscent(self: *Bitmap, font_type: FontType) i32 {
@@ -160,14 +169,6 @@ pub const Bitmap = struct {
         };
     }
 
-    /// @deprecated Use drawTextFont instead
-    pub fn drawText(self: *Bitmap, x: i32, y: i32, text: []const u8, color: Color, scale: u32) void {
-        // Forward to new API
-        _ = scale;
-        self.drawTextFont(x, y, text, .Ubuntu14, color);
-    }
-
-    // New API for text drawing
     pub fn drawTextFont(self: *Bitmap, x: i32, y: i32, text: []const u8, font_type: FontType, color: Color) void {
         const font = self.getFont(font_type);
         var cursor_x = x;
@@ -240,9 +241,5 @@ pub const Bitmap = struct {
             }
         }
         return width;
-    }
-
-    pub fn drawIcon(self: *Bitmap, x: i32, y: i32, icon: []const u8, font_type: FontType) void {
-        self.drawTextFont(x, y, icon, font_type, .Black);
     }
 };
