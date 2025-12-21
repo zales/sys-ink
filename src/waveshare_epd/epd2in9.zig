@@ -1,6 +1,8 @@
 const std = @import("std");
 const EpdConfig = @import("epdconfig.zig").EpdConfig;
 
+const log = std.log.scoped(.epd);
+
 // Display resolution - Portrait (hardware orientation)
 pub const EPD_WIDTH = 128;
 pub const EPD_HEIGHT = 296;
@@ -111,7 +113,7 @@ pub const EPD = struct {
     /// Wait until the busy_pin goes LOW
     /// V2: LOW (0) = IDLE, HIGH (1) = BUSY
     fn readBusy(self: *EPD) !void {
-        std.log.debug("e-Paper busy", .{});
+        log.debug("e-Paper busy", .{});
 
         const timeout_ms: u64 = 5000;
         const start_time = std.time.milliTimestamp();
@@ -120,13 +122,13 @@ pub const EPD = struct {
         while (try self.config.digitalRead(EpdConfig.BUSY_PIN) == 1) {
             const elapsed = std.time.milliTimestamp() - start_time;
             if (elapsed > timeout_ms) {
-                std.log.err("Timeout waiting for e-Paper (busy for {} ms)", .{elapsed});
+                log.err("Timeout waiting for e-Paper (busy for {} ms)", .{elapsed});
                 return error.EpdBusyTimeout;
             }
             EpdConfig.delayMs(2); // Check more frequently (was 20ms)
         }
 
-        std.log.debug("e-Paper busy release", .{});
+        log.debug("e-Paper busy release", .{});
     }
 
     /// Load LUT (first 153 bytes only) - from C reference

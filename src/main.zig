@@ -1,20 +1,17 @@
 const std = @import("std");
 const config = @import("config.zig");
+const logger = @import("logger.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = @import("network_ops.zig").NetworkOps;
 const TrafficMonitor = @import("network_ops.zig").TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
 
-pub const std_options: std.Options = .{
-    .logFn = customLogFn,
-};
+const log = std.log.scoped(.main);
 
-fn customLogFn(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral), comptime message: []const u8, args: anytype) void {
-    // Filter logs by runtime-configured level
-    if (@intFromEnum(level) > @intFromEnum(config.Config.log_level_std)) return;
-    std.log.defaultLog(level, scope, message, args);
-}
+pub const std_options: std.Options = .{
+    .logFn = logger.logFn,
+};
 
 // Global state - atomic for signal handler thread-safety
 var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -33,13 +30,17 @@ pub fn main() !u8 {
     defer {
         const leaked = gpa.deinit();
         if (leaked == .leak) {
-            std.log.warn("Memory leak detected on exit!", .{});
+            log.warn("Memory leak detected on exit", .{});
         }
     }
     const allocator = gpa.allocator();
 
     // Load configuration from environment
     config.Config.load();
+
+    // Initialize logger
+    try logger.init();
+    defer logger.deinit();
 
     // Root check removed to allow running as non-root user with proper permissions (gpio/spi groups)
     // if (!config.Config.isRoot()) { ... }
@@ -52,7 +53,7 @@ pub fn main() !u8 {
     _ = c.signal(c.SIGTERM, signalHandler);
     _ = c.signal(c.SIGHUP, signalHandler);
 
-    std.log.info("SysInk starting...", .{});
+    log.info("SysInk starting", .{});
 
     // Initialize modules
     var sys_ops = SystemOps.init(allocator);
@@ -67,25 +68,25 @@ pub fn main() !u8 {
 
     // Initialize display renderer
     var renderer = DisplayRenderer.init(allocator) catch |err| {
-        std.log.err("Failed to initialize display: {}", .{err});
-        std.log.err("Make sure you have permission to access GPIO/SPI devices (e.g. gpio/spi groups)", .{});
+        log.err("Failed to initialize display: {}", .{err});
+        log.err("Check GPIO/SPI permissions", .{});
         return 1;
     };
     defer renderer.deinit();
     g_renderer = &renderer;
 
-    std.log.info("Initializing display...", .{});
+    log.info("Initializing display", .{});
     renderer.startup() catch |err| {
-        std.log.err("Failed to start display: {}", .{err});
+        log.err("Failed to start display: {}", .{err});
         return 1;
     };
 
-    std.log.info("Showing loading screen...", .{});
+    log.info("Showing loading screen", .{});
     renderer.showLoading() catch |err| {
-        std.log.err("Failed to show loading screen: {}", .{err});
+        log.err("Failed to show loading screen: {}", .{err});
     };
 
-    std.log.info("Rendering grid...", .{});
+    log.info("Rendering grid", .{});
     renderer.renderGrid();
 
     // Initialize scheduler
@@ -116,15 +117,15 @@ pub fn main() !u8 {
     try renderer.epd.displayBase(renderer.epd_buffer);
 
     // Export initial BMP (before display updates)
-    std.log.info("Exporting initial BMP...", .{});
+    log.info("Exporting initial BMP", .{});
     renderer.exportBmp() catch |err| {
-        std.log.err("Failed to export initial BMP: {}", .{err});
+        log.err("Failed to export initial BMP: {}", .{err});
     };
 
     // Display update (matches fast refresh rate)
     try scheduler.every(config.Config.interval_fast, "display", updateDisplayPartial);
 
-    std.log.info("Starting main loop (Ctrl+C to exit)", .{});
+    log.info("Starting main loop (Ctrl+C to exit)", .{});
 
     // Run all tasks immediately
     scheduler.runAll();
@@ -139,11 +140,11 @@ pub fn main() !u8 {
         std.Thread.sleep(@intCast(sleep_time * std.time.ns_per_s));
     }
 
-    std.log.info("Shutting down gracefully...", .{});
+    log.info("Shutting down gracefully", .{});
 
     if (g_renderer) |r| {
         r.goToSleep() catch |err| {
-            std.log.err("Failed to show sleep screen: {}", .{err});
+            log.err("Failed to show sleep screen: {}", .{err});
         };
     }
 
@@ -157,54 +158,54 @@ fn updateCpu() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
     const load = g_sys_ops.?.getCpuLoad() catch |err| {
-        std.log.warn("getCpuLoad failed: {}", .{err});
+        log.warn("getCpuLoad failed: {}", .{err});
         return;
     };
     const temp = g_sys_ops.?.getCpuTemperature() catch |err| {
-        std.log.warn("getCpuTemperature failed: {}", .{err});
+        log.warn("getCpuTemperature failed: {}", .{err});
         return;
     };
 
     g_renderer.?.renderCpuLoad(load, temp);
-    std.log.debug("CPU: {}% / {}°C", .{ load, temp });
+    log.debug("CPU: {}% / {}°C", .{ load, temp });
 }
 
 fn updateMemory() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
     const mem = g_sys_ops.?.getMemory() catch |err| {
-        std.log.warn("getMemory failed: {}", .{err});
+        log.warn("getMemory failed: {}", .{err});
         return;
     };
     g_renderer.?.renderMemory(mem);
-    std.log.debug("Memory: {}%", .{mem});
+    log.debug("Memory: {}%", .{mem});
 }
 
 fn updateDisk() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
     const usage = g_sys_ops.?.getDiskUsage() catch |err| {
-        std.log.warn("getDiskUsage failed: {}", .{err});
+        log.warn("getDiskUsage failed: {}", .{err});
         return;
     };
     const temp = g_sys_ops.?.getDiskTemp() catch |err| {
-        std.log.warn("getDiskTemp failed: {}", .{err});
+        log.warn("getDiskTemp failed: {}", .{err});
         return;
     };
 
     g_renderer.?.renderDiskStats(usage, temp);
-    std.log.debug("Disk: {}% / {}°C", .{ usage, temp });
+    log.debug("Disk: {}% / {}°C", .{ usage, temp });
 }
 
 fn updateFan() void {
     if (g_sys_ops == null or g_renderer == null) return;
 
     const rpm = g_sys_ops.?.getFanSpeed() catch |err| {
-        std.log.warn("getFanSpeed failed: {}", .{err});
+        log.warn("getFanSpeed failed: {}", .{err});
         return;
     };
     g_renderer.?.renderFanSpeed(rpm);
-    std.log.debug("Fan: {} RPM", .{rpm});
+    log.debug("Fan: {} RPM", .{rpm});
 }
 
 fn updateSignal() void {
@@ -214,7 +215,7 @@ fn updateSignal() void {
     g_renderer.?.renderSignalStrength(signal);
 
     if (signal) |s| {
-        std.log.debug("Signal: {} dBm", .{s});
+        log.debug("Signal: {} dBm", .{s});
     }
 }
 
@@ -225,10 +226,10 @@ fn updateIp() void {
         if (ip_opt) |ip| {
             defer g_net_ops.?.allocator.free(ip);
             g_renderer.?.renderIpAddress(ip);
-            std.log.debug("IP: {s}", .{ip});
+            log.debug("IP: {s}", .{ip});
         } else {
             g_renderer.?.renderIpAddress("No IP");
-            std.log.debug("IP: No IP address found", .{});
+            log.debug("IP: No IP address found", .{});
         }
     } else |_| {
         g_renderer.?.renderIpAddress("Error");
@@ -240,9 +241,9 @@ fn updateUptime() void {
 
     if (g_sys_ops.?.getUptime()) |uptime| {
         g_renderer.?.renderUptime(uptime.days, uptime.hours, uptime.minutes);
-        std.log.debug("Uptime: {}d {}h {}m", .{ uptime.days, uptime.hours, uptime.minutes });
+        log.debug("Uptime: {}d {}h {}m", .{ uptime.days, uptime.hours, uptime.minutes });
     } else |err| {
-        std.log.warn("getUptime failed: {}", .{err});
+        log.warn("getUptime failed: {}", .{err});
     }
 }
 
@@ -250,10 +251,10 @@ fn updateTraffic() void {
     if (g_traffic_mon == null or g_renderer == null) return;
 
     const traffic = g_traffic_mon.?.getCurrentTraffic() catch |err| {
-        std.log.warn("getCurrentTraffic failed: {}", .{err});
+        log.warn("getCurrentTraffic failed: {}", .{err});
         return;
     };
-    std.log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
+    log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
         traffic.download_speed,
         traffic.download_unit,
         traffic.upload_speed,
@@ -277,10 +278,10 @@ fn updateDisplayPartial() void {
     const perform_full_refresh = (g_full_refresh_counter % 20 == 0);
     const use_partial = !perform_full_refresh;
 
-    std.log.debug("Display refresh #{} (partial={})", .{ g_full_refresh_counter, use_partial });
+    log.debug("Display refresh #{} (partial={})", .{ g_full_refresh_counter, use_partial });
 
     g_renderer.?.updateDisplay(use_partial) catch |err| {
-        std.log.warn("Failed to update display: {}", .{err});
+        log.warn("Failed to update display: {}", .{err});
     };
 }
 
@@ -291,7 +292,7 @@ fn updateApt() void {
     const has_internet = g_net_ops.?.checkInternetConnection();
 
     const count = g_sys_ops.?.checkUpdates(is_root, has_internet);
-    std.log.debug("APT updates: {}", .{count});
+    log.debug("APT updates: {}", .{count});
 
     g_renderer.?.renderAptUpdates(count);
 }
@@ -300,7 +301,7 @@ fn updateInternet() void {
     if (g_net_ops == null or g_renderer == null) return;
 
     const connected = g_net_ops.?.checkInternetConnection();
-    std.log.debug("Internet: {}", .{connected});
+    log.debug("Internet: {}", .{connected});
 
     g_renderer.?.renderInternetStatus(connected);
 }

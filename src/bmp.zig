@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.bmp);
+
 pub const BmpExporter = struct {
     allocator: std.mem.Allocator,
     last_hash: u64 = 0,
@@ -27,7 +29,7 @@ pub const BmpExporter = struct {
             // If primary path fails, try fallback to /tmp
             if (!std.mem.startsWith(u8, path, "/tmp")) {
                 const fallback_path = "/tmp/sys-ink.bmp";
-                std.log.warn("Failed to create {s}: {}, trying {s}", .{ path, err, fallback_path });
+                log.warn("Failed to create {s}: {}, trying {s}", .{ path, err, fallback_path });
                 return self.saveInternal(buffer, width, height, fallback_path);
             }
             return err;
@@ -35,14 +37,14 @@ pub const BmpExporter = struct {
         defer file.close();
 
         try self.writeBmp(file, buffer, width, height);
-        std.log.info("BMP exported to {s}", .{path});
+        log.info("BMP exported to {s}", .{path});
     }
 
     fn saveInternal(self: *BmpExporter, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
         const file = try std.fs.createFileAbsolute(path, .{});
         defer file.close();
         try self.writeBmp(file, buffer, width, height);
-        std.log.info("BMP exported to {s}", .{path});
+        log.info("BMP exported to {s}", .{path});
     }
 
     fn writeBmp(self: *BmpExporter, file: std.fs.File, buffer: []const u8, width: u32, height: u32) !void {

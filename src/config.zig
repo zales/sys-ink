@@ -33,6 +33,12 @@ pub const Config = struct {
     pub var log_level: LogLevel = .info;
     pub var log_level_std: std.log.Level = .info;
 
+    /// Enable/disable logging to file
+    pub var log_to_file: bool = false;
+
+    /// Log file path
+    pub var log_file_path: []const u8 = "/var/log/sys-ink.log";
+
     /// Enable/disable BMP export
     pub var export_bmp: bool = false;
 
@@ -78,6 +84,14 @@ pub const Config = struct {
 
         if (std.posix.getenv("LOG_LEVEL")) |val| {
             log_level = LogLevel.parse(val);
+        }
+
+        if (std.posix.getenv("LOG_TO_FILE")) |val| {
+            log_to_file = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
+        }
+
+        if (std.posix.getenv("LOG_FILE_PATH")) |val| {
+            log_file_path = val;
         }
 
         log_level_std = toStdLogLevel(log_level);

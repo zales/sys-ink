@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.system);
+
 /// System operations for gathering system metrics
 pub const SystemOps = struct {
     allocator: std.mem.Allocator,
@@ -310,7 +312,7 @@ pub const SystemOps = struct {
 
         const run_update = is_root and has_internet;
         const thread = std.Thread.spawn(.{}, aptCheckThread, .{ self, run_update }) catch |err| {
-            std.log.err("Failed to spawn APT check thread: {}", .{err});
+            log.err("Failed to spawn APT check thread: {}", .{err});
             self.apt_check_running.store(false, .monotonic);
             return self.apt_updates_count.load(.monotonic);
         };
@@ -329,7 +331,7 @@ pub const SystemOps = struct {
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
                 .max_output_bytes = 5 * 1024 * 1024,
             }) catch |err| {
-                std.log.warn("Failed to run apt update: {}", .{err});
+                log.warn("Failed to run apt update: {}", .{err});
                 // Continue to check upgradable even if update failed (might have old lists)
             };
         }
@@ -340,7 +342,7 @@ pub const SystemOps = struct {
             .argv = &[_][]const u8{ "/usr/bin/timeout", "10", "/usr/bin/apt", "list", "--upgradable" },
             .max_output_bytes = 1024 * 1024,
         }) catch |err| {
-            std.log.warn("Failed to check APT updates: {}", .{err});
+            log.warn("Failed to check APT updates: {}", .{err});
             return;
         };
         defer self.allocator.free(result.stdout);

@@ -1,6 +1,8 @@
 const std = @import("std");
 const GpioNative = @import("../gpio_native.zig").GpioNative;
 
+const log = std.log.scoped(.epd_config);
+
 /// GPIO and SPI configuration for Waveshare e-ink display using native chardev
 pub const EpdConfig = struct {
     // Pin definitions (BCM numbering)
@@ -41,7 +43,7 @@ pub const EpdConfig = struct {
         self.spi_fd = -1;
 
         const chip_path = std.posix.getenv("GPIO_CHIP") orelse "/dev/gpiochip0";
-        std.log.info("Requesting GPIO lines from {s}...", .{chip_path});
+        log.info("Requesting GPIO lines from {s}", .{chip_path});
 
         // Request pins
         self.line_rst = try GpioNative.requestLine(chip_path, RST_PIN, .Output);
@@ -49,18 +51,18 @@ pub const EpdConfig = struct {
         self.line_pwr = try GpioNative.requestLine(chip_path, PWR_PIN, .Output);
         self.line_busy = try GpioNative.requestLine(chip_path, BUSY_PIN, .Input);
 
-        std.log.info("All GPIO lines requested successfully", .{});
+        log.info("All GPIO lines requested successfully", .{});
 
         // Set initial values - PWR high (on)
         try self.digitalWrite(PWR_PIN, 1);
-        std.log.info("Power on, waiting for display to stabilize...", .{});
+        log.info("Power on, waiting for display to stabilize", .{});
         delayMs(200); // Give display time to power up
 
-        std.log.info("Opening SPI device...", .{});
+        log.info("Opening SPI device", .{});
         // Open SPI device
         self.spi_fd = try std.posix.open("/dev/spidev0.0", .{ .ACCMODE = .RDWR }, 0);
 
-        std.log.info("Configuring SPI...", .{});
+        log.info("Configuring SPI", .{});
         // Configure SPI
         const SPI_IOC_WR_MODE: u32 = 0x40016b01;
         const SPI_IOC_WR_BITS_PER_WORD: u32 = 0x40016b03;
@@ -71,18 +73,18 @@ pub const EpdConfig = struct {
         var speed: u32 = 10000000; // 10MHz (SSD1680 supports up to 20MHz)
 
         if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_MODE, @intFromPtr(&mode)) != 0) {
-            std.log.err("Failed to set SPI mode", .{});
+            log.err("Failed to set SPI mode", .{});
             return error.SpiConfigFailed;
         }
         if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_BITS_PER_WORD, @intFromPtr(&bits)) != 0) {
-            std.log.err("Failed to set SPI bits", .{});
+            log.err("Failed to set SPI bits", .{});
             return error.SpiConfigFailed;
         }
         if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, @intFromPtr(&speed)) != 0) {
-            std.log.err("Failed to set SPI speed", .{});
+            log.err("Failed to set SPI speed", .{});
             return error.SpiConfigFailed;
         }
-        std.log.info("SPI configured successfully", .{});
+        log.info("SPI configured successfully", .{});
     }
 
     /// Cleanup and close SPI/GPIO

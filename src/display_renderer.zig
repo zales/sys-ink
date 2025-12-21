@@ -8,6 +8,8 @@ const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const BmpExporter = @import("bmp.zig").BmpExporter;
 
+const log = std.log.scoped(.display);
+
 /// Display renderer that manages Bitmap and EPD
 pub const DisplayRenderer = struct {
     bitmap: Bitmap,
@@ -72,7 +74,7 @@ pub const DisplayRenderer = struct {
         try self.epd.display(self.epd_buffer);
 
         self.exportBmp() catch |err| {
-            std.log.err("Failed to export loading BMP: {}", .{err});
+            log.err("Failed to export loading BMP: {}", .{err});
         };
     }
 
@@ -152,7 +154,7 @@ pub const DisplayRenderer = struct {
 
     /// Update display
     pub fn updateDisplay(self: *DisplayRenderer, partial: bool) !void {
-        std.log.info("updateDisplay: START (Native)", .{});
+        log.info("updateDisplay: START", .{});
 
         if (display_config.DEBUG_TEXT_AREAS) {
             self.drawTextAreaFrames();
@@ -167,10 +169,10 @@ pub const DisplayRenderer = struct {
             try self.epd.display(self.epd_buffer);
         }
 
-        std.log.info("updateDisplay: EPD done", .{});
+        log.info("updateDisplay: EPD done", .{});
 
         self.exportBmp() catch |err| {
-            std.log.err("Failed to export BMP: {}", .{err});
+            log.err("Failed to export BMP: {}", .{err});
         };
     }
 
@@ -403,11 +405,11 @@ pub const DisplayRenderer = struct {
 
     /// Go to sleep
     pub fn goToSleep(self: *DisplayRenderer) !void {
-        std.log.info("Rendering sleep screen...", .{});
+        log.info("Rendering sleep screen", .{});
 
         // Re-initialize display to ensure Full LUT is loaded (needed after partial updates)
         self.epd.reInit() catch |err| {
-            std.log.err("Failed to re-init display for sleep: {}", .{err});
+            log.err("Failed to re-init display for sleep: {}", .{err});
         };
 
         self.bitmap.clear(.Black);
@@ -424,16 +426,16 @@ pub const DisplayRenderer = struct {
         // Subtitle
         self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, "Sleeping...", .Ubuntu14, .White);
 
-        std.log.info("Converting to 1-bit...", .{});
+        log.info("Converting to 1-bit", .{});
         self.convertTo1Bit(self.epd_buffer);
 
-        std.log.info("Sending to EPD display with full refresh...", .{});
+        log.info("Sending to EPD display with full refresh", .{});
         // Use displayBase to reset the display state after partial updates
         try self.epd.displayBase(self.epd_buffer);
-        std.log.info("EPD display updated successfully", .{});
+        log.info("EPD display updated successfully", .{});
 
         self.exportBmp() catch |err| {
-            std.log.err("Failed to export sleep screen BMP: {}", .{err});
+            log.err("Failed to export sleep screen BMP: {}", .{err});
         };
     }
 };
