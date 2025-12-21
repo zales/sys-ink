@@ -68,7 +68,7 @@ pub const EpdConfig = struct {
 
         var mode: u8 = 0; // SPI_MODE_0
         var bits: u8 = 8;
-        var speed: u32 = 4000000; // 4MHz
+        var speed: u32 = 10000000; // 10MHz (SSD1680 supports up to 20MHz)
 
         if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_MODE, @intFromPtr(&mode)) != 0) {
             std.log.err("Failed to set SPI mode", .{});

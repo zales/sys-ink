@@ -123,7 +123,7 @@ pub const EPD = struct {
                 std.log.err("Timeout waiting for e-Paper (busy for {} ms)", .{elapsed});
                 return error.EpdBusyTimeout;
             }
-            EpdConfig.delayMs(20);
+            EpdConfig.delayMs(2); // Check more frequently (was 20ms)
         }
 
         std.log.debug("e-Paper busy release", .{});
@@ -249,23 +249,17 @@ pub const EPD = struct {
     /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
     pub fn display(self: *EPD, image: []const u8) !void {
         try self.sendCommand(WRITE_RAM);
-        for (0..EPD_BUFFER_SIZE) |i| {
-            try self.sendData(image[i]);
-        }
+        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
         try self.turnOnDisplay();
     }
 
     /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
     pub fn displayBase(self: *EPD, image: []const u8) !void {
         try self.sendCommand(WRITE_RAM); // Write to black RAM
-        for (0..EPD_BUFFER_SIZE) |i| {
-            try self.sendData(image[i]);
-        }
+        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
 
         try self.sendCommand(WRITE_RAM_BASE); // Write to base RAM
-        for (0..EPD_BUFFER_SIZE) |i| {
-            try self.sendData(image[i]);
-        }
+        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
 
         try self.turnOnDisplay();
     }
@@ -303,9 +297,7 @@ pub const EPD = struct {
 
         // Write to RAM (only 0x24, NOT 0x26!)
         try self.sendCommand(WRITE_RAM);
-        for (0..EPD_BUFFER_SIZE) |i| {
-            try self.sendData(image[i]);
-        }
+        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
 
         try self.turnOnDisplayPartial();
     }
@@ -351,9 +343,7 @@ pub const EPD = struct {
         try self.sendCommand(WRITE_RAM);
         for (0..height) |row| {
             const src_offset = (y + row) * bytes_per_line + x_byte;
-            for (0..window_bytes_per_line) |col| {
-                try self.sendData(image[src_offset + col]);
-            }
+            try self.sendDataSlice(image[src_offset .. src_offset + window_bytes_per_line]);
         }
 
         try self.turnOnDisplayPartial();
