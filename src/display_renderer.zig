@@ -287,7 +287,7 @@ pub const DisplayRenderer = struct {
         self.drawTextInArea(load_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
 
         var buf2: [16]u8 = undefined;
-        const temp_text = std.fmt.bufPrint(&buf2, "{d}C", .{temp}) catch "?";
+        const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
         self.drawTextInArea(temp_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
     }
 
@@ -310,7 +310,7 @@ pub const DisplayRenderer = struct {
         self.drawTextInArea(usage_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_usage_critical);
 
         var buf2: [16]u8 = undefined;
-        const temp_text = std.fmt.bufPrint(&buf2, "{d}C", .{temp}) catch "?";
+        const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
         self.drawTextInArea(temp_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_temp_critical);
     }
 
