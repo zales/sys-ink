@@ -109,6 +109,11 @@ jobs:
           mkdir -p public
           cp artifacts/*.deb public/
           
+          # Copy docs/index.html if exists
+          if [ -f docs/index.html ]; then
+            cp docs/index.html public/
+          fi
+          
           # Install dpkg-dev for scanpackages
           sudo apt-get update
           sudo apt-get install -y dpkg-dev
