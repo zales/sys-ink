@@ -10,6 +10,7 @@ pub const SystemOps = struct {
     cached_disk_temp_path: ?[]const u8 = null,
     apt_check_running: std.atomic.Value(bool),
     apt_updates_count: std.atomic.Value(u32),
+    apt_first_check_done: std.atomic.Value(bool),
 
     const CpuTimes = struct {
         user: u64,
@@ -29,6 +30,7 @@ pub const SystemOps = struct {
             .cached_disk_temp_path = null,
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
+            .apt_first_check_done = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -301,9 +303,19 @@ pub const SystemOps = struct {
     /// Check for available APT updates
     /// Check for APT updates in a background thread
     /// Returns the last known number of available updates immediately
+    /// On first call, waits for the check to complete to ensure accurate initial display
     pub fn checkUpdates(self: *SystemOps, is_root: bool, has_internet: bool) u32 {
+        const is_first_check = !self.apt_first_check_done.load(.monotonic);
+
         // If a check is already running, just return the last known count
         if (self.apt_check_running.load(.monotonic)) {
+            // For first check, wait for it to complete
+            if (is_first_check) {
+                while (self.apt_check_running.load(.monotonic)) {
+                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                }
+                return self.apt_updates_count.load(.monotonic);
+            }
             return self.apt_updates_count.load(.monotonic);
         }
 
@@ -316,7 +328,14 @@ pub const SystemOps = struct {
             self.apt_check_running.store(false, .monotonic);
             return self.apt_updates_count.load(.monotonic);
         };
-        thread.detach();
+
+        // For first check, wait for completion; otherwise detach
+        if (is_first_check) {
+            thread.join();
+            self.apt_first_check_done.store(true, .monotonic);
+        } else {
+            thread.detach();
+        }
 
         return self.apt_updates_count.load(.monotonic);
     }
@@ -326,14 +345,18 @@ pub const SystemOps = struct {
 
         if (run_update) {
             // Run update with a timeout
-            _ = std.process.Child.run(.{
+            if (std.process.Child.run(.{
                 .allocator = self.allocator,
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
                 .max_output_bytes = 5 * 1024 * 1024,
-            }) catch |err| {
+            })) |update_result| {
+                // Free the output buffers from apt update
+                self.allocator.free(update_result.stdout);
+                self.allocator.free(update_result.stderr);
+            } else |err| {
                 log.warn("Failed to run apt update: {}", .{err});
                 // Continue to check upgradable even if update failed (might have old lists)
-            };
+            }
         }
 
         // Run apt list --upgradable and count lines
@@ -352,7 +375,7 @@ pub const SystemOps = struct {
             return;
         }
 
-        // Count lines (excluding header "Listing...")
+        // Count lines (excluding header "Listing..." and empty lines)
         var count: u32 = 0;
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
@@ -360,9 +383,6 @@ pub const SystemOps = struct {
                 count += 1;
             }
         }
-
-        // Subtract 1 if there was content (for empty trailing line)
-        if (count > 0) count -= 1;
 
         self.apt_updates_count.store(count, .monotonic);
     }
