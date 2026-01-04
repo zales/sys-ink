@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SysInk - E-Paper System Monitor for Raspberry Pi</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --accent-hover: #79b8ff;
+            --border: #30363d;
+            --success: #3fb950;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Header */
+        header {
+            padding: 60px 0;
+            text-align: center;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .logo {
+            font-size: 3.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .tagline {
+            font-size: 1.3rem;
+            color: var(--text-secondary);
+            margin-bottom: 30px;
+        }
+
+        .badges {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }
+
+        .badge {
+            background: var(--bg-tertiary);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: var(--bg-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--accent);
+        }
+
+        /* Features */
+        .features {
+            padding: 80px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .section-title {
+            font-size: 2rem;
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+
+        .feature-card {
+            background: var(--bg-secondary);
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 15px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        /* Screenshots */
+        .screenshots {
+            padding: 80px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .screenshots-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 30px;
+        }
+
+        .screenshot-card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .screenshot-card img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .screenshot-card figcaption {
+            padding: 15px;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* Installation */
+        .installation {
+            padding: 80px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .install-steps {
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        .install-step {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border);
+        }
+
+        .step-number {
+            display: inline-block;
+            background: var(--accent);
+            color: var(--bg-primary);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 28px;
+            font-weight: 700;
+            margin-right: 10px;
+        }
+
+        .install-step h3 {
+            display: inline;
+            font-size: 1.1rem;
+        }
+
+        .code-block {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            overflow-x: auto;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 0.9rem;
+            border: 1px solid var(--border);
+        }
+
+        .code-block code {
+            color: var(--text-primary);
+        }
+
+        /* Hardware */
+        .hardware {
+            padding: 80px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .hardware-list {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .hardware-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .hardware-item:last-child {
+            border-bottom: none;
+        }
+
+        .hardware-item .icon {
+            font-size: 1.5rem;
+            flex-shrink: 0;
+        }
+
+        .hardware-item h4 {
+            margin-bottom: 5px;
+        }
+
+        .hardware-item p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* Footer */
+        footer {
+            padding: 40px 0;
+            text-align: center;
+            color: var(--text-secondary);
+        }
+
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            header {
+                padding: 40px 0;
+            }
+
+            .logo {
+                font-size: 2.5rem;
+            }
+
+            .tagline {
+                font-size: 1.1rem;
+            }
+
+            .features, .screenshots, .installation, .hardware {
+                padding: 50px 0;
+            }
+
+            .section-title {
+                font-size: 1.6rem;
+                margin-bottom: 30px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1 class="logo">SysInk</h1>
+            <p class="tagline">Lightweight e-Paper system monitor for Raspberry Pi, written in Zig</p>
+            <div class="badges">
+                <span class="badge">🦎 Written in Zig</span>
+                <span class="badge">📊 Real-time Monitoring</span>
+                <span class="badge">⚡ Optimized for e-Paper</span>
+                <span class="badge">🔗 Statically Linked</span>
+            </div>
+            <div class="cta-buttons">
+                <a href="https://github.com/zales/sys-ink/releases" class="btn btn-primary">
+                    ⬇️ Download
+                </a>
+                <a href="https://github.com/zales/sys-ink" class="btn btn-secondary">
+                    📂 View Source
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <section class="features">
+        <div class="container">
+            <h2 class="section-title">Features</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">📈</div>
+                    <h3>Real-time Monitoring</h3>
+                    <p>CPU load, temperature, memory usage, disk usage, and fan speed - all updated in real-time.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Network Stats</h3>
+                    <p>IP address, WiFi signal strength, upload/download speeds with live traffic monitoring.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🖥️</div>
+                    <h3>System Info</h3>
+                    <p>Uptime, APT updates availability, and Internet connection status at a glance.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">⚡</div>
+                    <h3>Optimized Rendering</h3>
+                    <p>Partial updates for e-Paper display to minimize flickering and maximize refresh rate.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📦</div>
+                    <h3>Standalone Binary</h3>
+                    <p>Statically linked with musl - no external runtime dependencies, just copy and run.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">⚠️</div>
+                    <h3>Threshold Alerts</h3>
+                    <p>Visual alerts when CPU, temperature, or disk usage exceeds critical thresholds.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="screenshots">
+        <div class="container">
+            <h2 class="section-title">Screenshots</h2>
+            <div class="screenshots-grid">
+                <figure class="screenshot-card">
+                    <img src="https://raw.githubusercontent.com/zales/sys-ink/master/assets/sys-ink_base.png" alt="Main Screen">
+                    <figcaption>Main Screen</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <img src="https://raw.githubusercontent.com/zales/sys-ink/master/assets/sys-ink_loading.png" alt="Loading Screen">
+                    <figcaption>Loading Screen</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <img src="https://raw.githubusercontent.com/zales/sys-ink/master/assets/sys-ink_sleeping.png" alt="Sleep Screen">
+                    <figcaption>Sleep Screen</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <img src="https://raw.githubusercontent.com/zales/sys-ink/master/assets/sys-ink_trashold.png" alt="Threshold Alert">
+                    <figcaption>Threshold Alert</figcaption>
+                </figure>
+            </div>
+        </div>
+    </section>
+
+    <section class="installation">
+        <div class="container">
+            <h2 class="section-title">Quick Installation</h2>
+            <div class="install-steps">
+                <div class="install-step">
+                    <span class="step-number">1</span>
+                    <h3>Add the APT repository</h3>
+                    <div class="code-block">
+                        <code>echo "deb [trusted=yes] https://zales.github.io/sys-ink/ ./" | sudo tee /etc/apt/sources.list.d/sys-ink.list</code>
+                    </div>
+                </div>
+                <div class="install-step">
+                    <span class="step-number">2</span>
+                    <h3>Update and install</h3>
+                    <div class="code-block">
+                        <code>sudo apt update && sudo apt install sys-ink</code>
+                    </div>
+                </div>
+                <div class="install-step">
+                    <span class="step-number">3</span>
+                    <h3>Done!</h3>
+                    <p style="color: var(--text-secondary); margin-top: 10px;">
+                        The service starts automatically after installation. View logs with:
+                    </p>
+                    <div class="code-block">
+                        <code>journalctl -u sys-ink -f</code>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="hardware">
+        <div class="container">
+            <h2 class="section-title">Hardware Requirements</h2>
+            <div class="hardware-list">
+                <div class="hardware-item">
+                    <span class="icon">🍓</span>
+                    <div>
+                        <h4>Raspberry Pi</h4>
+                        <p>Tested on Pi 4 and Pi 5 (should work on others with GPIO header)</p>
+                    </div>
+                </div>
+                <div class="hardware-item">
+                    <span class="icon">🖼️</span>
+                    <div>
+                        <h4>Waveshare 2.9" e-Paper Module (B/W) V2</h4>
+                        <p>296×128 pixels, SPI interface. Note: Specifically tuned for V2 version.</p>
+                    </div>
+                </div>
+                <div class="hardware-item">
+                    <span class="icon">🔌</span>
+                    <div>
+                        <h4>SPI + GPIO Connections</h4>
+                        <p>RST, DC, BUSY, PWR pins connected to Raspberry Pi GPIO</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>
+                <a href="https://github.com/zales/sys-ink">GitHub</a> · 
+                <a href="https://github.com/zales/sys-ink/releases">Releases</a> · 
+                <a href="https://github.com/zales/sys-ink/issues">Issues</a>
+            </p>
+            <p style="margin-top: 15px;">MIT License © 2026</p>
+        </div>
+    </footer>
+</body>
+</html>
