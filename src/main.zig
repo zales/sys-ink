@@ -384,7 +384,7 @@ fn publishMqttStats() void {
     // Reconnect if needed
     if (!client.connected) {
         client.connect() catch |err| {
-            log.debug("MQTT reconnect failed: {}", .{err});
+            log.warn("MQTT reconnect failed: {}", .{err});
             return;
         };
     }
