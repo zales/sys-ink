@@ -165,6 +165,8 @@ pub const TrafficMonitor = struct {
     last_rx_bytes: ?u64 = null,
     last_tx_bytes: ?u64 = null,
     last_time: ?i64 = null,
+    last_rx_speed: f64 = 0,
+    last_tx_speed: f64 = 0,
 
     pub fn init(_: std.mem.Allocator) TrafficMonitor {
         return .{};
@@ -180,6 +182,20 @@ pub const TrafficMonitor = struct {
         upload_speed: f64,
         upload_unit: []const u8,
     };
+
+    /// Raw traffic result in bytes per second
+    pub const RawTrafficResult = struct {
+        rx_bytes_per_sec: f64,
+        tx_bytes_per_sec: f64,
+    };
+
+    /// Get raw traffic in bytes per second (for MQTT)
+    pub fn getRawTraffic(self: *TrafficMonitor) RawTrafficResult {
+        return .{
+            .rx_bytes_per_sec = self.last_rx_speed,
+            .tx_bytes_per_sec = self.last_tx_speed,
+        };
+    }
 
     /// Get current network traffic using cached measurements
     pub fn getCurrentTraffic(self: *TrafficMonitor) !TrafficResult {
@@ -260,6 +276,10 @@ pub const TrafficMonitor = struct {
         const interval_f: f64 = @floatFromInt(interval);
         const rx_speed = @as(f64, @floatFromInt(rx_diff)) / interval_f;
         const tx_speed = @as(f64, @floatFromInt(tx_diff)) / interval_f;
+
+        // Cache raw speeds for MQTT
+        self.last_rx_speed = rx_speed;
+        self.last_tx_speed = tx_speed;
 
         const download = chooseUnit(rx_speed);
         const upload = chooseUnit(tx_speed);

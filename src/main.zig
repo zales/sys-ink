@@ -460,17 +460,21 @@ fn publishMqttStats() void {
         } else |_| {}
     }
 
-    // Traffic
+    // Traffic - use raw bytes and convert to KB/s for HA
     if (g_traffic_mon) |mon| {
-        if (mon.getCurrentTraffic()) |stats| {
-            var down_buf: [32]u8 = undefined;
-            const down_payload = std.fmt.bufPrint(&down_buf, "{d:.1}", .{stats.download_speed}) catch return;
-            client.publish("traffic_down", down_payload, false) catch {};
+        const raw = mon.getRawTraffic();
 
-            var up_buf: [32]u8 = undefined;
-            const up_payload = std.fmt.bufPrint(&up_buf, "{d:.1}", .{stats.upload_speed}) catch return;
-            client.publish("traffic_up", up_payload, false) catch {};
-        } else |_| {}
+        // Convert bytes/sec to KB/s (divide by 1024)
+        const down_kbs = raw.rx_bytes_per_sec / 1024.0;
+        const up_kbs = raw.tx_bytes_per_sec / 1024.0;
+
+        var down_buf: [32]u8 = undefined;
+        const down_payload = std.fmt.bufPrint(&down_buf, "{d:.2}", .{down_kbs}) catch return;
+        client.publish("traffic_down", down_payload, false) catch {};
+
+        var up_buf: [32]u8 = undefined;
+        const up_payload = std.fmt.bufPrint(&up_buf, "{d:.2}", .{up_kbs}) catch return;
+        client.publish("traffic_up", up_payload, false) catch {};
     }
 
     log.debug("MQTT stats published", .{});
