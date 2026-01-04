@@ -391,42 +391,45 @@ fn publishMqttStats() void {
 
     var buf: [32]u8 = undefined;
 
-    // CPU
+    // Use cached values from SystemOps (populated during display updates)
     if (g_sys_ops) |ops| {
-        if (ops.getCpuLoad()) |load| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{load}) catch return;
+        // CPU load (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_cpu_load}) catch return;
             client.publish("cpu_load", payload, false) catch {};
-        } else |_| {}
+        }
 
-        if (ops.getCpuTemperature()) |temp| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{temp}) catch return;
+        // CPU temp (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_cpu_temp}) catch return;
             client.publish("cpu_temp", payload, false) catch {};
-        } else |_| {}
+        }
 
-        // Memory
-        if (ops.getMemory()) |mem| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{mem}) catch return;
+        // Memory (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_memory}) catch return;
             client.publish("memory", payload, false) catch {};
-        } else |_| {}
+        }
 
-        // Disk
-        if (ops.getDiskUsage()) |usage| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{usage}) catch return;
+        // Disk usage (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_disk_usage}) catch return;
             client.publish("disk_usage", payload, false) catch {};
-        } else |_| {}
+        }
 
-        if (ops.getDiskTemp()) |temp| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{temp}) catch return;
+        // Disk temp (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_disk_temp}) catch return;
             client.publish("disk_temp", payload, false) catch {};
-        } else |_| {}
+        }
 
-        // Fan
-        if (ops.getFanSpeed()) |rpm| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch return;
+        // Fan (cached)
+        {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_fan_speed}) catch return;
             client.publish("fan_speed", payload, false) catch {};
-        } else |_| {}
+        }
 
-        // Uptime
+        // Uptime (always fetch - not expensive)
         if (ops.getUptime()) |uptime| {
             const payload = std.fmt.bufPrint(&buf, "{d}", .{uptime.days}) catch return;
             client.publish("uptime_days", payload, false) catch {};

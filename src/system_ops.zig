@@ -11,6 +11,13 @@ pub const SystemOps = struct {
     apt_check_running: std.atomic.Value(bool),
     apt_updates_count: std.atomic.Value(u32),
     apt_first_check_done: std.atomic.Value(bool),
+    // Cached values for MQTT (to avoid re-measuring)
+    last_cpu_load: u8 = 0,
+    last_cpu_temp: u32 = 0,
+    last_memory: u8 = 0,
+    last_disk_usage: u8 = 0,
+    last_disk_temp: u32 = 0,
+    last_fan_speed: u32 = 0,
 
     const CpuTimes = struct {
         user: u64,
@@ -47,7 +54,9 @@ pub const SystemOps = struct {
     pub fn getCpuTemperature(self: *SystemOps) !u32 {
         // Use cached path if available
         if (self.cached_cpu_temp_path) |path| {
-            return self.readTempFromFile(path);
+            const temp = try self.readTempFromFile(path);
+            self.last_cpu_temp = temp;
+            return temp;
         }
 
         // Try multiple thermal zones
@@ -59,6 +68,7 @@ pub const SystemOps = struct {
         for (zones) |zone_path| {
             if (self.readTempFromFile(zone_path)) |temp| {
                 self.cached_cpu_temp_path = zone_path;
+                self.last_cpu_temp = temp;
                 return temp;
             } else |_| {
                 continue;
@@ -137,11 +147,13 @@ pub const SystemOps = struct {
         const idle_total = delta_idle + delta_iowait;
         const cpu_usage = (100 * (total - idle_total)) / total;
 
-        return @intCast(@min(100, cpu_usage));
+        const result: u8 = @intCast(@min(100, cpu_usage));
+        self.last_cpu_load = result;
+        return result;
     }
 
     /// Get fan speed in RPM
-    pub fn getFanSpeed(_: *SystemOps) !u32 {
+    pub fn getFanSpeed(self: *SystemOps) !u32 {
         // Try direct hwmon paths (hwmon0-hwmon9)
         var i: u8 = 0;
         while (i < 10) : (i += 1) {
@@ -156,14 +168,18 @@ pub const SystemOps = struct {
             const rpm_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
             const rpm = std.fmt.parseInt(u32, rpm_str, 10) catch continue;
 
-            if (rpm > 0) return rpm;
+            if (rpm > 0) {
+                self.last_fan_speed = rpm;
+                return rpm;
+            }
         }
 
+        self.last_fan_speed = 0;
         return 0; // No fan found
     }
 
     /// Get memory usage percentage
-    pub fn getMemory(_: *SystemOps) !u8 {
+    pub fn getMemory(self: *SystemOps) !u8 {
         const file = try std.fs.openFileAbsolute("/proc/meminfo", .{});
         defer file.close();
 
@@ -199,11 +215,13 @@ pub const SystemOps = struct {
 
         const used = mem_total.? - mem_available.?;
         const percent = (100 * used) / mem_total.?;
-        return @intCast(@min(100, percent));
+        const result: u8 = @intCast(@min(100, percent));
+        self.last_memory = result;
+        return result;
     }
 
     /// Get disk/root filesystem usage percentage
-    pub fn getDiskUsage(_: *SystemOps) !u8 {
+    pub fn getDiskUsage(self: *SystemOps) !u8 {
         // Manual definition of statvfs struct for aarch64/musl
         const struct_statvfs = extern struct {
             f_bsize: c_ulong,
@@ -234,17 +252,24 @@ pub const SystemOps = struct {
         const free = stat.f_bfree * stat.f_frsize;
         const used = total - free;
 
-        if (total == 0) return 0;
+        if (total == 0) {
+            self.last_disk_usage = 0;
+            return 0;
+        }
 
         const percent = (100 * used) / total;
-        return @intCast(@min(100, percent));
+        const result: u8 = @intCast(@min(100, percent));
+        self.last_disk_usage = result;
+        return result;
     }
 
     /// Get disk temperature in Celsius
     pub fn getDiskTemp(self: *SystemOps) !u32 {
         // Use cached path if available
         if (self.cached_disk_temp_path) |path| {
-            return self.readTempFromFile(path);
+            const temp = try self.readTempFromFile(path);
+            self.last_disk_temp = temp;
+            return temp;
         }
 
         // Try direct hwmon paths (hwmon0-hwmon9)
@@ -269,10 +294,13 @@ pub const SystemOps = struct {
                 // Cache the path (need to duplicate it because buf is on stack)
                 self.cached_disk_temp_path = try self.allocator.dupe(u8, temp_path);
 
-                return self.readTempFromFile(self.cached_disk_temp_path.?);
+                const temp = try self.readTempFromFile(self.cached_disk_temp_path.?);
+                self.last_disk_temp = temp;
+                return temp;
             }
         }
 
+        self.last_disk_temp = 0;
         return 0; // No disk sensor found
     }
 
