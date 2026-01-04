@@ -154,6 +154,38 @@ The application is configured via environment variables. You can set these in th
 | `EXPORT_BMP` | `false` | Enable BMP export for web debugging |
 | `BMP_EXPORT_PATH` | `/tmp/sys-ink.bmp` | Path for exported BMP |
 
+### MQTT / Home Assistant Integration
+
+SysInk can publish metrics to an MQTT broker for Home Assistant integration with auto-discovery support.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MQTT_ENABLED` | `false` | Enable MQTT publishing |
+| `MQTT_HOST` | `localhost` | MQTT broker hostname |
+| `MQTT_PORT` | `1883` | MQTT broker port |
+| `MQTT_USERNAME` | (none) | MQTT username (optional) |
+| `MQTT_PASSWORD` | (none) | MQTT password (optional) |
+| `MQTT_CLIENT_ID` | `sysink` | MQTT client identifier |
+| `MQTT_TOPIC_PREFIX` | `sysink` | Topic prefix for all messages |
+| `MQTT_DISCOVERY` | `true` | Enable Home Assistant auto-discovery |
+
+**Example systemd override for Home Assistant:**
+
+```bash
+sudo systemctl edit sys-ink
+```
+
+Add:
+```ini
+[Service]
+Environment=MQTT_ENABLED=true
+Environment=MQTT_HOST=192.168.1.100
+Environment=MQTT_USERNAME=homeassistant
+Environment=MQTT_PASSWORD=secret
+```
+
+After enabling MQTT, sensors will automatically appear in Home Assistant under the "SysInk" device.
+
 ## Troubleshooting
 
 ### "Failed to initialize display"

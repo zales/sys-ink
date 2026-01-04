@@ -6,6 +6,8 @@ const NetworkOps = @import("network_ops.zig").NetworkOps;
 const TrafficMonitor = @import("network_ops.zig").TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
+const MqttClient = @import("mqtt.zig").MqttClient;
+const MqttConfig = @import("mqtt.zig").MqttConfig;
 
 const log = std.log.scoped(.main);
 
@@ -19,6 +21,7 @@ var g_sys_ops: ?*SystemOps = null;
 var g_net_ops: ?*NetworkOps = null;
 var g_traffic_mon: ?*TrafficMonitor = null;
 var g_renderer: ?*DisplayRenderer = null;
+var g_mqtt: ?*MqttClient = null;
 var g_full_refresh_counter: u32 = 0; // Counter for periodic full refresh
 
 fn signalHandler(_: c_int) callconv(.c) void {
@@ -89,6 +92,36 @@ pub fn main() !u8 {
     log.info("Rendering grid", .{});
     renderer.renderGrid();
 
+    // Initialize MQTT client if enabled
+    const mqtt_config = MqttConfig.load();
+    var mqtt_client: ?MqttClient = null;
+    if (mqtt_config.enabled) {
+        log.info("MQTT enabled, connecting to {s}:{d}", .{ mqtt_config.host, mqtt_config.port });
+        mqtt_client = MqttClient.init(
+            allocator,
+            mqtt_config.host,
+            mqtt_config.port,
+            mqtt_config.client_id,
+            mqtt_config.username,
+            mqtt_config.password,
+            mqtt_config.topic_prefix,
+        );
+
+        if (mqtt_client) |*client| {
+            client.connect() catch |err| {
+                log.warn("MQTT connection failed: {} - will retry later", .{err});
+            };
+
+            // Publish Home Assistant auto-discovery configs
+            if (mqtt_config.discovery_enabled and client.connected) {
+                publishHADiscoveryConfigs(client);
+            }
+
+            g_mqtt = client;
+        }
+    }
+    defer if (mqtt_client) |*client| client.deinit();
+
     // Initialize scheduler
     var scheduler = Scheduler.init(allocator);
     defer scheduler.deinit();
@@ -108,6 +141,11 @@ pub fn main() !u8 {
     try scheduler.every(config.Config.interval_slow, "ip", updateIp);
     try scheduler.every(config.Config.interval_slow, "apt", updateApt);
     try scheduler.every(config.Config.interval_slow, "internet", updateInternet);
+
+    // MQTT updates (every fast interval if enabled)
+    if (mqtt_config.enabled) {
+        try scheduler.every(config.Config.interval_fast, "mqtt", publishMqttStats);
+    }
 
     // Run once to fill all stats before first display update
     scheduler.runAll();
@@ -304,4 +342,136 @@ fn updateInternet() void {
     log.debug("Internet: {}", .{connected});
 
     g_renderer.?.renderInternetStatus(connected);
+}
+
+// MQTT Functions
+fn publishHADiscoveryConfigs(client: *MqttClient) void {
+    log.info("Publishing Home Assistant discovery configs", .{});
+
+    // CPU sensors
+    client.publishHADiscovery("cpu_load", "CPU Load", "%", null, "mdi:cpu-64-bit") catch {};
+    client.publishHADiscovery("cpu_temp", "CPU Temperature", "°C", "temperature", "mdi:thermometer") catch {};
+
+    // Memory
+    client.publishHADiscovery("memory", "Memory Usage", "%", null, "mdi:memory") catch {};
+
+    // Disk
+    client.publishHADiscovery("disk_usage", "Disk Usage", "%", null, "mdi:harddisk") catch {};
+    client.publishHADiscovery("disk_temp", "Disk Temperature", "°C", "temperature", "mdi:thermometer") catch {};
+
+    // Fan
+    client.publishHADiscovery("fan_speed", "Fan Speed", "RPM", null, "mdi:fan") catch {};
+
+    // Network
+    client.publishHADiscovery("signal_strength", "WiFi Signal", "dBm", "signal_strength", "mdi:wifi") catch {};
+    client.publishHADiscovery("ip_address", "IP Address", null, null, "mdi:ip-network") catch {};
+    client.publishHADiscovery("internet", "Internet Connected", null, null, "mdi:web") catch {};
+
+    // Traffic
+    client.publishHADiscovery("traffic_down", "Download Speed", "KB/s", null, "mdi:download") catch {};
+    client.publishHADiscovery("traffic_up", "Upload Speed", "KB/s", null, "mdi:upload") catch {};
+
+    // System
+    client.publishHADiscovery("uptime_days", "Uptime Days", "d", null, "mdi:clock-outline") catch {};
+    client.publishHADiscovery("apt_updates", "APT Updates", null, null, "mdi:package-up") catch {};
+
+    log.info("Home Assistant discovery configs published", .{});
+}
+
+fn publishMqttStats() void {
+    const client = g_mqtt orelse return;
+
+    // Reconnect if needed
+    if (!client.connected) {
+        client.connect() catch |err| {
+            log.debug("MQTT reconnect failed: {}", .{err});
+            return;
+        };
+    }
+
+    var buf: [32]u8 = undefined;
+
+    // CPU
+    if (g_sys_ops) |ops| {
+        if (ops.getCpuLoad()) |load| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{load}) catch return;
+            client.publish("cpu_load", payload, false) catch {};
+        } else |_| {}
+
+        if (ops.getCpuTemperature()) |temp| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{temp}) catch return;
+            client.publish("cpu_temp", payload, false) catch {};
+        } else |_| {}
+
+        // Memory
+        if (ops.getMemory()) |mem| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{mem}) catch return;
+            client.publish("memory", payload, false) catch {};
+        } else |_| {}
+
+        // Disk
+        if (ops.getDiskUsage()) |usage| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{usage}) catch return;
+            client.publish("disk_usage", payload, false) catch {};
+        } else |_| {}
+
+        if (ops.getDiskTemp()) |temp| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{temp}) catch return;
+            client.publish("disk_temp", payload, false) catch {};
+        } else |_| {}
+
+        // Fan
+        if (ops.getFanSpeed()) |rpm| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch return;
+            client.publish("fan_speed", payload, false) catch {};
+        } else |_| {}
+
+        // Uptime
+        if (ops.getUptime()) |uptime| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{uptime.days}) catch return;
+            client.publish("uptime_days", payload, false) catch {};
+        } else |_| {}
+
+        // APT updates
+        const apt_count = ops.apt_updates_count.load(.monotonic);
+        const payload = std.fmt.bufPrint(&buf, "{d}", .{apt_count}) catch return;
+        client.publish("apt_updates", payload, false) catch {};
+    }
+
+    // Network
+    if (g_net_ops) |ops| {
+        // Signal strength
+        if (ops.getSignalStrength("wlan0") catch null) |signal| {
+            const payload = std.fmt.bufPrint(&buf, "{d}", .{signal}) catch return;
+            client.publish("signal_strength", payload, false) catch {};
+        }
+
+        // Internet status
+        const connected = ops.checkInternetConnection();
+        const payload = if (connected) "ON" else "OFF";
+        client.publish("internet", payload, false) catch {};
+
+        // IP address
+        if (ops.getAnyIpAddress()) |ip_opt| {
+            if (ip_opt) |ip| {
+                defer ops.allocator.free(ip);
+                client.publish("ip_address", ip, false) catch {};
+            }
+        } else |_| {}
+    }
+
+    // Traffic
+    if (g_traffic_mon) |mon| {
+        if (mon.getCurrentTraffic()) |stats| {
+            var down_buf: [32]u8 = undefined;
+            const down_payload = std.fmt.bufPrint(&down_buf, "{d:.1}", .{stats.download_speed}) catch return;
+            client.publish("traffic_down", down_payload, false) catch {};
+
+            var up_buf: [32]u8 = undefined;
+            const up_payload = std.fmt.bufPrint(&up_buf, "{d:.1}", .{stats.upload_speed}) catch return;
+            client.publish("traffic_up", up_payload, false) catch {};
+        } else |_| {}
+    }
+
+    log.debug("MQTT stats published", .{});
 }
