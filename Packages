@@ -1,0 +1,28 @@
+Package: sys-ink
+Version: 1.2.0
+Architecture: armhf
+Maintainer: Zales <zales@example.com>
+Filename: ./sys-ink_1.2.0_armhf.deb
+Size: 114410
+MD5sum: e86b234af0261b3cce6a0a95ebd01a3b
+SHA1: 235b388463886af1e5664ad71b6776930f72352f
+SHA256: 7f65268767be84ef7c33d8ee80a9b7a4c23cc3725b7d86e97a127bd89b91fbfe
+Section: utils
+Priority: optional
+Description: SysInk Display Driver
+ A Zig implementation of the NAS display driver for Waveshare e-Paper display.
+
+Package: sys-ink
+Version: 1.2.0
+Architecture: arm64
+Maintainer: Zales <zales@example.com>
+Filename: ./sys-ink_1.2.0_arm64.deb
+Size: 118836
+MD5sum: 359472ddd072158020649ef54c758ef9
+SHA1: a9a9d8a6063392fe299a18e6f06d4ec6faa7a07d
+SHA256: 145ea715b150b75772fc9f64c9f93fea4077588c584301b9b27ab2dce21613d8
+Section: utils
+Priority: optional
+Description: SysInk Display Driver
+ A Zig implementation of the NAS display driver for Waveshare e-Paper display.
+
