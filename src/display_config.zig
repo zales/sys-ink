@@ -116,6 +116,7 @@ pub const SIGNAL_ICON_X = 125;
 pub const SIGNAL_ICON_Y = 127;
 pub const SIGNAL_VALUE_X = 140;
 pub const SIGNAL_VALUE_Y = 125;
+pub const SIGNAL_AREA_X = 120; // SIGNAL_VALUE_X(140) - 20
 pub const SIGNAL_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
 pub const UPTIME_ICON_X = 205;

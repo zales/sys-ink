@@ -36,7 +36,8 @@ pub const NetworkOps = struct {
         if (@as(isize, @bitCast(set_result)) < 0) return false;
 
         // sockaddr_in for 8.8.8.8:53
-        const ip_num: u32 = (@as(u32, 8) << 24) | (@as(u32, 8) << 16) | (@as(u32, 8) << 8) | 8;
+        // 0x08080808 is 8.8.8.8 in hex
+        const ip_num: u32 = 0x08080808;
         var addr = linux.sockaddr.in{
             .family = linux.AF.INET,
             .port = std.mem.nativeToBig(u16, 53),

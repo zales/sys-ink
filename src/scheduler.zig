@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// Simple task scheduler for periodic operations
 pub const Scheduler = struct {
-    tasks: std.ArrayList(Task),
+    tasks: std.ArrayListUnmanaged(Task),
     allocator: std.mem.Allocator,
 
     const Task = struct {

@@ -21,15 +21,18 @@ pub const DisplayRenderer = struct {
     grid_cached: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !DisplayRenderer {
-        const bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        errdefer bitmap.deinit();
 
         const epd_cfg = try allocator.create(EpdConfig);
+        errdefer allocator.destroy(epd_cfg);
         epd_cfg.* = EpdConfig.init(allocator);
 
         const epd = EPD.init(allocator, epd_cfg);
 
         // Allocate buffer for EPD (128x296 portrait = 4736 bytes)
-        const epd_buffer = try allocator.alloc(u8, (128 / 8) * 296);
+        const buffer_size = (display_config.DISPLAY_HEIGHT / 8) * display_config.DISPLAY_WIDTH;
+        const epd_buffer = try allocator.alloc(u8, buffer_size);
 
         return .{
             .bitmap = bitmap,
@@ -209,7 +212,7 @@ pub const DisplayRenderer = struct {
         self.bitmap.drawRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, color);
 
         // SIGNAL
-        self.bitmap.drawRect(display_config.SIGNAL_VALUE_X - 20, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
+        self.bitmap.drawRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
 
         // Traffic down
         self.bitmap.drawRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
@@ -237,7 +240,7 @@ pub const DisplayRenderer = struct {
                     // Rotate 90° clockwise: (x,y) logical -> (y, 295-x) hardware
                     const hw_x = y;
                     const hw_y = (self.bitmap.width - 1) - x;
-                    const hw_width: u32 = 128;
+                    const hw_width: u32 = display_config.DISPLAY_HEIGHT;
 
                     const byte_idx = (hw_y * (hw_width / 8)) + (hw_x / 8);
                     const bit_idx: u3 = @intCast(hw_x % 8);
@@ -284,11 +287,11 @@ pub const DisplayRenderer = struct {
 
         var buf1: [16]u8 = undefined;
         const load_text = std.fmt.bufPrint(&buf1, "{d}%", .{load}) catch "?";
-        self.drawTextInArea(load_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
+        self.drawTextInArea(load_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
 
         var buf2: [16]u8 = undefined;
         const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
-        self.drawTextInArea(temp_text, .Ubuntu24, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
+        self.drawTextInArea(temp_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
     }
 
     /// Render memory usage
@@ -343,7 +346,7 @@ pub const DisplayRenderer = struct {
 
     /// Render signal strength
     pub fn renderSignalStrength(self: *DisplayRenderer, signal: ?i32) void {
-        self.bitmap.fillRect(display_config.SIGNAL_VALUE_X - 20, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+        self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
 
         const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
         self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);

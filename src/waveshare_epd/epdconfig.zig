@@ -58,9 +58,10 @@ pub const EpdConfig = struct {
         log.info("Power on, waiting for display to stabilize", .{});
         delayMs(200); // Give display time to power up
 
-        log.info("Opening SPI device", .{});
+        const spi_path = std.posix.getenv("SPI_DEVICE") orelse "/dev/spidev0.0";
+        log.info("Opening SPI device {s}", .{spi_path});
         // Open SPI device
-        self.spi_fd = try std.posix.open("/dev/spidev0.0", .{ .ACCMODE = .RDWR }, 0);
+        self.spi_fd = try std.posix.open(spi_path, .{ .ACCMODE = .RDWR }, 0);
 
         log.info("Configuring SPI", .{});
         // Configure SPI
@@ -150,6 +151,8 @@ pub const EpdConfig = struct {
 
     /// Write bytes via SPI
     pub fn spiWrite(self: *EpdConfig, data: []const u8) !void {
+        if (self.spi_fd < 0) return error.NotInitialized;
+
         // SPI has transfer size limits, split into chunks if needed
         const chunk_size = 4096;
         var offset: usize = 0;
