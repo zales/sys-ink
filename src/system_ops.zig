@@ -8,6 +8,7 @@ pub const SystemOps = struct {
     last_cpu_times: ?CpuTimes = null,
     cached_cpu_temp_path: ?[]const u8 = null,
     cached_disk_temp_path: ?[]const u8 = null,
+    cached_fan_path: ?[]const u8 = null,
     apt_check_running: std.atomic.Value(bool),
     apt_updates_count: std.atomic.Value(u32),
     apt_first_check_done: std.atomic.Value(bool),
@@ -35,6 +36,7 @@ pub const SystemOps = struct {
             .last_cpu_times = null,
             .cached_cpu_temp_path = null,
             .cached_disk_temp_path = null,
+            .cached_fan_path = null,
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
             .apt_first_check_done = std.atomic.Value(bool).init(false),
@@ -42,10 +44,14 @@ pub const SystemOps = struct {
     }
 
     pub fn deinit(self: *SystemOps) void {
-        // Free cached disk temp path if allocated
+        // Free cached paths if allocated
         if (self.cached_disk_temp_path) |path| {
             self.allocator.free(path);
             self.cached_disk_temp_path = null;
+        }
+        if (self.cached_fan_path) |path| {
+            self.allocator.free(path);
+            self.cached_fan_path = null;
         }
         // cached_cpu_temp_path points to static string, no need to free
     }
@@ -154,28 +160,48 @@ pub const SystemOps = struct {
 
     /// Get fan speed in RPM
     pub fn getFanSpeed(self: *SystemOps) !u32 {
+        // Use cached path
+        if (self.cached_fan_path) |path| {
+            if (self.readIntFromFile(path)) |rpm| {
+                self.last_fan_speed = rpm;
+                return rpm;
+            } else |_| {
+                // If read fails (e.g. sensor disappeared), invalidate cache
+                self.allocator.free(self.cached_fan_path.?);
+                self.cached_fan_path = null;
+            }
+        }
+
         // Try direct hwmon paths (hwmon0-hwmon9)
         var i: u8 = 0;
         while (i < 10) : (i += 1) {
             var path_buf: [64]u8 = undefined;
             const path = std.fmt.bufPrint(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
 
-            const file = std.fs.openFileAbsolute(path, .{}) catch continue;
-            defer file.close();
-
-            var buf: [32]u8 = undefined;
-            const bytes_read = file.readAll(&buf) catch continue;
-            const rpm_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
-            const rpm = std.fmt.parseInt(u32, rpm_str, 10) catch continue;
-
-            if (rpm > 0) {
-                self.last_fan_speed = rpm;
-                return rpm;
+            // Check if file exists and is readable by trying to read it
+            if (self.readIntFromFile(path)) |rpm| {
+                if (rpm > 0) {
+                    self.cached_fan_path = try self.allocator.dupe(u8, path);
+                    self.last_fan_speed = rpm;
+                    return rpm;
+                }
+            } else |_| {
+                continue;
             }
         }
 
         self.last_fan_speed = 0;
         return 0; // No fan found
+    }
+
+    fn readIntFromFile(_: *SystemOps, path: []const u8) !u32 {
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+
+        var buf: [32]u8 = undefined;
+        const bytes_read = try file.readAll(&buf);
+        const str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
+        return try std.fmt.parseInt(u32, str, 10);
     }
 
     /// Get memory usage percentage
@@ -222,23 +248,22 @@ pub const SystemOps = struct {
 
     /// Get disk/root filesystem usage percentage
     pub fn getDiskUsage(self: *SystemOps) !u8 {
-        // Manual definition of statvfs struct for aarch64/musl
+        // Manual definition compatible with Linux aarch64/musl
         const struct_statvfs = extern struct {
             f_bsize: c_ulong,
             f_frsize: c_ulong,
-            f_blocks: c_ulong,
-            f_bfree: c_ulong,
-            f_bavail: c_ulong,
-            f_files: c_ulong,
-            f_ffree: c_ulong,
-            f_favail: c_ulong,
+            f_blocks: c_ulong, // fsblkcnt_t
+            f_bfree: c_ulong,  // fsblkcnt_t
+            f_bavail: c_ulong, // fsblkcnt_t
+            f_files: c_ulong,  // fsfilcnt_t
+            f_ffree: c_ulong,  // fsfilcnt_t
+            f_favail: c_ulong, // fsfilcnt_t
             f_fsid: c_ulong,
             f_flag: c_ulong,
             f_namemax: c_ulong,
             __reserved: [6]c_int,
         };
 
-        // Extern declaration of statvfs function
         const extern_c = struct {
             pub extern "c" fn statvfs(path: [*:0]const u8, buf: *struct_statvfs) c_int;
         };

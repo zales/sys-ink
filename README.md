@@ -8,7 +8,7 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 - **Network Stats**: IP address, signal strength (WiFi), upload/download speeds.
 - **System Info**: Uptime, APT updates availability, Internet connection status.
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.
-- **Standalone**: Statically linked binary, no external runtime dependencies (libc-free/musl).
+- **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
 
 ## Screenshots
 
@@ -22,7 +22,7 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 ## Hardware Requirements
 
-- **Raspberry Pi**: Tested on Pi 4 and Pi 5 (should work on others with GPIO header).
+- **Raspberry Pi**: Tested on Pi 4 and Pi 5. Uses modern Linux GPIO character device API (`/dev/gpiochip*`), compatible with RPi 5's RP1 chip.
 - **Display**: [Waveshare 2.9inch e-Paper Module (B/W) V2](https://www.waveshare.com/wiki/2.9inch_e-Paper_Module).
   - *Note: This project is specifically tuned for the V2 version of the display.*
 - **Connections**: SPI interface and GPIO pins (RST, DC, BUSY, PWR).
@@ -147,6 +147,7 @@ The application is configured via environment variables. You can set these in th
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GPIO_CHIP` | `/dev/gpiochip0` | Path to GPIO chip device (check with `gpiodetect`) |
+| `SPI_DEVICE` | `/dev/spidev0.0` | Path to SPI device |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARN, ERROR) |
 | `THRESHOLD_CPU_CRITICAL` | `90` | CPU load critical threshold (%) |
 | `THRESHOLD_TEMP_CRITICAL` | `85` | CPU temperature critical threshold (°C) |
