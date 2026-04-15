@@ -255,10 +255,10 @@ pub const SystemOps = struct {
             f_bsize: c_ulong,
             f_frsize: c_ulong,
             f_blocks: c_ulong, // fsblkcnt_t
-            f_bfree: c_ulong,  // fsblkcnt_t
+            f_bfree: c_ulong, // fsblkcnt_t
             f_bavail: c_ulong, // fsblkcnt_t
-            f_files: c_ulong,  // fsfilcnt_t
-            f_ffree: c_ulong,  // fsfilcnt_t
+            f_files: c_ulong, // fsfilcnt_t
+            f_ffree: c_ulong, // fsfilcnt_t
             f_favail: c_ulong, // fsfilcnt_t
             f_fsid: c_ulong,
             f_flag: c_ulong,
