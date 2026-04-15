@@ -17,10 +17,11 @@ pub const DisplayRenderer = struct {
     epd_config: *EpdConfig,
     epd_buffer: []u8,
     allocator: std.mem.Allocator,
+    io: std.Io,
     bmp_exporter: BmpExporter,
     grid_cached: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) !DisplayRenderer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !DisplayRenderer {
         var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
         errdefer bitmap.deinit();
 
@@ -40,6 +41,7 @@ pub const DisplayRenderer = struct {
             .epd_config = epd_cfg,
             .epd_buffer = epd_buffer,
             .allocator = allocator,
+            .io = io,
             .bmp_exporter = BmpExporter.init(allocator),
         };
     }
@@ -277,7 +279,7 @@ pub const DisplayRenderer = struct {
             }
         }
 
-        try self.bmp_exporter.save(buffer, @intCast(width), @intCast(height), config.Config.bmp_export_path);
+        try self.bmp_exporter.save(self.io, buffer, @intCast(width), @intCast(height), config.Config.bmp_export_path);
     }
 
     /// Render CPU load and temperature

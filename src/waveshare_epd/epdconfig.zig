@@ -42,7 +42,7 @@ pub const EpdConfig = struct {
         errdefer self.moduleExit();
         self.spi_fd = -1;
 
-        const chip_path = std.posix.getenv("GPIO_CHIP") orelse "/dev/gpiochip0";
+        const chip_path = @import("../config.zig").Config.gpio_chip;
         log.info("Requesting GPIO lines from {s}", .{chip_path});
 
         // Request pins
@@ -58,10 +58,10 @@ pub const EpdConfig = struct {
         log.info("Power on, waiting for display to stabilize", .{});
         delayMs(200); // Give display time to power up
 
-        const spi_path = std.posix.getenv("SPI_DEVICE") orelse "/dev/spidev0.0";
+        const spi_path = "/dev/spidev0.0";
         log.info("Opening SPI device {s}", .{spi_path});
         // Open SPI device
-        self.spi_fd = try std.posix.open(spi_path, .{ .ACCMODE = .RDWR }, 0);
+        self.spi_fd = @intCast(std.os.linux.open(spi_path, .{ .ACCMODE = .RDWR }, 0));
 
         log.info("Configuring SPI", .{});
         // Configure SPI
@@ -105,7 +105,7 @@ pub const EpdConfig = struct {
 
         // Close SPI
         if (self.spi_fd >= 0) {
-            std.posix.close(self.spi_fd);
+            _ = std.os.linux.close(self.spi_fd);
         }
     }
 
@@ -146,7 +146,8 @@ pub const EpdConfig = struct {
 
     /// Delay for specified milliseconds
     pub fn delayMs(millis: u64) void {
-        std.Thread.sleep(millis * std.time.ns_per_ms);
+        var ts = std.os.linux.timespec{ .sec = @intCast(millis / 1000), .nsec = @intCast((millis % 1000) * std.time.ns_per_ms) };
+        _ = std.os.linux.nanosleep(&ts, &ts);
     }
 
     /// Write bytes via SPI
@@ -161,7 +162,7 @@ pub const EpdConfig = struct {
             const remaining = data.len - offset;
             const to_write = @min(remaining, chunk_size);
             const chunk = data[offset .. offset + to_write];
-            _ = try std.posix.write(self.spi_fd, chunk);
+            _ = std.os.linux.write(self.spi_fd, chunk.ptr, chunk.len);
             offset += to_write;
         }
     }

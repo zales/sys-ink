@@ -2,8 +2,8 @@ const std = @import("std");
 
 /// Simple task scheduler for periodic operations
 pub const Scheduler = struct {
-    tasks: std.ArrayListUnmanaged(Task),
-    allocator: std.mem.Allocator,
+    tasks: std.array_list.Managed(Task),
+    io: std.Io,
 
     const Task = struct {
         name: []const u8,
@@ -12,22 +12,20 @@ pub const Scheduler = struct {
         func: *const fn () void,
     };
 
-    pub fn init(allocator: std.mem.Allocator) Scheduler {
-        var scheduler = Scheduler{
-            .tasks = undefined,
-            .allocator = allocator,
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Scheduler {
+        return .{
+            .tasks = std.array_list.Managed(Task).init(allocator),
+            .io = io,
         };
-        scheduler.tasks = .{};
-        return scheduler;
     }
 
     pub fn deinit(self: *Scheduler) void {
-        self.tasks.deinit(self.allocator);
+        self.tasks.deinit();
     }
 
     /// Schedule a task to run every N seconds
     pub fn every(self: *Scheduler, seconds: u64, name: []const u8, func: *const fn () void) !void {
-        try self.tasks.append(self.allocator, .{
+        try self.tasks.append(.{
             .name = name,
             .interval_seconds = seconds,
             .last_run = 0, // Will run immediately on first runPending
@@ -37,7 +35,7 @@ pub const Scheduler = struct {
 
     /// Run all tasks immediately (for initial setup)
     pub fn runAll(self: *Scheduler) void {
-        const now = std.time.timestamp();
+        const now: i64 = std.Io.Timestamp.now(self.io, .real).toSeconds();
         for (self.tasks.items) |*task| {
             task.func();
             task.last_run = now;
@@ -46,7 +44,7 @@ pub const Scheduler = struct {
 
     /// Run pending tasks that are due
     pub fn runPending(self: *Scheduler) void {
-        const now = std.time.timestamp();
+        const now: i64 = std.Io.Timestamp.now(self.io, .real).toSeconds();
 
         for (self.tasks.items) |*task| {
             const elapsed: i64 = now - task.last_run;
@@ -59,7 +57,7 @@ pub const Scheduler = struct {
 
     /// Get seconds until next task is due (for sleep optimization)
     pub fn idleSeconds(self: *Scheduler) ?i64 {
-        const now = std.time.timestamp();
+        const now: i64 = std.Io.Timestamp.now(self.io, .real).toSeconds();
         var min_wait: ?i64 = null;
 
         for (self.tasks.items) |task| {
