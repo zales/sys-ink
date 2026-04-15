@@ -14,9 +14,10 @@ const O_NONBLOCK: u32 = 0x800;
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) NetworkOps {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) NetworkOps {
+        return .{ .allocator = allocator, .io = io };
     }
 
     pub fn deinit(_: *NetworkOps) void {
@@ -25,15 +26,11 @@ pub const NetworkOps = struct {
 
     /// Check internet connection with a 1s bounded TCP connect (non-blocking)
     pub fn checkInternetConnection(_: *NetworkOps) bool {
-        const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP) catch return false;
-        defer std.posix.close(fd);
-
-        // Make socket non-blocking using linux syscall interface
         const linux = std.os.linux;
-        const flags = linux.fcntl(@intCast(fd), linux.F.GETFL, 0);
-        if (@as(isize, @bitCast(flags)) < 0) return false;
-        const set_result = linux.fcntl(@intCast(fd), linux.F.SETFL, flags | O_NONBLOCK);
-        if (@as(isize, @bitCast(set_result)) < 0) return false;
+        const sock_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 6); // 6 = TCP
+        if (@as(isize, @bitCast(sock_rc)) < 0) return false;
+        const fd: std.posix.fd_t = @intCast(sock_rc);
+        defer _ = linux.close(fd);
 
         // sockaddr_in for 8.8.8.8:53
         // 0x08080808 is 8.8.8.8 in hex
@@ -44,10 +41,7 @@ pub const NetworkOps = struct {
             .addr = std.mem.nativeToBig(u32, ip_num),
         };
 
-        _ = std.posix.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) catch |err| switch (err) {
-            error.WouldBlock => {},
-            else => return false,
-        };
+        _ = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
 
         // Non-blocking connect always goes through poll (even if it succeeds immediately on some systems)
 
@@ -57,22 +51,24 @@ pub const NetworkOps = struct {
         if ((fds[0].revents & std.posix.POLL.OUT) == 0) return false;
 
         var so_error: c_int = 0;
-        _ = std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error)) catch return false;
+        var so_error_len: linux.socklen_t = @sizeOf(c_int);
+        const gso_rc = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&so_error), &so_error_len);
+        if (@as(isize, @bitCast(gso_rc)) != 0) return false;
         return so_error == 0;
     }
 
     /// Get WiFi signal strength from /proc/net/wireless
-    pub fn getSignalStrength(_: *NetworkOps, interface: []const u8) !?i32 {
-        const file = std.fs.openFileAbsolute("/proc/net/wireless", .{}) catch return null;
-        defer file.close();
+    pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) !?i32 {
+        const file = std.Io.Dir.openFileAbsolute(self.io, "/proc/net/wireless", .{}) catch return null;
+        defer file.close(self.io);
 
         var buf: [2048]u8 = undefined;
-        const bytes_read = try file.readAll(&buf);
+        const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
         const content = buf[0..bytes_read];
 
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
-            if (std.mem.indexOf(u8, line, interface) != null) {
+            if (std.mem.find(u8, line, interface) != null) {
                 // Format: "wlan0: 0000   70.  -40.  -256        0      0      0"
                 var parts = std.mem.tokenizeAny(u8, line, " ");
                 _ = parts.next(); // skip interface name
@@ -81,7 +77,7 @@ pub const NetworkOps = struct {
 
                 if (parts.next()) |signal_str| {
                     // Remove trailing dot if present
-                    const clean_str = std.mem.trimRight(u8, signal_str, ".");
+                    const clean_str = std.mem.trimEnd(u8, signal_str, ".");
                     return try std.fmt.parseInt(i32, clean_str, 10);
                 }
             }
@@ -163,14 +159,15 @@ pub const NetworkOps = struct {
 
 /// Traffic monitor for tracking network traffic
 pub const TrafficMonitor = struct {
+    io: std.Io,
     last_rx_bytes: ?u64 = null,
     last_tx_bytes: ?u64 = null,
     last_time: ?i64 = null,
     last_rx_speed: f64 = 0,
     last_tx_speed: f64 = 0,
 
-    pub fn init(_: std.mem.Allocator) TrafficMonitor {
-        return .{};
+    pub fn init(_: std.mem.Allocator, io: std.Io) TrafficMonitor {
+        return .{ .io = io };
     }
 
     pub fn deinit(_: *TrafficMonitor) void {
@@ -200,11 +197,11 @@ pub const TrafficMonitor = struct {
 
     /// Get current network traffic using cached measurements
     pub fn getCurrentTraffic(self: *TrafficMonitor) !TrafficResult {
-        const file = try std.fs.openFileAbsolute("/proc/net/dev", .{});
-        defer file.close();
+        const file = try std.Io.Dir.openFileAbsolute(self.io, "/proc/net/dev", .{});
+        defer file.close(self.io);
 
         var buf: [4096]u8 = undefined;
-        const bytes_read = try file.readAll(&buf);
+        const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
         const content = buf[0..bytes_read];
 
         // Sum all interfaces (skip loopback)
@@ -214,10 +211,10 @@ pub const TrafficMonitor = struct {
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
             // Skip header lines
-            if (std.mem.indexOf(u8, line, ":") == null) continue;
+            if (std.mem.find(u8, line, ":") == null) continue;
 
             // Skip loopback
-            if (std.mem.indexOf(u8, line, "lo:") != null) continue;
+            if (std.mem.find(u8, line, "lo:") != null) continue;
 
             // Parse line: "interface: rx_bytes rx_packets ... tx_bytes tx_packets ..."
             var parts = std.mem.tokenizeAny(u8, line, " :");
@@ -240,7 +237,7 @@ pub const TrafficMonitor = struct {
             }
         }
 
-        const now = std.time.timestamp();
+        const now: i64 = std.Io.Timestamp.now(self.io, .real).toSeconds();
 
         // First measurement - initialize cache
         if (self.last_rx_bytes == null or self.last_tx_bytes == null or self.last_time == null) {

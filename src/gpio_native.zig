@@ -10,7 +10,7 @@ pub const GpioNative = struct {
         fd: std.posix.fd_t,
 
         pub fn deinit(self: Handle) void {
-            std.posix.close(self.fd);
+            _ = std.os.linux.close(self.fd);
         }
 
         pub fn setValue(self: Handle, value: u8) !void {
@@ -54,8 +54,8 @@ pub const GpioNative = struct {
     };
 
     pub fn requestLine(chip_path: []const u8, pin: u32, direction: RequestType) !Handle {
-        const chip_fd = try std.posix.open(chip_path, .{ .ACCMODE = .RDWR }, 0);
-        defer std.posix.close(chip_fd);
+        const chip_fd = try std.posix.openat(std.posix.AT.FDCWD, chip_path, .{ .ACCMODE = .RDWR }, 0);
+        defer _ = std.os.linux.close(chip_fd);
 
         var req = GpioHandleRequest{
             .lineoffsets = undefined,

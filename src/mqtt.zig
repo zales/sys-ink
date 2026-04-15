@@ -1,11 +1,12 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 
 const log = std.log.scoped(.mqtt);
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration
 pub const MqttClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     stream: ?net.Stream = null,
     host: []const u8,
     port: u16,
@@ -32,6 +33,7 @@ pub const MqttClient = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         host: []const u8,
         port: u16,
         client_id: []const u8,
@@ -41,6 +43,7 @@ pub const MqttClient = struct {
     ) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .host = host,
             .port = port,
             .client_id = client_id,
@@ -61,7 +64,11 @@ pub const MqttClient = struct {
         log.info("Connecting to MQTT broker {s}:{d}", .{ self.host, self.port });
 
         // Connect with automatic DNS resolution
-        self.stream = net.tcpConnectToHost(self.allocator, self.host, self.port) catch |err| {
+        const address = net.IpAddress.resolve(self.io, self.host, self.port) catch |err| {
+            log.err("Failed to resolve MQTT broker {s}:{d}: {}", .{ self.host, self.port, err });
+            return err;
+        };
+        self.stream = address.connect(self.io, .{ .mode = .stream }) catch |err| {
             log.err("Failed to connect to MQTT broker {s}:{d}: {}", .{ self.host, self.port, err });
             return err;
         };
@@ -83,8 +90,8 @@ pub const MqttClient = struct {
         if (self.stream) |stream| {
             // Send DISCONNECT packet
             const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT with 0 remaining length
-            stream.writeAll(&disconnect_packet) catch {};
-            stream.close();
+            stream.socket.send(self.io, &stream.socket.address, &disconnect_packet) catch {};
+            stream.close(self.io);
         }
 
         self.stream = null;
@@ -140,8 +147,7 @@ pub const MqttClient = struct {
         pos += payload.len;
 
         // Send
-        stream.writeAll(packet_buf[0..pos]) catch |err| {
-            log.warn("Failed to publish: {}", .{err});
+        stream.socket.send(self.io, &stream.socket.address, packet_buf[0..pos]) catch |err| {
             self.connected = false;
             return err;
         };
@@ -160,8 +166,7 @@ pub const MqttClient = struct {
         const discovery_topic = std.fmt.bufPrint(&topic_buf, "homeassistant/sensor/sysink/{s}/config", .{sensor_id}) catch return;
 
         var payload_buf: [512]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&payload_buf);
-        const writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&payload_buf);
 
         try writer.writeAll("{");
         try writer.print("\"name\":\"{s}\"", .{name});
@@ -186,7 +191,7 @@ pub const MqttClient = struct {
         try writer.writeAll("\"model\":\"E-Paper Monitor\"");
         try writer.writeAll("}}");
 
-        const payload = stream.getWritten();
+        const payload = writer.buffered();
 
         // Publish directly without prefix for discovery topic
         try self.publishRaw(discovery_topic, payload, true);
@@ -225,7 +230,7 @@ pub const MqttClient = struct {
         @memcpy(packet_buf[pos..][0..payload.len], payload);
         pos += payload.len;
 
-        stream.writeAll(packet_buf[0..pos]) catch |err| {
+        stream.socket.send(self.io, &stream.socket.address, packet_buf[0..pos]) catch |err| {
             log.warn("Failed to publish: {}", .{err});
             self.connected = false;
             return err;
@@ -238,7 +243,7 @@ pub const MqttClient = struct {
 
         const stream = self.stream orelse return error.NotConnected;
         const ping_packet = [_]u8{ 0xC0, 0x00 }; // PINGREQ
-        stream.writeAll(&ping_packet) catch |err| {
+        stream.socket.send(self.io, &stream.socket.address, &ping_packet) catch |err| {
             log.warn("Ping failed: {}", .{err});
             self.connected = false;
             return err;
@@ -274,7 +279,8 @@ pub const MqttClient = struct {
         }
 
         // Build packet
-        var packet_buf: [256]u8 = undefined;
+        var packet_buf: [512]u8 = undefined;
+        if (2 + remaining_len > packet_buf.len) return error.PacketTooLarge;
         var pos: usize = 0;
 
         // Fixed header
@@ -332,17 +338,18 @@ pub const MqttClient = struct {
             pos += password.len;
         }
 
-        try stream.writeAll(packet_buf[0..pos]);
+        try stream.socket.send(self.io, &stream.socket.address, packet_buf[0..pos]);
     }
 
     fn receiveConnack(self: *Self) !void {
         const stream = self.stream orelse return error.NotConnected;
 
         var buf: [4]u8 = undefined;
-        const bytes_read = stream.read(&buf) catch |err| {
+        const msg = stream.socket.receive(self.io, &buf) catch |err| {
             log.err("Failed to read CONNACK: {}", .{err});
             return err;
         };
+        const bytes_read = msg.data.len;
 
         if (bytes_read < 4) {
             log.err("CONNACK too short: {} bytes", .{bytes_read});
@@ -399,31 +406,31 @@ pub const MqttConfig = struct {
     topic_prefix: []const u8 = "sysink",
     discovery_enabled: bool = true,
 
-    pub fn load() MqttConfig {
+    pub fn load(init: std.process.Init) MqttConfig {
         var cfg = MqttConfig{};
 
-        if (std.posix.getenv("MQTT_ENABLED")) |val| {
+        if (init.environ_map.get("MQTT_ENABLED")) |val| {
             cfg.enabled = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
         }
-        if (std.posix.getenv("MQTT_HOST")) |val| {
+        if (init.environ_map.get("MQTT_HOST")) |val| {
             cfg.host = val;
         }
-        if (std.posix.getenv("MQTT_PORT")) |val| {
+        if (init.environ_map.get("MQTT_PORT")) |val| {
             cfg.port = std.fmt.parseInt(u16, val, 10) catch 1883;
         }
-        if (std.posix.getenv("MQTT_USERNAME")) |val| {
+        if (init.environ_map.get("MQTT_USERNAME")) |val| {
             cfg.username = val;
         }
-        if (std.posix.getenv("MQTT_PASSWORD")) |val| {
+        if (init.environ_map.get("MQTT_PASSWORD")) |val| {
             cfg.password = val;
         }
-        if (std.posix.getenv("MQTT_CLIENT_ID")) |val| {
+        if (init.environ_map.get("MQTT_CLIENT_ID")) |val| {
             cfg.client_id = val;
         }
-        if (std.posix.getenv("MQTT_TOPIC_PREFIX")) |val| {
+        if (init.environ_map.get("MQTT_TOPIC_PREFIX")) |val| {
             cfg.topic_prefix = val;
         }
-        if (std.posix.getenv("MQTT_DISCOVERY")) |val| {
+        if (init.environ_map.get("MQTT_DISCOVERY")) |val| {
             cfg.discovery_enabled = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
         }
 

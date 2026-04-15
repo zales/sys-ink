@@ -17,7 +17,7 @@ pub const BmpExporter = struct {
     /// width: image width in pixels
     /// height: image height in pixels
     /// path: output file path
-    pub fn save(self: *BmpExporter, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
+    pub fn save(self: *BmpExporter, io: std.Io, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
         // Calculate hash to detect changes (skip export if unchanged)
         const hash = std.hash.Wyhash.hash(0, buffer);
         if (hash == self.last_hash) {
@@ -25,29 +25,29 @@ pub const BmpExporter = struct {
         }
         self.last_hash = hash;
 
-        const file = std.fs.createFileAbsolute(path, .{}) catch |err| {
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch |err| {
             // If primary path fails, try fallback to /tmp
             if (!std.mem.startsWith(u8, path, "/tmp")) {
                 const fallback_path = "/tmp/sys-ink.bmp";
                 log.warn("Failed to create {s}: {}, trying {s}", .{ path, err, fallback_path });
-                return self.saveInternal(buffer, width, height, fallback_path);
+                return self.saveInternal(io, buffer, width, height, fallback_path);
             }
             return err;
         };
-        defer file.close();
+        defer file.close(io);
 
-        try self.writeBmp(file, buffer, width, height);
+        try self.writeBmp(io, file, buffer, width, height);
         log.info("BMP exported to {s}", .{path});
     }
 
-    fn saveInternal(self: *BmpExporter, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
-        const file = try std.fs.createFileAbsolute(path, .{});
-        defer file.close();
-        try self.writeBmp(file, buffer, width, height);
+    fn saveInternal(self: *BmpExporter, io: std.Io, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer file.close(io);
+        try self.writeBmp(io, file, buffer, width, height);
         log.info("BMP exported to {s}", .{path});
     }
 
-    fn writeBmp(self: *BmpExporter, file: std.fs.File, buffer: []const u8, width: u32, height: u32) !void {
+    fn writeBmp(self: *BmpExporter, io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, height: u32) !void {
         const bmp_stride = ((width + 31) / 32) * 4;
         const image_size = bmp_stride * height;
         const file_size = 62 + image_size;
@@ -111,7 +111,7 @@ pub const BmpExporter = struct {
         header[idx] = 0;
         idx += 1;
 
-        try file.writeAll(&header);
+        try file.writeStreamingAll(io, &header);
 
         var row_buffer = try self.allocator.alloc(u8, bmp_stride);
         defer self.allocator.free(row_buffer);
@@ -132,7 +132,7 @@ pub const BmpExporter = struct {
                 byte.* = ~byte.*;
             }
 
-            try file.writeAll(row_buffer);
+            try file.writeStreamingAll(io, row_buffer);
         }
     }
 };

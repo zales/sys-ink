@@ -28,21 +28,15 @@ fn signalHandler(_: c_int) callconv(.c) void {
     should_exit.store(true, .release);
 }
 
-pub fn main() !u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const leaked = gpa.deinit();
-        if (leaked == .leak) {
-            log.warn("Memory leak detected on exit", .{});
-        }
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Load configuration from environment
-    config.Config.load();
+    config.Config.load(init);
 
     // Initialize logger
-    try logger.init();
+    try logger.init(io);
     defer logger.deinit();
 
     // Root check removed to allow running as non-root user with proper permissions (gpio/spi groups)
@@ -59,10 +53,10 @@ pub fn main() !u8 {
     log.info("SysInk starting", .{});
 
     // Initialize modules
-    var sys_ops = SystemOps.init(allocator);
+    var sys_ops = SystemOps.init(allocator, io);
     defer sys_ops.deinit();
-    var net_ops = NetworkOps.init(allocator);
-    var traffic_mon = TrafficMonitor.init(allocator);
+    var net_ops = NetworkOps.init(allocator, io);
+    var traffic_mon = TrafficMonitor.init(allocator, io);
 
     // Set global pointers for scheduler callbacks
     g_sys_ops = &sys_ops;
@@ -70,7 +64,7 @@ pub fn main() !u8 {
     g_traffic_mon = &traffic_mon;
 
     // Initialize display renderer
-    var renderer = DisplayRenderer.init(allocator) catch |err| {
+    var renderer = DisplayRenderer.init(allocator, io) catch |err| {
         log.err("Failed to initialize display: {}", .{err});
         log.err("Check GPIO/SPI permissions", .{});
         return 1;
@@ -93,12 +87,13 @@ pub fn main() !u8 {
     renderer.renderGrid();
 
     // Initialize MQTT client if enabled
-    const mqtt_config = MqttConfig.load();
+    const mqtt_config = MqttConfig.load(init);
     var mqtt_client: ?MqttClient = null;
     if (mqtt_config.enabled) {
         log.info("MQTT enabled, connecting to {s}:{d}", .{ mqtt_config.host, mqtt_config.port });
         mqtt_client = MqttClient.init(
             allocator,
+            io,
             mqtt_config.host,
             mqtt_config.port,
             mqtt_config.client_id,
@@ -123,7 +118,7 @@ pub fn main() !u8 {
     defer if (mqtt_client) |*client| client.deinit();
 
     // Initialize scheduler
-    var scheduler = Scheduler.init(allocator);
+    var scheduler = Scheduler.init(allocator, io);
     defer scheduler.deinit();
 
     // Schedule rendering tasks
@@ -175,7 +170,7 @@ pub fn main() !u8 {
         // Sleep until next task or max 1 second
         const idle = scheduler.idleSeconds();
         const sleep_time = if (idle) |i| @min(i, 1) else 1;
-        std.Thread.sleep(@intCast(sleep_time * std.time.ns_per_s));
+        io.sleep(std.Io.Duration.fromSeconds(sleep_time), .awake) catch {};
     }
 
     log.info("Shutting down gracefully", .{});

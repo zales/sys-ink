@@ -11,11 +11,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = true, // Remove debug symbols
+            .link_libc = true, // Link libc for system calls and C interop
         }),
     });
-
-    // Link libc for system calls and C interop
-    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -35,9 +33,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-    unit_tests.linkLibC();
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

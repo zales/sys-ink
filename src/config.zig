@@ -45,6 +45,9 @@ pub const Config = struct {
     /// BMP export path
     pub var bmp_export_path: []const u8 = "/tmp/sys-ink.bmp";
 
+    /// GPIO chip path
+    pub var gpio_chip: []const u8 = "/dev/gpiochip0";
+
     /// Scheduler interval for fast updates (CPU, RAM, etc.) in seconds
     pub var interval_fast: u32 = 30;
 
@@ -52,45 +55,53 @@ pub const Config = struct {
     pub var interval_slow: u32 = 10800; // 3 hours
 
     /// Load configuration from environment variables
-    pub fn load() void {
-        if (std.posix.getenv("EXPORT_BMP")) |val| {
+    pub fn load(init: std.process.Init) void {
+        if (init.environ_map.get("GPIO_CHIP")) |val| {
+            gpio_chip = val;
+        } else {
+            // Auto-detect by label if GPIO_CHIP not set explicitly
+            if (findGpioChipByLabel("pinctrl-rp1")) |path| {
+                gpio_chip = path;
+            }
+        }
+        if (init.environ_map.get("EXPORT_BMP")) |val| {
             export_bmp = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
         }
-        if (std.posix.getenv("BMP_EXPORT_PATH")) |val| {
+        if (init.environ_map.get("BMP_EXPORT_PATH")) |val| {
             bmp_export_path = val;
         }
-        if (std.posix.getenv("INTERVAL_FAST")) |val| {
+        if (init.environ_map.get("INTERVAL_FAST")) |val| {
             interval_fast = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_fast);
         }
-        if (std.posix.getenv("INTERVAL_SLOW")) |val| {
+        if (init.environ_map.get("INTERVAL_SLOW")) |val| {
             interval_slow = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_slow);
         }
 
-        if (std.posix.getenv("THRESHOLD_CPU_CRITICAL")) |val| {
+        if (init.environ_map.get("THRESHOLD_CPU_CRITICAL")) |val| {
             threshold_cpu_critical = std.fmt.parseInt(u8, val, 10) catch threshold_cpu_critical;
         }
 
-        if (std.posix.getenv("THRESHOLD_TEMP_CRITICAL")) |val| {
+        if (init.environ_map.get("THRESHOLD_TEMP_CRITICAL")) |val| {
             threshold_temp_critical = std.fmt.parseInt(u8, val, 10) catch threshold_temp_critical;
         }
 
-        if (std.posix.getenv("THRESHOLD_MEM_CRITICAL")) |val| {
+        if (init.environ_map.get("THRESHOLD_MEM_CRITICAL")) |val| {
             threshold_mem_critical = std.fmt.parseInt(u8, val, 10) catch threshold_mem_critical;
         }
 
-        if (std.posix.getenv("THRESHOLD_DISK_CRITICAL")) |val| {
+        if (init.environ_map.get("THRESHOLD_DISK_CRITICAL")) |val| {
             threshold_disk_critical = std.fmt.parseInt(u8, val, 10) catch threshold_disk_critical;
         }
 
-        if (std.posix.getenv("LOG_LEVEL")) |val| {
+        if (init.environ_map.get("LOG_LEVEL")) |val| {
             log_level = LogLevel.parse(val);
         }
 
-        if (std.posix.getenv("LOG_TO_FILE")) |val| {
+        if (init.environ_map.get("LOG_TO_FILE")) |val| {
             log_to_file = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
         }
 
-        if (std.posix.getenv("LOG_FILE_PATH")) |val| {
+        if (init.environ_map.get("LOG_FILE_PATH")) |val| {
             log_file_path = val;
         }
 
@@ -109,5 +120,39 @@ pub const Config = struct {
     /// Check if running as root user
     pub fn isRoot() bool {
         return std.os.linux.getuid() == 0;
+    }
+
+    /// Static buffer for auto-detected GPIO chip path
+    var gpio_chip_buf: [32]u8 = undefined;
+
+    /// Scan /dev/gpiochip0..31 and return path of the chip whose label matches.
+    /// Returns null if not found. Uses GPIO_GET_CHIPINFO_IOCTL (same as gpiodetect).
+    fn findGpioChipByLabel(label: []const u8) ?[]const u8 {
+        // struct gpiochip_info: name[32], label[32], lines(u32)
+        const GpiochipInfo = extern struct {
+            name: [32]u8,
+            label: [32]u8,
+            lines: u32,
+        };
+        const GPIO_GET_CHIPINFO_IOCTL: u32 = 0x8044b401;
+
+        var path_buf: [32]u8 = undefined;
+        var i: u8 = 0;
+        while (i < 32) : (i += 1) {
+            const path = std.fmt.bufPrintZ(&path_buf, "/dev/gpiochip{d}", .{i}) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            defer _ = std.os.linux.close(fd);
+
+            var info: GpiochipInfo = undefined;
+            const rc = std.os.linux.ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, @intFromPtr(&info));
+            if (rc != 0) continue;
+
+            const chip_label = std.mem.sliceTo(&info.label, 0);
+            if (std.mem.eql(u8, chip_label, label)) {
+                const result = std.fmt.bufPrint(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
+                return result;
+            }
+        }
+        return null;
     }
 };

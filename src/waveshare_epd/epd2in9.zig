@@ -140,11 +140,15 @@ pub const EPD = struct {
         log.debug("e-Paper busy", .{});
 
         const timeout_ms: u64 = 5000;
-        const start_time = std.time.milliTimestamp();
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        const start_ms: u64 = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 
         // BUSY pin: 1 (HIGH) = busy, 0 (LOW) = idle/ready
         while (try self.config.digitalRead(EpdConfig.BUSY_PIN) == 1) {
-            const elapsed = std.time.milliTimestamp() - start_time;
+            _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+            const now_ms: u64 = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+            const elapsed = now_ms - start_ms;
             if (elapsed > timeout_ms) {
                 log.err("Timeout waiting for e-Paper (busy for {} ms)", .{elapsed});
                 return error.EpdBusyTimeout;
