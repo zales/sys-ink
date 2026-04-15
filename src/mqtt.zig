@@ -1,6 +1,13 @@
 const std = @import("std");
 const net = std.Io.net;
 
+const c = @cImport({
+    @cInclude("netdb.h");
+    @cInclude("arpa/inet.h");
+    @cInclude("sys/socket.h");
+    @cInclude("netinet/in.h");
+});
+
 const log = std.log.scoped(.mqtt);
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration
@@ -63,8 +70,8 @@ pub const MqttClient = struct {
 
         log.info("Connecting to MQTT broker {s}:{d}", .{ self.host, self.port });
 
-        // Connect with automatic DNS resolution
-        const address = net.IpAddress.resolve(self.io, self.host, self.port) catch |err| {
+        // Resolve hostname via libc getaddrinfo (supports DNS, mDNS, /etc/hosts)
+        const address = resolveHost(self.io, self.host, self.port) catch |err| {
             log.err("Failed to resolve MQTT broker {s}:{d}: {}", .{ self.host, self.port, err });
             return err;
         };
@@ -394,6 +401,31 @@ pub const MqttClient = struct {
         return pos;
     }
 };
+
+/// Resolve hostname to IpAddress using libc getaddrinfo.
+/// Supports DNS, mDNS (.local via nss-mdns/avahi), and /etc/hosts.
+/// Falls back to net.IpAddress.resolve for plain IP strings.
+fn resolveHost(io: std.Io, host: []const u8, port: u16) !net.IpAddress {
+    var host_buf: [256]u8 = undefined;
+    const host_z = std.fmt.bufPrintZ(&host_buf, "{s}", .{host}) catch return error.HostTooLong;
+
+    var hints = std.mem.zeroes(c.struct_addrinfo);
+    hints.ai_family = c.AF_INET;
+    hints.ai_socktype = c.SOCK_STREAM;
+
+    var result: ?*c.struct_addrinfo = null;
+    if (c.getaddrinfo(host_z.ptr, null, &hints, &result) != 0) {
+        return error.DnsResolutionFailed;
+    }
+    defer c.freeaddrinfo(result);
+
+    const addr_info = result orelse return error.DnsResolutionFailed;
+    const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr_info.ai_addr));
+    const ip = c.inet_ntoa(sin.sin_addr);
+    const ip_slice = std.mem.span(ip);
+
+    return net.IpAddress.resolve(io, ip_slice, port);
+}
 
 /// MQTT configuration
 pub const MqttConfig = struct {
