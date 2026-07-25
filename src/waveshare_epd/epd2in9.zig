@@ -50,8 +50,24 @@ const WS_20_30 = [_]u8{
     0x0,  0x32, 0x36,
 };
 
-pub const EPD = struct {
-    config: *EpdConfig,
+/// The panel driver, parameterised by its transport so tests can substitute a
+/// recorder for the real SPI/GPIO path. `EPD` below is the production instance.
+///
+/// `Transport` must provide the pin constants (RST_PIN, DC_PIN, BUSY_PIN,
+/// PWR_PIN), `delayMs`, `monotonicMillis`, `moduleInit`, `digitalWrite`,
+/// `digitalRead` and `spiWrite`.
+pub fn Epd(comptime Transport: type) type {
+    return struct {
+    const Self = @This();
+
+    config: *Transport,
+
+    /// Arguments to DISPLAY_UPDATE_CONTROL_2. The difference between these two
+    /// is the whole full-versus-partial distinction, so they get names.
+    const update_full = 0xC7;
+    const update_partial = 0x0F;
+    /// Clock and analog on, without activating a display update.
+    const update_power_on = 0xC0;
 
     // Command sets as strict Enum
     const Command = enum(u8) {
@@ -79,94 +95,91 @@ pub const EPD = struct {
         NOP = 0x7F,
     };
 
-    pub fn init(config: *EpdConfig) EPD {
+    pub fn init(config: *Transport) Self {
         return .{ .config = config };
     }
 
     /// Hardware reset - V2 uses 10ms delays
-    fn reset(self: *EPD) !void {
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 1);
-        EpdConfig.delayMs(10);
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 0);
-        EpdConfig.delayMs(2);
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 1);
-        EpdConfig.delayMs(10);
+    fn reset(self: *Self) !void {
+        try self.config.digitalWrite(Transport.RST_PIN, 1);
+        self.config.delayMs(10);
+        try self.config.digitalWrite(Transport.RST_PIN, 0);
+        self.config.delayMs(2);
+        try self.config.digitalWrite(Transport.RST_PIN, 1);
+        self.config.delayMs(10);
     }
+
+    // Each spiWrite is one write() to /dev/spidev, and the kernel frames every
+    // write with its own chip-select assertion. DC therefore only has to be
+    // correct before the call; the driver never touches CS itself.
 
     /// Send command byte
-    fn sendCommand(self: *EPD, command: Command) !void {
-        try self.config.digitalWrite(EpdConfig.DC_PIN, 0);
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 0);
+    fn sendCommand(self: *Self, command: Command) !void {
+        try self.config.digitalWrite(Transport.DC_PIN, 0);
         try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 1);
     }
 
-    /// Optimization: Send command with arguments in one CS transaction
-    fn sendCommandArgs(self: *EPD, command: Command, args: []const u8) !void {
-        try self.config.digitalWrite(EpdConfig.DC_PIN, 0);
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 0);
+    /// Send a command followed by its arguments, as two framed transfers.
+    fn sendCommandArgs(self: *Self, command: Command, args: []const u8) !void {
+        try self.config.digitalWrite(Transport.DC_PIN, 0);
         try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
-        // Keep CS low for data phase if possible, but many EPDs require CS toggle between DC change
-        // Safest approach: toggle CS.
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 1);
 
         if (args.len > 0) {
-            try self.config.digitalWrite(EpdConfig.DC_PIN, 1);
-            try self.config.digitalWrite(EpdConfig.CS_PIN, 0);
+            try self.config.digitalWrite(Transport.DC_PIN, 1);
             try self.config.spiWrite(args);
-            try self.config.digitalWrite(EpdConfig.CS_PIN, 1);
         }
     }
 
     /// Send single data byte
-    fn sendData(self: *EPD, data: u8) !void {
-        try self.config.digitalWrite(EpdConfig.DC_PIN, 1);
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 0);
+    fn sendData(self: *Self, data: u8) !void {
+        try self.config.digitalWrite(Transport.DC_PIN, 1);
         try self.config.spiWrite(&[_]u8{data});
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 1);
     }
 
     /// Send multiple data bytes
-    fn sendDataSlice(self: *EPD, data: []const u8) !void {
-        try self.config.digitalWrite(EpdConfig.DC_PIN, 1);
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 0);
+    fn sendDataSlice(self: *Self, data: []const u8) !void {
+        try self.config.digitalWrite(Transport.DC_PIN, 1);
         try self.config.spiWrite(data);
-        try self.config.digitalWrite(EpdConfig.CS_PIN, 1);
     }
 
-    /// Wait until the busy_pin goes LOW
-    /// V2: LOW (0) = IDLE, HIGH (1) = BUSY
-    fn readBusy(self: *EPD) !void {
+    /// Longest a refresh may keep BUSY asserted before we give up on the panel.
+    pub const busy_timeout_ms: u64 = 5000;
+    /// Interval between BUSY samples while waiting.
+    const busy_poll_ms: u64 = 2;
+
+    /// Wait until the BUSY line goes LOW.
+    /// V2: LOW (0) = IDLE, HIGH (1) = BUSY.
+    ///
+    /// Polled rather than waited on: the chardev ABI can deliver an edge event
+    /// instead, which would replace roughly a thousand ioctls per full refresh
+    /// with a single poll. Left as polling because the naive version races —
+    /// the edge can pass between arming the event and blocking on it — and this
+    /// is nowhere near a bottleneck at a 30-second cadence.
+    fn readBusy(self: *Self) !void {
         log.debug("e-Paper busy", .{});
 
-        const timeout_ms: u64 = 5000;
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-        const start_ms: u64 = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+        const start_ms = self.config.monotonicMillis();
 
-        // BUSY pin: 1 (HIGH) = busy, 0 (LOW) = idle/ready
-        while (try self.config.digitalRead(EpdConfig.BUSY_PIN) == 1) {
-            _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-            const now_ms: u64 = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
-            const elapsed = now_ms - start_ms;
-            if (elapsed > timeout_ms) {
-                log.err("Timeout waiting for e-Paper (busy for {} ms)", .{elapsed});
+        while (try self.config.digitalRead(Transport.BUSY_PIN) == 1) {
+            // Reported, not logged: the caller decides how loudly to complain,
+            // and the elapsed time is always just over the timeout anyway.
+            if (self.config.monotonicMillis() -| start_ms > busy_timeout_ms) {
                 return error.EpdBusyTimeout;
             }
-            EpdConfig.delayMs(2); // Check more frequently (was 20ms)
+            self.config.delayMs(busy_poll_ms);
         }
 
         log.debug("e-Paper busy release", .{});
     }
 
     /// Load LUT (first 153 bytes only) - from C reference
-    fn loadLut(self: *EPD, lut: []const u8) !void {
+    fn loadLut(self: *Self, lut: []const u8) !void {
         try self.sendCommand(.WRITE_LUT_REGISTER);
         try self.sendDataSlice(lut[0..153]);
     }
 
     /// Load LUT with voltage settings - from C reference
-    fn loadLutByHost(self: *EPD, lut: []const u8) !void {
+    fn loadLutByHost(self: *Self, lut: []const u8) !void {
         try self.loadLut(lut);
 
         try self.sendCommand(.WRITE_VCOM_REGISTER_OPT); // 0x3f
@@ -185,7 +198,7 @@ pub const EPD = struct {
     }
 
     /// Setting the display window
-    fn setWindows(self: *EPD, x_start: u16, y_start: u16, x_end: u16, y_end: u16) !void {
+    fn setWindows(self: *Self, x_start: u16, y_start: u16, x_end: u16, y_end: u16) !void {
         const data = [_]u8{
             @intCast((x_start >> 3) & 0xFF),
             @intCast((x_end >> 3) & 0xFF),
@@ -202,7 +215,7 @@ pub const EPD = struct {
     }
 
     /// Set Cursor
-    fn setCursor(self: *EPD, x_start: u16, y_start: u16) !void {
+    fn setCursor(self: *Self, x_start: u16, y_start: u16) !void {
         try self.sendCommand(.SET_RAM_X_ADDRESS_COUNTER);
         try self.sendData(@intCast((x_start >> 3) & 0xFF));
 
@@ -213,24 +226,26 @@ pub const EPD = struct {
         try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_COUNTER, &data_y);
     }
 
-    /// Turn On Display - V2 uses 0xC7
-    fn turnOnDisplay(self: *EPD) !void {
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{0xC7});
+    /// Drive a full refresh: every pixel is repainted with the full waveform,
+    /// which is what makes it flash.
+    fn turnOnDisplay(self: *Self) !void {
+        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_full});
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
 
-    /// Turn On Display Partial - uses 0x0F
-    fn turnOnDisplayPartial(self: *EPD) !void {
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{0x0F});
+    /// Drive a partial refresh: only pixels differing from the reference frame
+    /// are touched, with a waveform weak enough not to flash.
+    fn turnOnDisplayPartial(self: *Self) !void {
+        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_partial});
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
 
     /// Re-initialize the e-Paper register (without module init)
-    pub fn reInit(self: *EPD) !void {
+    pub fn reInit(self: *Self) !void {
         try self.reset();
-        EpdConfig.delayMs(100);
+        self.config.delayMs(100);
 
         try self.readBusy();
 
@@ -251,44 +266,37 @@ pub const EPD = struct {
     }
 
     /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
-    pub fn initDisplay(self: *EPD) !void {
+    pub fn initDisplay(self: *Self) !void {
         try self.config.moduleInit();
         try self.reInit();
     }
 
-    /// Clear screen - optimized chunked writer
-    pub fn clear(self: *EPD, color: u8) !void {
-        var chunk_buf: [128]u8 = undefined;
-        @memset(&chunk_buf, color);
+    /// Fill both RAM banks with `color` and refresh.
+    ///
+    /// Written in one go per bank: spiWrite already splits at the spidev
+    /// transfer limit, so the old 128-byte loop just multiplied the syscalls.
+    pub fn clear(self: *Self, color: u8) !void {
+        var frame: Frame = undefined;
+        @memset(&frame, color);
 
-        try self.sendCommand(.WRITE_RAM); // black/white
-        var remaining: usize = EPD_BUFFER_SIZE;
-        while (remaining > 0) {
-            const size = @min(remaining, chunk_buf.len);
-            try self.sendDataSlice(chunk_buf[0..size]);
-            remaining -= size;
-        }
+        try self.sendCommand(.WRITE_RAM);
+        try self.sendDataSlice(&frame);
 
-        try self.sendCommand(.WRITE_RAM_BASE); // base
-        remaining = EPD_BUFFER_SIZE;
-        while (remaining > 0) {
-            const size = @min(remaining, chunk_buf.len);
-            try self.sendDataSlice(chunk_buf[0..size]);
-            remaining -= size;
-        }
+        try self.sendCommand(.WRITE_RAM_BASE);
+        try self.sendDataSlice(&frame);
 
         try self.turnOnDisplay();
     }
 
     /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
-    pub fn display(self: *EPD, image: *const Frame) !void {
+    pub fn display(self: *Self, image: *const Frame) !void {
         try self.sendCommand(.WRITE_RAM);
         try self.sendDataSlice(image);
         try self.turnOnDisplay();
     }
 
     /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
-    pub fn displayBase(self: *EPD, image: *const Frame) !void {
+    pub fn displayBase(self: *Self, image: *const Frame) !void {
         try self.sendCommand(.WRITE_RAM); // Write to black RAM
         try self.sendDataSlice(image);
 
@@ -303,12 +311,12 @@ pub const EPD = struct {
     ///
     /// The RST pulse resets the registers but leaves both RAM banks intact —
     /// which is why partial updates work at all, given this runs before each one.
-    fn beginPartial(self: *EPD) !void {
+    fn beginPartial(self: *Self) !void {
         // Reset (from C reference - only 1ms delays)
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 0);
-        EpdConfig.delayMs(1);
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 1);
-        EpdConfig.delayMs(2);
+        try self.config.digitalWrite(Transport.RST_PIN, 0);
+        self.config.delayMs(1);
+        try self.config.digitalWrite(Transport.RST_PIN, 1);
+        self.config.delayMs(2);
 
         // Load partial LUT
         try self.loadLut(&WF_PARTIAL_2IN9);
@@ -322,7 +330,7 @@ pub const EPD = struct {
         try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
 
         // Display update control: clock and analog on, no display activation.
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{0xC0});
+        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_power_on});
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
@@ -339,7 +347,7 @@ pub const EPD = struct {
     /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
     /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
     /// Verified on a 2.9" V2 panel — priming afterwards smears.
-    pub fn primeBase(self: *EPD, image: *const Frame) !void {
+    pub fn primeBase(self: *Self, image: *const Frame) !void {
         try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
         try self.setCursor(0, 0);
         try self.sendCommand(.WRITE_RAM_BASE);
@@ -347,7 +355,7 @@ pub const EPD = struct {
     }
 
     /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
-    pub fn displayPartial(self: *EPD, image: *const Frame) !void {
+    pub fn displayPartial(self: *Self, image: *const Frame) !void {
         try self.beginPartial();
 
         // Reset window to full frame
@@ -366,8 +374,307 @@ pub const EPD = struct {
     /// Waveshare requires this before cutting power; leaving the panel driven at
     /// high voltage shortens its life. Waking up afterwards needs a full
     /// `initDisplay`, so this is a shutdown-only call.
-    pub fn sleep(self: *EPD) !void {
-        try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{0x01});
-        EpdConfig.delayMs(100);
+    pub fn sleep(self: *Self) !void {
+        try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{deep_sleep_mode_1});
+        self.config.delayMs(100);
+    }
+    };
+}
+
+/// Deep Sleep Mode 1. Mode 2 (0x03) additionally drops RAM, which would make
+/// the reference-frame restore in primeBase pointless.
+const deep_sleep_mode_1 = 0x01;
+
+/// The driver as used in production.
+pub const EPD = Epd(EpdConfig);
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// Records what the driver would have put on the wire, so command sequences can
+/// be asserted without a panel.
+const FakeTransport = struct {
+    pub const RST_PIN: u32 = 17;
+    pub const DC_PIN: u32 = 25;
+    pub const BUSY_PIN: u32 = 24;
+    pub const PWR_PIN: u32 = 18;
+
+    pub const Event = union(enum) {
+        pin: struct { pin: u32, value: u8 },
+        /// Owned copy: the driver often passes a temporary.
+        spi: struct { dc: u8, bytes: []const u8 },
+    };
+
+    allocator: std.mem.Allocator,
+    events: std.array_list.Managed(Event),
+    dc: u8 = 0,
+    /// Number of reads that report BUSY before the line drops.
+    busy_reads_remaining: u32 = 0,
+    busy_reads_total: u32 = 0,
+    /// Advanced by delayMs, so timeouts are exercised without real waiting.
+    clock_ms: u64 = 0,
+    module_init_calls: u32 = 0,
+
+    fn init(allocator: std.mem.Allocator) FakeTransport {
+        return .{ .allocator = allocator, .events = std.array_list.Managed(Event).init(allocator) };
+    }
+
+    fn deinit(self: *FakeTransport) void {
+        for (self.events.items) |event| {
+            if (event == .spi) self.allocator.free(event.spi.bytes);
+        }
+        self.events.deinit();
+    }
+
+    pub fn delayMs(self: *FakeTransport, millis: u64) void {
+        self.clock_ms += millis;
+    }
+
+    pub fn monotonicMillis(self: *FakeTransport) u64 {
+        return self.clock_ms;
+    }
+
+    pub fn moduleInit(self: *FakeTransport) !void {
+        self.module_init_calls += 1;
+    }
+
+    pub fn digitalWrite(self: *FakeTransport, pin: u32, value: u8) !void {
+        if (pin == DC_PIN) self.dc = value;
+        try self.events.append(.{ .pin = .{ .pin = pin, .value = value } });
+    }
+
+    pub fn digitalRead(self: *FakeTransport, pin: u32) !u8 {
+        try testing.expectEqual(BUSY_PIN, pin);
+        self.busy_reads_total += 1;
+        if (self.busy_reads_remaining == 0) return 0;
+        self.busy_reads_remaining -= 1;
+        return 1;
+    }
+
+    pub fn spiWrite(self: *FakeTransport, data: []const u8) !void {
+        try self.events.append(.{ .spi = .{ .dc = self.dc, .bytes = try self.allocator.dupe(u8, data) } });
+    }
+
+    // --- assertions ---------------------------------------------------------
+
+    fn reset_log(self: *FakeTransport) void {
+        for (self.events.items) |event| {
+            if (event == .spi) self.allocator.free(event.spi.bytes);
+        }
+        self.events.clearRetainingCapacity();
+    }
+
+    /// Command bytes (DC low, single byte) in the order they were sent.
+    fn commands(self: *FakeTransport, buf: []u8) []const u8 {
+        var n: usize = 0;
+        for (self.events.items) |event| {
+            if (event == .spi and event.spi.dc == 0 and event.spi.bytes.len == 1) {
+                buf[n] = event.spi.bytes[0];
+                n += 1;
+            }
+        }
+        return buf[0..n];
+    }
+
+    fn sentCommand(self: *FakeTransport, cmd: u8) bool {
+        var buf: [64]u8 = undefined;
+        return std.mem.indexOfScalar(u8, self.commands(&buf), cmd) != null;
+    }
+
+    /// Payload of the transfer immediately following command `cmd`.
+    fn argsAfter(self: *FakeTransport, cmd: u8) ?[]const u8 {
+        for (self.events.items, 0..) |event, i| {
+            if (event != .spi or event.spi.dc != 0) continue;
+            if (event.spi.bytes.len != 1 or event.spi.bytes[0] != cmd) continue;
+
+            for (self.events.items[i + 1 ..]) |next| {
+                if (next != .spi) continue;
+                return if (next.spi.dc == 1) next.spi.bytes else null;
+            }
+        }
+        return null;
     }
 };
+
+const TestEpd = Epd(FakeTransport);
+
+fn testEpd(fake: *FakeTransport) TestEpd {
+    return TestEpd.init(fake);
+}
+
+test "sendCommandArgs frames the command and its payload separately" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
+
+    // DC low for the command byte, DC high for the argument.
+    try testing.expectEqual(@as(usize, 4), fake.events.items.len);
+    try testing.expectEqual(@as(u8, 0), fake.events.items[0].pin.value);
+    try testing.expectEqualSlices(u8, &.{0x3C}, fake.events.items[1].spi.bytes);
+    try testing.expectEqual(@as(u8, 1), fake.events.items[2].pin.value);
+    try testing.expectEqualSlices(u8, &.{0x80}, fake.events.items[3].spi.bytes);
+}
+
+test "the driver never drives chip select itself" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.reInit();
+
+    // spidev frames every write() with its own CS assertion; a stray GPIO write
+    // here would fight it. Only RST and DC may be touched.
+    for (fake.events.items) |event| {
+        if (event == .pin) {
+            try testing.expect(event.pin.pin == FakeTransport.RST_PIN or
+                event.pin.pin == FakeTransport.DC_PIN);
+        }
+    }
+}
+
+test "reInit resets, configures and loads the full LUT without refreshing" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.reInit();
+
+    // Hardware reset pulse: high, low, high.
+    try testing.expectEqual(@as(u8, 1), fake.events.items[0].pin.value);
+    try testing.expectEqual(@as(u8, 0), fake.events.items[1].pin.value);
+    try testing.expectEqual(@as(u8, 1), fake.events.items[2].pin.value);
+
+    try testing.expect(fake.sentCommand(0x12)); // SW_RESET
+    try testing.expectEqualSlices(u8, &.{ 0x27, 0x01, 0x00 }, fake.argsAfter(0x01).?);
+    try testing.expectEqualSlices(u8, &.{0x03}, fake.argsAfter(0x11).?); // data entry
+    try testing.expectEqualSlices(u8, WS_20_30[0..153], fake.argsAfter(0x32).?);
+
+    // Waking must not disturb the glass: no display activation anywhere.
+    try testing.expect(!fake.sentCommand(0x20));
+}
+
+test "primeBase rewrites the reference frame without activating the display" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    var frame: Frame = @splat(0xAB);
+    try epd.primeBase(&frame);
+
+    // This is what makes waking from deep sleep invisible. If a MASTER_ACTIVATION
+    // ever crept in here it would flash the panel on every refresh.
+    try testing.expect(!fake.sentCommand(0x20));
+
+    try testing.expect(fake.sentCommand(0x26)); // WRITE_RAM_BASE
+    try testing.expect(!fake.sentCommand(0x24)); // and only the reference bank
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+}
+
+test "displayBase writes both banks and refreshes with the full waveform" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    var frame: Frame = @splat(0x00);
+    try epd.displayBase(&frame);
+
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x24).?.len);
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+    try testing.expectEqualSlices(u8, &.{0xC7}, fake.argsAfter(0x22).?);
+    try testing.expect(fake.sentCommand(0x20));
+}
+
+test "display refreshes fully but leaves the reference bank alone" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    var frame: Frame = @splat(0x00);
+    try epd.display(&frame);
+
+    try testing.expect(fake.sentCommand(0x24));
+    try testing.expect(!fake.sentCommand(0x26));
+    try testing.expectEqualSlices(u8, &.{0xC7}, fake.argsAfter(0x22).?);
+}
+
+test "displayPartial loads the partial LUT and uses the weak waveform" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    var frame: Frame = @splat(0x0F);
+    try epd.displayPartial(&frame);
+
+    try testing.expectEqualSlices(u8, WF_PARTIAL_2IN9[0..153], fake.argsAfter(0x32).?);
+    try testing.expectEqualSlices(u8, &.{0x80}, fake.argsAfter(0x3C).?);
+    // Only the working bank; the reference must survive to diff against.
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x24).?.len);
+    try testing.expect(!fake.sentCommand(0x26));
+
+    // 0xC0 powers the analog stage up, 0x0F is the partial refresh itself.
+    var buf: [64]u8 = undefined;
+    const cmds = fake.commands(&buf);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, cmds, &.{0x20}));
+}
+
+test "sleep enters deep sleep mode 1, which retains RAM" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.sleep();
+
+    // Mode 2 (0x03) would drop the RAM and make primeBase pointless.
+    try testing.expectEqualSlices(u8, &.{0x01}, fake.argsAfter(0x10).?);
+}
+
+test "clear fills both banks in one transfer each" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.clear(0xFF);
+
+    // Used to be chunked into 128-byte pieces, which multiplied the syscalls.
+    const ram = fake.argsAfter(0x24).?;
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), ram.len);
+    try testing.expectEqual(@as(u8, 0xFF), ram[0]);
+    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+}
+
+test "readBusy waits for the line to drop" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    fake.busy_reads_remaining = 3;
+    try epd.readBusy();
+
+    // Three busy samples plus the one that saw it idle.
+    try testing.expectEqual(@as(u32, 4), fake.busy_reads_total);
+}
+
+test "readBusy gives up on a panel that never releases" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    fake.busy_reads_remaining = std.math.maxInt(u32);
+    try testing.expectError(error.EpdBusyTimeout, epd.readBusy());
+    try testing.expect(fake.clock_ms > TestEpd.busy_timeout_ms);
+}
+
+test "initDisplay brings the transport up before talking to the panel" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    try epd.initDisplay();
+    try testing.expectEqual(@as(u32, 1), fake.module_init_calls);
+    try testing.expect(fake.sentCommand(0x12)); // SW_RESET, so reInit ran too
+}

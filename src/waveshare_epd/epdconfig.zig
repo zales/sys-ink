@@ -56,7 +56,7 @@ pub const EpdConfig = struct {
         // Set initial values - PWR high (on)
         try self.digitalWrite(PWR_PIN, 1);
         log.info("Power on, waiting for display to stabilize", .{});
-        delayMs(200); // Give display time to power up
+        self.delayMs(200); // Give display time to power up
 
         const spi_path = @import("../config.zig").Config.spi_device;
         log.info("Opening SPI device {s}", .{spi_path});
@@ -151,7 +151,11 @@ pub const EpdConfig = struct {
     }
 
     /// Delay for specified milliseconds, resuming across signal interruptions.
-    pub fn delayMs(millis: u64) void {
+    ///
+    /// A method rather than a free function so the driver's notion of time comes
+    /// entirely from its transport, and a test can substitute one that does not
+    /// actually sleep.
+    pub fn delayMs(_: *EpdConfig, millis: u64) void {
         if (!is_linux) return;
 
         var ts = std.os.linux.timespec{
@@ -162,6 +166,13 @@ pub const EpdConfig = struct {
             const rc = std.os.linux.nanosleep(&ts, &ts);
             if (std.posix.errno(rc) != .INTR) return;
         }
+    }
+
+    /// Monotonic milliseconds, used for the busy-wait timeout.
+    pub fn monotonicMillis(_: *EpdConfig) u64 {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
     }
 
     /// Write bytes via SPI
