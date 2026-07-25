@@ -47,16 +47,29 @@ You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_6
 
 ### Tests
 
-The parsing, layout and MQTT protocol logic is covered by unit tests that run on any host:
+Parsing, layout, rendering, the panel driver and the MQTT protocol are covered
+by unit tests that run on any host — the driver and renderer are generic over
+their transport, so their command sequences are checked against a recorder
+rather than a panel:
 
 ```bash
 zig build test --summary all
 ```
 
-The hardware-facing modules only compile for Linux, so they are type-checked separately:
+The remaining hardware-facing modules only compile for Linux, so they are
+type-checked separately:
 
 ```bash
 zig build check
+```
+
+The renderer has a golden-image test: it draws a screen with fixed values and
+compares the packed frame against `src/testdata/golden_main.bin`, which pins the
+whole layout at once. After an intentional layout change, regenerate it and
+review the diff:
+
+```bash
+zig build golden
 ```
 
 ### Regenerating fonts
@@ -116,12 +129,18 @@ The easiest way to install and keep SysInk updated is using our APT repository.
    echo "deb [signed-by=/etc/apt/keyrings/sys-ink.gpg] https://zales.github.io/sys-ink/ ./" | sudo tee /etc/apt/sources.list.d/sys-ink.list
    ```
 
-   > If the keyring file 404s, the repository is being published unsigned. You
-   > can fall back to `deb [trusted=yes] https://zales.github.io/sys-ink/ ./`,
-   > but be aware this disables package authentication entirely — anyone able to
-   > intercept the connection can serve arbitrary packages that install as root.
-   > To publish signed metadata, set the `APT_GPG_PRIVATE_KEY` repository secret;
-   > the release workflow picks it up automatically.
+   The repository is signed. You can check the key you just installed against
+   the published fingerprint:
+
+   ```bash
+   gpg --show-keys /etc/apt/keyrings/sys-ink.gpg
+   # C834 8411 213F 794E 2773  8104 82A9 AAFF 9189 5891
+   ```
+
+   > **Upgrading from an unsigned install.** Releases before 1.5.0 were
+   > published unsigned, and the instructions asked for `[trusted=yes]`, which
+   > disables package authentication entirely. Run the two commands above to
+   > replace that line; `apt` will then verify what it downloads.
 
 2. **Update and Install**:
    ```bash
@@ -203,6 +222,11 @@ them before running.
 | `INTERVAL_FAST` | `30` | Seconds between CPU/memory/disk/fan/traffic/uptime updates and display refreshes |
 | `INTERVAL_SLOW` | `10800` | Seconds between IP, APT and internet-reachability checks (3 hours) |
 | `INTERVAL_FULL_REFRESH` | `600` | Seconds between full panel refreshes, which clear the ghosting left by partial updates. A full refresh flashes the panel by design; raise this if that bothers you, at the cost of more accumulated ghosting |
+
+Network rates use decimal units: `kB` is 1000 bytes, matching the SI prefix and
+the convention for throughput. Releases before 1.5.0 divided by 1024 while
+labelling the result `kB`, so displayed and published rates were 2.4% lower than
+the unit claimed.
 
 ### Panel power
 
