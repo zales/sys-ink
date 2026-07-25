@@ -53,21 +53,34 @@ const WS_20_30 = [_]u8{
 /// The panel driver, parameterised by its transport so tests can substitute a
 /// recorder for the real SPI/GPIO path. `EPD` below is the production instance.
 ///
-/// `Transport` must provide the pin constants (RST_PIN, DC_PIN, BUSY_PIN,
-/// PWR_PIN), `delayMs`, `monotonicMillis`, `moduleInit`, `digitalWrite`,
-/// `digitalRead` and `spiWrite`.
+/// The contract is checked at comptime, so a transport missing a declaration
+/// fails with a direct message instead of an error deep inside a call.
 pub fn Epd(comptime Transport: type) type {
+    comptime verifyTransport(Transport);
+
     return struct {
     const Self = @This();
 
     config: *Transport,
 
-    /// Arguments to DISPLAY_UPDATE_CONTROL_2. The difference between these two
-    /// is the whole full-versus-partial distinction, so they get names.
-    const update_full = 0xC7;
-    const update_partial = 0x0F;
-    /// Clock and analog on, without activating a display update.
-    const update_power_on = 0xC0;
+    /// Argument to DISPLAY_UPDATE_CONTROL_2, which selects what the next
+    /// MASTER_ACTIVATION actually does.
+    ///
+    /// Left as opaque values on purpose: 0x22 is a bitfield in the SSD1680, but
+    /// the published bit assignments disagree between sources and these three
+    /// values are the ones Waveshare's reference uses and that are verified
+    /// working on this panel. Naming individual bits from guesswork would read
+    /// as authoritative while being wrong.
+    const DisplayUpdate = enum(u8) {
+        /// Full waveform: repaints every pixel, which is what makes it flash.
+        full = 0xC7,
+        /// Weak waveform, applied only where the frame differs from the
+        /// reference in the base RAM.
+        partial = 0x0F,
+        /// Clock and analog on, without activating an update — so it cannot
+        /// disturb the glass.
+        power_on = 0xC0,
+    };
 
     // Command sets as strict Enum
     const Command = enum(u8) {
@@ -150,11 +163,13 @@ pub fn Epd(comptime Transport: type) type {
     /// Wait until the BUSY line goes LOW.
     /// V2: LOW (0) = IDLE, HIGH (1) = BUSY.
     ///
-    /// Polled rather than waited on: the chardev ABI can deliver an edge event
-    /// instead, which would replace roughly a thousand ioctls per full refresh
-    /// with a single poll. Left as polling because the naive version races —
-    /// the edge can pass between arming the event and blocking on it — and this
-    /// is nowhere near a bottleneck at a 30-second cadence.
+    /// Polled rather than waited on. The chardev ABI can deliver a falling-edge
+    /// event instead, replacing roughly a thousand ioctls per full refresh with
+    /// one poll; the obvious race (the edge passing between arming the event and
+    /// blocking on it) is avoidable by sampling the level once after arming.
+    /// It stays polled because at a 30-second cadence this averages a few dozen
+    /// ioctls per second, and switching would change the behaviour of working
+    /// hardware for no measurable gain.
     fn readBusy(self: *Self) !void {
         log.debug("e-Paper busy", .{});
 
@@ -226,10 +241,15 @@ pub fn Epd(comptime Transport: type) type {
         try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_COUNTER, &data_y);
     }
 
+    /// Select what the next MASTER_ACTIVATION will do.
+    fn setDisplayUpdate(self: *Self, mode: DisplayUpdate) !void {
+        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@intFromEnum(mode)});
+    }
+
     /// Drive a full refresh: every pixel is repainted with the full waveform,
     /// which is what makes it flash.
     fn turnOnDisplay(self: *Self) !void {
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_full});
+        try self.setDisplayUpdate(.full);
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
@@ -237,7 +257,7 @@ pub fn Epd(comptime Transport: type) type {
     /// Drive a partial refresh: only pixels differing from the reference frame
     /// are touched, with a waveform weak enough not to flash.
     fn turnOnDisplayPartial(self: *Self) !void {
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_partial});
+        try self.setDisplayUpdate(.partial);
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
@@ -330,7 +350,7 @@ pub fn Epd(comptime Transport: type) type {
         try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
 
         // Display update control: clock and analog on, no display activation.
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{update_power_on});
+        try self.setDisplayUpdate(.power_on);
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
     }
@@ -384,6 +404,22 @@ pub fn Epd(comptime Transport: type) type {
 /// Deep Sleep Mode 1. Mode 2 (0x03) additionally drops RAM, which would make
 /// the reference-frame restore in primeBase pointless.
 const deep_sleep_mode_1 = 0x01;
+
+/// Everything `Epd` needs from its transport. PWR is deliberately absent: the
+/// panel's power rail is brought up by the transport's own moduleInit, and the
+/// driver never touches it.
+fn verifyTransport(comptime T: type) void {
+    const required = [_][]const u8{
+        "RST_PIN",     "DC_PIN",          "BUSY_PIN",
+        "delayMs",     "monotonicMillis", "moduleInit",
+        "digitalWrite", "digitalRead",    "spiWrite",
+    };
+    for (required) |name| {
+        if (!@hasDecl(T, name)) @compileError(
+            "transport '" ++ @typeName(T) ++ "' is missing '" ++ name ++ "'",
+        );
+    }
+}
 
 /// The driver as used in production.
 pub const EPD = Epd(EpdConfig);
