@@ -560,6 +560,68 @@ test "signal reading fits its slot across the whole dBm range" {
     try testing.expectEqualStrings("-40 dBm", bmp.fitText(&normal, .Ubuntu14, dc.SIGNAL_VALUE_MAX_W));
 }
 
+test "no declared text area extends past the panel" {
+    // The bug this catches shipped: the traffic slots claimed 308 and 298
+    // columns on a 296-pixel panel. fillRect clips, so nothing corrupted memory
+    // — the text drawn into them was simply cut off at the edge, which only
+    // showed up once a value happened to be wide enough.
+    //
+    // Adding a text area means adding it here.
+    const areas = [_]struct { name: []const u8, x: i32, y: i32, w: u32, h: u32 }{
+        .{ .name = "cpu load", .x = dc.CPU_AREA_X, .y = dc.CPU_AREA_Y_LOAD, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height },
+        .{ .name = "cpu temp", .x = dc.CPU_AREA_X, .y = dc.CPU_AREA_Y_TEMP, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height },
+        .{ .name = "mem", .x = dc.MEM_AREA_X, .y = dc.MEM_AREA_Y, .w = dc.TEXT_AREA_MEM.width, .h = dc.TEXT_AREA_MEM.height },
+        .{ .name = "disk usage", .x = dc.DISK_AREA_X, .y = dc.DISK_AREA_Y_DISK, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height },
+        .{ .name = "disk temp", .x = dc.DISK_AREA_X, .y = dc.DISK_AREA_Y_TEMP, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height },
+        .{ .name = "fan", .x = dc.FAN_VALUE_X, .y = dc.FAN_VALUE_Y - 21, .w = dc.TEXT_AREA_FAN.width, .h = dc.TEXT_AREA_FAN.height },
+        .{ .name = "apt", .x = dc.APT_VALUE_X, .y = dc.APT_VALUE_Y - 21, .w = dc.TEXT_AREA_APT.width, .h = dc.TEXT_AREA_APT.height },
+        .{ .name = "net", .x = dc.NET_ICON_X, .y = dc.NET_ICON_Y - 21, .w = dc.TEXT_AREA_NET.width, .h = dc.TEXT_AREA_NET.height },
+        .{ .name = "traffic down value", .x = dc.TRAFFIC_DOWN_VALUE_X, .y = dc.TRAFFIC_DOWN_AREA_Y, .w = dc.TEXT_AREA_TRAFFIC_VALUE.width, .h = dc.TEXT_AREA_TRAFFIC_VALUE.height },
+        .{ .name = "traffic down unit", .x = dc.TRAFFIC_DOWN_UNIT_X, .y = dc.TRAFFIC_DOWN_UNIT_AREA_Y, .w = dc.TEXT_AREA_TRAFFIC_UNIT.width, .h = dc.TEXT_AREA_TRAFFIC_UNIT.height },
+        .{ .name = "traffic up value", .x = dc.TRAFFIC_UP_VALUE_X, .y = dc.TRAFFIC_UP_AREA_Y, .w = dc.TEXT_AREA_TRAFFIC_VALUE.width, .h = dc.TEXT_AREA_TRAFFIC_VALUE.height },
+        .{ .name = "traffic up unit", .x = dc.TRAFFIC_UP_UNIT_X, .y = dc.TRAFFIC_UP_UNIT_AREA_Y, .w = dc.TEXT_AREA_TRAFFIC_UNIT.width, .h = dc.TEXT_AREA_TRAFFIC_UNIT.height },
+        .{ .name = "ip", .x = dc.IP_VALUE_X, .y = dc.IP_AREA_Y, .w = dc.TEXT_AREA_IP.width, .h = dc.TEXT_AREA_IP.height },
+        .{ .name = "signal", .x = dc.SIGNAL_AREA_X, .y = dc.SIGNAL_AREA_Y, .w = dc.TEXT_AREA_SIGNAL.width, .h = dc.TEXT_AREA_SIGNAL.height },
+        .{ .name = "uptime", .x = dc.UPTIME_VALUE_X, .y = dc.UPTIME_AREA_Y, .w = dc.TEXT_AREA_UPTIME.width, .h = dc.TEXT_AREA_UPTIME.height },
+    };
+
+    for (areas) |area| {
+        const right = area.x + @as(i32, @intCast(area.w));
+        const bottom = area.y + @as(i32, @intCast(area.h));
+
+        if (area.x < 0 or area.y < 0 or right > dc.DISPLAY_WIDTH or bottom > dc.DISPLAY_HEIGHT) {
+            std.debug.print(
+                "\n  '{s}' spans {d}..{d} x {d}..{d}, panel is {d}x{d}\n",
+                .{ area.name, area.x, right, area.y, bottom, dc.DISPLAY_WIDTH, dc.DISPLAY_HEIGHT },
+            );
+            return error.TextAreaOutsidePanel;
+        }
+    }
+}
+
+test "traffic values fit their slot across the whole range" {
+    var bmp = try testBitmap(4, 4);
+    defer bmp.deinit();
+
+    const parse = @import("parse.zig");
+    const slot = dc.TEXT_AREA_TRAFFIC_VALUE.width;
+
+    // Step through rates spanning every unit, including the 1000..1023 window
+    // that used to clip with a 1024 divisor.
+    var rate: f64 = 0;
+    while (rate < 2_000_000_000) : (rate = rate * 1.7 + 13) {
+        const scaled = parse.scaleBytes(rate);
+
+        var buf: [32]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buf, "{d:.2}", .{scaled.value});
+        try testing.expect(bmp.measureText(text, .Ubuntu20) <= slot);
+
+        var unit_buf: [32]u8 = undefined;
+        const unit = try std.fmt.bufPrint(&unit_buf, "{s}/s", .{scaled.unit});
+        try testing.expect(bmp.measureText(unit, .Ubuntu14) <= dc.TEXT_AREA_TRAFFIC_UNIT.width);
+    }
+}
+
 test "bottom bar slots do not overlap or run off the panel" {
     var bmp = try testBitmap(4, 4);
     defer bmp.deinit();

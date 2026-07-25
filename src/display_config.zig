@@ -141,8 +141,12 @@ pub const TEXT_AREA_UPTIME = .{ .width = 84, .height = 14 };
 // Signal covers icon and value: 120 + 75 = 195, leaving a gap before the
 // uptime icon at 197.
 pub const TEXT_AREA_SIGNAL = .{ .width = 75, .height = 14 };
-pub const TEXT_AREA_TRAFFIC_VALUE = .{ .width = 75, .height = 20 };
-pub const TEXT_AREA_TRAFFIC_UNIT = .{ .width = 35, .height = 14 };
+// Both traffic slots run to the right edge of the panel: the value from x=233
+// and the unit from x=263. They used to be declared 75 and 35 wide, which
+// claimed 308 and 298 on a 296-pixel panel — fillRect clipped the excess, but
+// the numbers were a lie and the text drawn into them was cut off.
+pub const TEXT_AREA_TRAFFIC_VALUE = .{ .width = 63, .height = 20 };
+pub const TEXT_AREA_TRAFFIC_UNIT = .{ .width = 33, .height = 14 };
 pub const TEXT_AREA_APT = .{ .width = 35, .height = 24 };
 pub const TEXT_AREA_NET = .{ .width = 35, .height = 24 };
 

@@ -241,10 +241,12 @@ const App = struct {
             if (maybe_ip) |ip| client.publish("ip_address", ip, false) catch {};
         } else |_| {}
 
-        // Home Assistant expects kB/s for these entities.
+        // kB/s, decimal, matching both the entity's declared unit and what the
+        // panel shows. This divided by 1024 while calling the result kB/s, which
+        // disagreed with the display by 2.4%.
         const raw = self.traffic.getRawTraffic();
-        publishFmt(client, "traffic_down", "{d:.2}", .{raw.rx_bytes_per_sec / 1024.0});
-        publishFmt(client, "traffic_up", "{d:.2}", .{raw.tx_bytes_per_sec / 1024.0});
+        publishFmt(client, "traffic_down", "{d:.2}", .{raw.rx_bytes_per_sec / 1000.0});
+        publishFmt(client, "traffic_up", "{d:.2}", .{raw.tx_bytes_per_sec / 1000.0});
 
         log.debug("MQTT stats published", .{});
     }

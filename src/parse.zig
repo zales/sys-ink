@@ -178,14 +178,24 @@ pub fn aptUpgradableCount(stdout: []const u8) u32 {
 
 pub const Scaled = struct { value: f64, unit: []const u8 };
 
-/// Scale a bytes-per-second rate into the largest unit below 1024.
+/// Divisor between traffic units.
+///
+/// Decimal, not 1024. Two reasons: network throughput is conventionally SI, and
+/// the labels below say kB/MB/GB, which *are* SI — dividing by 1024 under those
+/// names was simply mislabelled (that would be KiB/MiB/GiB). It also caps the
+/// scaled value below 1000, which is what keeps it inside its slot on the panel;
+/// with a 1024 divisor, rates from 1000 to 1023 rendered four integer digits and
+/// were clipped at the screen edge.
+const bytes_per_unit = 1000.0;
+
+/// Scale a bytes-per-second rate into the largest unit below `bytes_per_unit`.
 pub fn scaleBytes(bytes_per_sec: f64) Scaled {
     const units = [_][]const u8{ "B", "kB", "MB", "GB" };
 
     var value = bytes_per_sec;
     for (units, 0..) |unit, i| {
-        if (value < 1024.0 or i == units.len - 1) return .{ .value = value, .unit = unit };
-        value /= 1024.0;
+        if (value < bytes_per_unit or i == units.len - 1) return .{ .value = value, .unit = unit };
+        value /= bytes_per_unit;
     }
     unreachable;
 }
@@ -350,11 +360,27 @@ test "aptUpgradableCount ignores the header and blank lines" {
 
 test "scaleBytes picks the right unit" {
     try testing.expectEqualStrings("B", scaleBytes(512).unit);
-    try testing.expectEqualStrings("kB", scaleBytes(2048).unit);
-    try testing.expectEqual(@as(f64, 2), scaleBytes(2048).value);
-    try testing.expectEqualStrings("MB", scaleBytes(5 * 1024 * 1024).unit);
+    try testing.expectEqualStrings("kB", scaleBytes(2000).unit);
+    try testing.expectEqual(@as(f64, 2), scaleBytes(2000).value);
+    try testing.expectEqualStrings("MB", scaleBytes(5_000_000).unit);
     // Saturates at the largest unit instead of running off the end.
     try testing.expectEqualStrings("GB", scaleBytes(1e15).unit);
+}
+
+test "scaleBytes never leaves four integer digits to render" {
+    // The panel slot fits three. A 1024 divisor used to let 1000..1023 through
+    // in the smaller unit, which clipped at the screen edge.
+    var rate: f64 = 0;
+    while (rate < 5_000_000) : (rate += 997) {
+        try testing.expect(scaleBytes(rate).value < 1000.0);
+    }
+}
+
+test "scaleBytes switches unit exactly at the divisor" {
+    try testing.expectEqualStrings("B", scaleBytes(999.99).unit);
+    try testing.expectEqualStrings("kB", scaleBytes(1000).unit);
+    try testing.expectEqualStrings("kB", scaleBytes(999_999).unit);
+    try testing.expectEqualStrings("MB", scaleBytes(1_000_000).unit);
 }
 
 test "ipv4 parses dotted quads" {

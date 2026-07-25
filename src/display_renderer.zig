@@ -534,8 +534,18 @@ pub const DisplayRenderer = struct {
         self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
         self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
 
-        var value_buf: [32]u8 = undefined;
-        const value_text = std.fmt.bufPrint(&value_buf, "{d:.2}", .{speed}) catch "?";
+        // scaleBytes keeps the value under 1000, so two decimals always fit.
+        // The ladder is a guard against that changing, since this slot ends at
+        // the right edge of the panel where overflow is clipped mid-glyph.
+        var two_dp: [32]u8 = undefined;
+        var one_dp: [32]u8 = undefined;
+        var no_dp: [32]u8 = undefined;
+        const candidates = [_][]const u8{
+            std.fmt.bufPrint(&two_dp, "{d:.2}", .{speed}) catch "?",
+            std.fmt.bufPrint(&one_dp, "{d:.1}", .{speed}) catch "?",
+            std.fmt.bufPrint(&no_dp, "{d:.0}", .{speed}) catch "?",
+        };
+        const value_text = self.bitmap.fitText(&candidates, .Ubuntu20, display_config.TEXT_AREA_TRAFFIC_VALUE.width);
         self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
 
         var unit_buf: [32]u8 = undefined;
