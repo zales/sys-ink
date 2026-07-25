@@ -1,9 +1,10 @@
 const std = @import("std");
 const config = @import("config.zig");
 const logger = @import("logger.zig");
+const network_ops = @import("network_ops.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
-const NetworkOps = @import("network_ops.zig").NetworkOps;
-const TrafficMonitor = @import("network_ops.zig").TrafficMonitor;
+const NetworkOps = network_ops.NetworkOps;
+const TrafficMonitor = network_ops.TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
 const MqttClient = @import("mqtt.zig").MqttClient;
@@ -13,467 +14,407 @@ const log = std.log.scoped(.main);
 
 pub const std_options: std.Options = .{
     .logFn = logger.logFn,
+    // std.log's comptime threshold defaults to .info outside Debug builds, which
+    // compiles every log.debug call out of release binaries and makes
+    // LOG_LEVEL=DEBUG silently do nothing. Open the comptime gate fully and let
+    // the runtime check in logger.logFn apply LOG_LEVEL instead.
+    .log_level = .debug,
 };
 
-// Global state - atomic for signal handler thread-safety
-var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var g_sys_ops: ?*SystemOps = null;
-var g_net_ops: ?*NetworkOps = null;
-var g_traffic_mon: ?*TrafficMonitor = null;
-var g_renderer: ?*DisplayRenderer = null;
-var g_mqtt: ?*MqttClient = null;
-var g_full_refresh_counter: u32 = 0; // Counter for periodic full refresh
+/// Use the minimal panic handler. The default one pulls ELF/DWARF parsing and
+/// stack-trace rendering into the binary — roughly 90 KB that can never produce
+/// a useful trace here, because release builds are stripped.
+pub const panic = std.debug.simple_panic;
+
+const c = @cImport({
+    @cInclude("signal.h");
+});
+
+/// Set from the signal handler; read by the main loop.
+var should_exit: std.atomic.Value(bool) = .init(false);
+
+/// Self-pipe so a signal interrupts the main loop's poll immediately instead of
+/// waiting out the sleep interval.
+var wake_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
 fn signalHandler(_: c_int) callconv(.c) void {
     should_exit.store(true, .release);
+
+    // write() is async-signal-safe; the payload does not matter.
+    if (wake_pipe[1] >= 0) {
+        const byte = [_]u8{0};
+        _ = std.os.linux.write(wake_pipe[1], &byte, 1);
+    }
 }
+
+/// Daemon state shared by the scheduled tasks. Passing this as the task context
+/// keeps the callbacks off global mutable state.
+const App = struct {
+    io: std.Io,
+    sys: *SystemOps,
+    net: *NetworkOps,
+    traffic: *TrafficMonitor,
+    renderer: *DisplayRenderer,
+    mqtt: ?*MqttClient = null,
+    /// Monotonic timestamp of the last full (non-partial) panel refresh.
+    last_full_refresh: i64 = 0,
+
+    fn nowSeconds(self: *App) i64 {
+        return std.Io.Timestamp.now(self.io, .awake).toSeconds();
+    }
+
+    // ------------------------------------------------------------------------
+    // Display tasks
+    // ------------------------------------------------------------------------
+
+    fn updateCpu(self: *App) void {
+        const load = self.sys.getCpuLoad() catch |err| {
+            log.warn("getCpuLoad failed: {t}", .{err});
+            return;
+        };
+        const temp = self.sys.getCpuTemperature() catch |err| {
+            log.warn("getCpuTemperature failed: {t}", .{err});
+            return;
+        };
+
+        self.renderer.renderCpuLoad(load, temp);
+        log.debug("CPU: {d}% / {d}°C", .{ load, temp });
+    }
+
+    fn updateMemory(self: *App) void {
+        const mem = self.sys.getMemory() catch |err| {
+            log.warn("getMemory failed: {t}", .{err});
+            return;
+        };
+        self.renderer.renderMemory(mem);
+        log.debug("Memory: {d}%", .{mem});
+    }
+
+    fn updateDisk(self: *App) void {
+        const usage = self.sys.getDiskUsage() catch |err| {
+            log.warn("getDiskUsage failed: {t}", .{err});
+            return;
+        };
+        const temp = self.sys.getDiskTemp() catch |err| {
+            log.warn("getDiskTemp failed: {t}", .{err});
+            return;
+        };
+
+        self.renderer.renderDiskStats(usage, temp);
+        log.debug("Disk: {d}% / {d}°C", .{ usage, temp });
+    }
+
+    fn updateFan(self: *App) void {
+        const rpm = self.sys.getFanSpeed() catch |err| {
+            log.warn("getFanSpeed failed: {t}", .{err});
+            return;
+        };
+        self.renderer.renderFanSpeed(rpm);
+        log.debug("Fan: {d} RPM", .{rpm});
+    }
+
+    fn updateSignal(self: *App) void {
+        const signal = self.net.getSignalStrength("wlan0");
+        self.renderer.renderSignalStrength(signal);
+
+        if (signal) |s| log.debug("Signal: {d} dBm", .{s});
+    }
+
+    fn updateIp(self: *App) void {
+        var buf: [network_ops.max_ip_len]u8 = undefined;
+
+        const ip = self.net.getAnyIpAddress(&buf) catch |err| {
+            log.warn("getAnyIpAddress failed: {t}", .{err});
+            self.renderer.renderIpAddress("Error");
+            return;
+        };
+
+        self.renderer.renderIpAddress(ip orelse "No IP");
+        log.debug("IP: {s}", .{ip orelse "none"});
+    }
+
+    fn updateUptime(self: *App) void {
+        const uptime = self.sys.getUptime() catch |err| {
+            log.warn("getUptime failed: {t}", .{err});
+            return;
+        };
+        self.renderer.renderUptime(uptime.days, uptime.hours, uptime.minutes);
+        log.debug("Uptime: {d}d {d}h {d}m", .{ uptime.days, uptime.hours, uptime.minutes });
+    }
+
+    fn updateTraffic(self: *App) void {
+        const traffic = self.traffic.getCurrentTraffic() catch |err| {
+            log.warn("getCurrentTraffic failed: {t}", .{err});
+            return;
+        };
+
+        log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
+            traffic.download_speed, traffic.download_unit,
+            traffic.upload_speed,   traffic.upload_unit,
+        });
+
+        self.renderer.renderTraffic(
+            traffic.download_speed,
+            traffic.download_unit,
+            traffic.upload_speed,
+            traffic.upload_unit,
+        );
+    }
+
+    fn updateApt(self: *App) void {
+        // Kick off the check in the background; the count below is whatever the
+        // previous run produced.
+        self.sys.refreshUpdates(config.Config.isRoot(), self.net.checkInternetConnection());
+    }
+
+    /// Repaint the APT counter from the latest background result.
+    fn renderApt(self: *App) void {
+        const count = self.sys.updatesCount();
+        log.debug("APT updates: {?d}", .{count});
+        self.renderer.renderAptUpdates(count);
+    }
+
+    fn updateInternet(self: *App) void {
+        const connected = self.net.checkInternetConnection();
+        log.debug("Internet: {}", .{connected});
+        self.renderer.renderInternetStatus(connected);
+    }
+
+    fn updateDisplay(self: *App) void {
+        const now = self.nowSeconds();
+        const elapsed = now - self.last_full_refresh;
+
+        // Periodic full refresh clears the ghosting that partial updates leave
+        // behind. Driven by elapsed time so it does not depend on INTERVAL_FAST.
+        const full_refresh = elapsed >= @as(i64, config.Config.interval_full_refresh);
+        if (full_refresh) self.last_full_refresh = now;
+
+        self.renderer.updateDisplay(!full_refresh) catch |err| {
+            log.warn("Failed to update display: {t}", .{err});
+        };
+    }
+
+    // ------------------------------------------------------------------------
+    // MQTT
+    // ------------------------------------------------------------------------
+
+    fn publishMqttStats(self: *App) void {
+        const client = self.mqtt orelse return;
+
+        // Backoff is enforced inside connect(); discovery is republished there
+        // on every successful (re)connection.
+        if (!client.connected) {
+            client.connect() catch |err| {
+                if (err == error.BackoffActive) {
+                    log.debug("MQTT reconnect skipped (backoff)", .{});
+                } else {
+                    log.warn("MQTT reconnect failed: {t}", .{err});
+                }
+                return;
+            };
+        }
+
+        // Cached readings, populated by the display tasks above.
+        publishFmt(client, "cpu_load", "{d}", .{self.sys.last_cpu_load});
+        publishFmt(client, "cpu_temp", "{d}", .{self.sys.last_cpu_temp});
+        publishFmt(client, "memory", "{d}", .{self.sys.last_memory});
+        publishFmt(client, "disk_usage", "{d}", .{self.sys.last_disk_usage});
+        publishFmt(client, "disk_temp", "{d}", .{self.sys.last_disk_temp});
+        publishFmt(client, "fan_speed", "{d}", .{self.sys.last_fan_speed});
+        // Withheld until a check has actually run, so Home Assistant is not told
+        // "0 updates" on the basis of no data.
+        if (self.sys.updatesCount()) |count| publishFmt(client, "apt_updates", "{d}", .{count});
+
+        if (self.sys.getUptime()) |uptime| {
+            publishFmt(client, "uptime_days", "{d}", .{uptime.days});
+        } else |_| {}
+
+        if (self.net.getSignalStrength("wlan0")) |signal| {
+            publishFmt(client, "signal_strength", "{d}", .{signal});
+        }
+
+        // Cached, so this does not add another blocking probe.
+        client.publish("internet", if (self.net.checkInternetConnection()) "ON" else "OFF", false) catch {};
+
+        var ip_buf: [network_ops.max_ip_len]u8 = undefined;
+        if (self.net.getAnyIpAddress(&ip_buf)) |maybe_ip| {
+            if (maybe_ip) |ip| client.publish("ip_address", ip, false) catch {};
+        } else |_| {}
+
+        // Home Assistant expects kB/s for these entities.
+        const raw = self.traffic.getRawTraffic();
+        publishFmt(client, "traffic_down", "{d:.2}", .{raw.rx_bytes_per_sec / 1024.0});
+        publishFmt(client, "traffic_up", "{d:.2}", .{raw.tx_bytes_per_sec / 1024.0});
+
+        log.debug("MQTT stats published", .{});
+    }
+
+    /// Format and publish one value. Failures are logged by the client and never
+    /// abort the remaining sensors.
+    fn publishFmt(client: *MqttClient, topic: []const u8, comptime fmt: []const u8, args: anytype) void {
+        var buf: [32]u8 = undefined;
+        const payload = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        client.publish(topic, payload, false) catch {};
+    }
+};
 
 pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    // Load configuration from environment
     config.Config.load(init);
 
-    // Initialize logger
     try logger.init(io);
     defer logger.deinit();
 
-    // Root check removed to allow running as non-root user with proper permissions (gpio/spi groups)
-    // if (!config.Config.isRoot()) { ... }
-
-    // Install signal handlers
-    const c = @cImport({
-        @cInclude("signal.h");
-    });
-    _ = c.signal(c.SIGINT, signalHandler);
-    _ = c.signal(c.SIGTERM, signalHandler);
-    _ = c.signal(c.SIGHUP, signalHandler);
+    // Runs unprivileged as long as the user is in the gpio and spi groups.
+    installSignalHandlers();
 
     log.info("SysInk starting", .{});
 
-    // Initialize modules
     var sys_ops = SystemOps.init(allocator, io);
     defer sys_ops.deinit();
-    var net_ops = NetworkOps.init(allocator, io);
-    var traffic_mon = TrafficMonitor.init(allocator, io);
+    var net_ops = NetworkOps.init(io);
+    var traffic_mon = TrafficMonitor.init(io);
 
-    // Set global pointers for scheduler callbacks
-    g_sys_ops = &sys_ops;
-    g_net_ops = &net_ops;
-    g_traffic_mon = &traffic_mon;
-
-    // Initialize display renderer
     var renderer = DisplayRenderer.init(allocator, io) catch |err| {
-        log.err("Failed to initialize display: {}", .{err});
+        log.err("Failed to initialize display: {t}", .{err});
         log.err("Check GPIO/SPI permissions", .{});
         return 1;
     };
     defer renderer.deinit();
-    g_renderer = &renderer;
 
     log.info("Initializing display", .{});
     renderer.startup() catch |err| {
-        log.err("Failed to start display: {}", .{err});
+        log.err("Failed to start display: {t}", .{err});
         return 1;
     };
 
-    log.info("Showing loading screen", .{});
     renderer.showLoading() catch |err| {
-        log.err("Failed to show loading screen: {}", .{err});
+        log.err("Failed to show loading screen: {t}", .{err});
     };
-
-    log.info("Rendering grid", .{});
     renderer.renderGrid();
 
-    // Initialize MQTT client if enabled
+    var app = App{
+        .io = io,
+        .sys = &sys_ops,
+        .net = &net_ops,
+        .traffic = &traffic_mon,
+        .renderer = &renderer,
+    };
+
     const mqtt_config = MqttConfig.load(init);
     var mqtt_client: ?MqttClient = null;
-    if (mqtt_config.enabled) {
-        log.info("MQTT enabled, connecting to {s}:{d}", .{ mqtt_config.host, mqtt_config.port });
-        mqtt_client = MqttClient.init(
-            allocator,
-            io,
-            mqtt_config.host,
-            mqtt_config.port,
-            mqtt_config.client_id,
-            mqtt_config.username,
-            mqtt_config.password,
-            mqtt_config.topic_prefix,
-        );
-
-        if (mqtt_client) |*client| {
-            client.connect() catch |err| {
-                log.warn("MQTT connection failed: {} - will retry later", .{err});
-            };
-
-            // Publish Home Assistant auto-discovery configs
-            if (mqtt_config.discovery_enabled and client.connected) {
-                publishHADiscoveryConfigs(client);
-            }
-
-            g_mqtt = client;
-        }
-    }
     defer if (mqtt_client) |*client| client.deinit();
 
-    // Initialize scheduler
+    if (mqtt_config.enabled) {
+        log.info("MQTT enabled, broker {s}:{d}", .{ mqtt_config.host, mqtt_config.port });
+        mqtt_client = MqttClient.init(allocator, io, mqtt_config);
+
+        if (mqtt_client) |*client| {
+            // A failure here is not fatal: publishMqttStats retries with backoff,
+            // and discovery is republished once the broker comes up.
+            client.connect() catch |err| {
+                log.warn("MQTT connection failed: {t} - will retry later", .{err});
+            };
+            app.mqtt = client;
+        }
+    }
+
     var scheduler = Scheduler.init(allocator, io);
     defer scheduler.deinit();
 
-    // Schedule rendering tasks
+    const fast = config.Config.interval_fast;
+    const slow = config.Config.interval_slow;
 
-    // Fast updates (CPU, RAM, etc.)
-    try scheduler.every(config.Config.interval_fast, "cpu", updateCpu);
-    try scheduler.every(config.Config.interval_fast, "memory", updateMemory);
-    try scheduler.every(config.Config.interval_fast, "disk", updateDisk);
-    try scheduler.every(config.Config.interval_fast, "fan", updateFan);
-    try scheduler.every(config.Config.interval_fast, "traffic", updateTraffic);
-    try scheduler.every(config.Config.interval_fast, "signal", updateSignal);
-    try scheduler.every(config.Config.interval_fast, "uptime", updateUptime);
+    try scheduler.every(fast, "cpu", &app, App.updateCpu);
+    try scheduler.every(fast, "memory", &app, App.updateMemory);
+    try scheduler.every(fast, "disk", &app, App.updateDisk);
+    try scheduler.every(fast, "fan", &app, App.updateFan);
+    try scheduler.every(fast, "traffic", &app, App.updateTraffic);
+    try scheduler.every(fast, "signal", &app, App.updateSignal);
+    try scheduler.every(fast, "uptime", &app, App.updateUptime);
+    // The APT count is repainted on the fast tick so a background check that
+    // finishes mid-cycle shows up promptly.
+    try scheduler.every(fast, "apt_render", &app, App.renderApt);
 
-    // Slow updates (Network info, APT updates, Internet check)
-    try scheduler.every(config.Config.interval_slow, "ip", updateIp);
-    try scheduler.every(config.Config.interval_slow, "apt", updateApt);
-    try scheduler.every(config.Config.interval_slow, "internet", updateInternet);
+    try scheduler.every(slow, "ip", &app, App.updateIp);
+    try scheduler.every(slow, "apt", &app, App.updateApt);
+    try scheduler.every(slow, "internet", &app, App.updateInternet);
 
-    // MQTT updates (every fast interval if enabled)
     if (mqtt_config.enabled) {
-        try scheduler.every(config.Config.interval_fast, "mqtt", publishMqttStats);
+        try scheduler.every(fast, "mqtt", &app, App.publishMqttStats);
     }
 
-    // Run once to fill all stats before first display update
+    // Populate every field before the first frame reaches the panel.
     scheduler.runAll();
 
-    // First update - use displayBase to set base image for partial updates with populated stats
+    // displayBase seeds the RAM that later partial updates diff against.
     renderer.convertTo1Bit(renderer.epd_buffer);
     try renderer.epd.displayBase(renderer.epd_buffer);
+    renderer.rememberCurrentFrame();
+    app.last_full_refresh = app.nowSeconds();
 
-    // Export initial BMP (before display updates)
-    log.info("Exporting initial BMP", .{});
     renderer.exportBmp() catch |err| {
-        log.err("Failed to export initial BMP: {}", .{err});
+        log.err("Failed to export initial BMP: {t}", .{err});
     };
 
-    // Display update (matches fast refresh rate)
-    try scheduler.every(config.Config.interval_fast, "display", updateDisplayPartial);
+    // Registered last so it does not run before the base frame exists. Its first
+    // tick is a no-op anyway: the frame is unchanged, so the update is skipped.
+    try scheduler.every(fast, "display", &app, App.updateDisplay);
 
     log.info("Starting main loop (Ctrl+C to exit)", .{});
-
-    // Run all tasks immediately
-    scheduler.runAll();
-
-    // Main event loop
-    while (!should_exit.load(.acquire)) {
-        scheduler.runPending();
-
-        // Sleep until next task or max 1 second
-        const idle = scheduler.idleSeconds();
-        const sleep_time = if (idle) |i| @min(i, 1) else 1;
-        io.sleep(std.Io.Duration.fromSeconds(sleep_time), .awake) catch {};
-    }
+    runLoop(&scheduler);
 
     log.info("Shutting down gracefully", .{});
-
-    if (g_renderer) |r| {
-        r.goToSleep() catch |err| {
-            log.err("Failed to show sleep screen: {}", .{err});
-        };
-    }
-
-    scheduler.clear();
+    renderer.goToSleep() catch |err| {
+        log.err("Failed to show sleep screen: {t}", .{err});
+    };
 
     return 0;
 }
 
-// Scheduler callback functions
-fn updateCpu() void {
-    if (g_sys_ops == null or g_renderer == null) return;
-
-    const load = g_sys_ops.?.getCpuLoad() catch |err| {
-        log.warn("getCpuLoad failed: {}", .{err});
-        return;
-    };
-    const temp = g_sys_ops.?.getCpuTemperature() catch |err| {
-        log.warn("getCpuTemperature failed: {}", .{err});
-        return;
-    };
-
-    g_renderer.?.renderCpuLoad(load, temp);
-    log.debug("CPU: {}% / {}°C", .{ load, temp });
-}
-
-fn updateMemory() void {
-    if (g_sys_ops == null or g_renderer == null) return;
-
-    const mem = g_sys_ops.?.getMemory() catch |err| {
-        log.warn("getMemory failed: {}", .{err});
-        return;
-    };
-    g_renderer.?.renderMemory(mem);
-    log.debug("Memory: {}%", .{mem});
-}
-
-fn updateDisk() void {
-    if (g_sys_ops == null or g_renderer == null) return;
-
-    const usage = g_sys_ops.?.getDiskUsage() catch |err| {
-        log.warn("getDiskUsage failed: {}", .{err});
-        return;
-    };
-    const temp = g_sys_ops.?.getDiskTemp() catch |err| {
-        log.warn("getDiskTemp failed: {}", .{err});
-        return;
-    };
-
-    g_renderer.?.renderDiskStats(usage, temp);
-    log.debug("Disk: {}% / {}°C", .{ usage, temp });
-}
-
-fn updateFan() void {
-    if (g_sys_ops == null or g_renderer == null) return;
-
-    const rpm = g_sys_ops.?.getFanSpeed() catch |err| {
-        log.warn("getFanSpeed failed: {}", .{err});
-        return;
-    };
-    g_renderer.?.renderFanSpeed(rpm);
-    log.debug("Fan: {} RPM", .{rpm});
-}
-
-fn updateSignal() void {
-    if (g_net_ops == null or g_renderer == null) return;
-
-    const signal = g_net_ops.?.getSignalStrength("wlan0") catch null;
-    g_renderer.?.renderSignalStrength(signal);
-
-    if (signal) |s| {
-        log.debug("Signal: {} dBm", .{s});
-    }
-}
-
-fn updateIp() void {
-    if (g_net_ops == null or g_renderer == null) return;
-
-    if (g_net_ops.?.getAnyIpAddress()) |ip_opt| {
-        if (ip_opt) |ip| {
-            defer g_net_ops.?.allocator.free(ip);
-            g_renderer.?.renderIpAddress(ip);
-            log.debug("IP: {s}", .{ip});
-        } else {
-            g_renderer.?.renderIpAddress("No IP");
-            log.debug("IP: No IP address found", .{});
-        }
-    } else |_| {
-        g_renderer.?.renderIpAddress("Error");
-    }
-}
-
-fn updateUptime() void {
-    if (g_sys_ops == null or g_renderer == null) return;
-
-    if (g_sys_ops.?.getUptime()) |uptime| {
-        g_renderer.?.renderUptime(uptime.days, uptime.hours, uptime.minutes);
-        log.debug("Uptime: {}d {}h {}m", .{ uptime.days, uptime.hours, uptime.minutes });
-    } else |err| {
-        log.warn("getUptime failed: {}", .{err});
-    }
-}
-
-fn updateTraffic() void {
-    if (g_traffic_mon == null or g_renderer == null) return;
-
-    const traffic = g_traffic_mon.?.getCurrentTraffic() catch |err| {
-        log.warn("getCurrentTraffic failed: {}", .{err});
-        return;
-    };
-    log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
-        traffic.download_speed,
-        traffic.download_unit,
-        traffic.upload_speed,
-        traffic.upload_unit,
-    });
-
-    g_renderer.?.renderTraffic(
-        traffic.download_speed,
-        traffic.download_unit,
-        traffic.upload_speed,
-        traffic.upload_unit,
-    );
-}
-
-fn updateDisplayPartial() void {
-    if (g_renderer == null) return;
-
-    g_full_refresh_counter += 1;
-
-    // Perform full refresh every 20 updates (approx 10 minutes) to clear artifacts
-    const perform_full_refresh = (g_full_refresh_counter % 20 == 0);
-    const use_partial = !perform_full_refresh;
-
-    log.debug("Display refresh #{} (partial={})", .{ g_full_refresh_counter, use_partial });
-
-    g_renderer.?.updateDisplay(use_partial) catch |err| {
-        log.warn("Failed to update display: {}", .{err});
-    };
-}
-
-fn updateApt() void {
-    if (g_sys_ops == null or g_net_ops == null or g_renderer == null) return;
-
-    const is_root = config.Config.isRoot();
-    const has_internet = g_net_ops.?.checkInternetConnection();
-
-    const count = g_sys_ops.?.checkUpdates(is_root, has_internet);
-    log.debug("APT updates: {}", .{count});
-
-    g_renderer.?.renderAptUpdates(count);
-}
-
-fn updateInternet() void {
-    if (g_net_ops == null or g_renderer == null) return;
-
-    const connected = g_net_ops.?.checkInternetConnection();
-    log.debug("Internet: {}", .{connected});
-
-    g_renderer.?.renderInternetStatus(connected);
-}
-
-// MQTT Functions
-fn publishHADiscoveryConfigs(client: *MqttClient) void {
-    log.info("Publishing Home Assistant discovery configs", .{});
-
-    // CPU sensors
-    client.publishHADiscovery("cpu_load", "CPU Load", "%", null, "mdi:cpu-64-bit") catch {};
-    client.publishHADiscovery("cpu_temp", "CPU Temperature", "°C", "temperature", "mdi:thermometer") catch {};
-
-    // Memory
-    client.publishHADiscovery("memory", "Memory Usage", "%", null, "mdi:memory") catch {};
-
-    // Disk
-    client.publishHADiscovery("disk_usage", "Disk Usage", "%", null, "mdi:harddisk") catch {};
-    client.publishHADiscovery("disk_temp", "Disk Temperature", "°C", "temperature", "mdi:thermometer") catch {};
-
-    // Fan
-    client.publishHADiscovery("fan_speed", "Fan Speed", "RPM", null, "mdi:fan") catch {};
-
-    // Network
-    client.publishHADiscovery("signal_strength", "WiFi Signal", "dBm", "signal_strength", "mdi:wifi") catch {};
-    client.publishHADiscovery("ip_address", "IP Address", null, null, "mdi:ip-network") catch {};
-    client.publishHADiscovery("internet", "Internet Connected", null, null, "mdi:web") catch {};
-
-    // Traffic
-    client.publishHADiscovery("traffic_down", "Download Speed", "KB/s", null, "mdi:download") catch {};
-    client.publishHADiscovery("traffic_up", "Upload Speed", "KB/s", null, "mdi:upload") catch {};
-
-    // System
-    client.publishHADiscovery("uptime_days", "Uptime Days", "d", null, "mdi:clock-outline") catch {};
-    client.publishHADiscovery("apt_updates", "APT Updates", null, null, "mdi:package-up") catch {};
-
-    log.info("Home Assistant discovery configs published", .{});
-}
-
-fn publishMqttStats() void {
-    const client = g_mqtt orelse return;
-
-    // Reconnect if needed
-    if (!client.connected) {
-        client.connect() catch |err| {
-            log.warn("MQTT reconnect failed: {}", .{err});
-            return;
-        };
+fn installSignalHandlers() void {
+    var fds: [2]i32 = undefined;
+    if (std.posix.errno(std.os.linux.pipe(&fds)) == .SUCCESS) {
+        wake_pipe = fds;
+    } else {
+        log.warn("Failed to create wake pipe; shutdown may lag by up to a second", .{});
     }
 
-    var buf: [32]u8 = undefined;
+    _ = c.signal(c.SIGINT, signalHandler);
+    _ = c.signal(c.SIGTERM, signalHandler);
+    _ = c.signal(c.SIGHUP, signalHandler);
+}
 
-    // Use cached values from SystemOps (populated during display updates)
-    if (g_sys_ops) |ops| {
-        // CPU load (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_cpu_load}) catch return;
-            client.publish("cpu_load", payload, false) catch {};
-        }
+/// Run scheduled tasks until a signal arrives.
+///
+/// Between ticks the loop blocks on the wake pipe for exactly as long as the
+/// next task is away, so an idle daemon wakes once per interval rather than
+/// once per second, while a signal still stops it immediately.
+fn runLoop(scheduler: *Scheduler) void {
+    const max_sleep_seconds = 3600;
+    const have_pipe = wake_pipe[0] >= 0;
 
-        // CPU temp (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_cpu_temp}) catch return;
-            client.publish("cpu_temp", payload, false) catch {};
-        }
+    while (!should_exit.load(.acquire)) {
+        scheduler.runPending();
+        if (should_exit.load(.acquire)) break;
 
-        // Memory (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_memory}) catch return;
-            client.publish("memory", payload, false) catch {};
-        }
+        const idle = scheduler.idleSeconds() orelse max_sleep_seconds;
+        var seconds = @min(idle, max_sleep_seconds);
 
-        // Disk usage (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_disk_usage}) catch return;
-            client.publish("disk_usage", payload, false) catch {};
-        }
+        // Without the pipe there is nothing to interrupt the wait, so fall back
+        // to short naps to keep shutdown responsive.
+        if (!have_pipe) seconds = @min(seconds, 1);
 
-        // Disk temp (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_disk_temp}) catch return;
-            client.publish("disk_temp", payload, false) catch {};
-        }
+        var fds = [_]std.posix.pollfd{.{
+            .fd = wake_pipe[0],
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        // With no pipe, poll on zero descriptors degrades to a plain sleep.
+        const watched: []std.posix.pollfd = if (have_pipe) fds[0..1] else fds[0..0];
 
-        // Fan (cached)
-        {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{ops.last_fan_speed}) catch return;
-            client.publish("fan_speed", payload, false) catch {};
-        }
-
-        // Uptime (always fetch - not expensive)
-        if (ops.getUptime()) |uptime| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{uptime.days}) catch return;
-            client.publish("uptime_days", payload, false) catch {};
-        } else |_| {}
-
-        // APT updates
-        const apt_count = ops.apt_updates_count.load(.monotonic);
-        const payload = std.fmt.bufPrint(&buf, "{d}", .{apt_count}) catch return;
-        client.publish("apt_updates", payload, false) catch {};
+        _ = std.posix.poll(watched, @intCast(seconds * 1000)) catch {};
     }
-
-    // Network
-    if (g_net_ops) |ops| {
-        // Signal strength
-        if (ops.getSignalStrength("wlan0") catch null) |signal| {
-            const payload = std.fmt.bufPrint(&buf, "{d}", .{signal}) catch return;
-            client.publish("signal_strength", payload, false) catch {};
-        }
-
-        // Internet status
-        const connected = ops.checkInternetConnection();
-        const payload = if (connected) "ON" else "OFF";
-        client.publish("internet", payload, false) catch {};
-
-        // IP address
-        if (ops.getAnyIpAddress()) |ip_opt| {
-            if (ip_opt) |ip| {
-                defer ops.allocator.free(ip);
-                client.publish("ip_address", ip, false) catch {};
-            }
-        } else |_| {}
-    }
-
-    // Traffic - use raw bytes and convert to KB/s for HA
-    if (g_traffic_mon) |mon| {
-        const raw = mon.getRawTraffic();
-
-        // Convert bytes/sec to KB/s (divide by 1024)
-        const down_kbs = raw.rx_bytes_per_sec / 1024.0;
-        const up_kbs = raw.tx_bytes_per_sec / 1024.0;
-
-        var down_buf: [32]u8 = undefined;
-        const down_payload = std.fmt.bufPrint(&down_buf, "{d:.2}", .{down_kbs}) catch return;
-        client.publish("traffic_down", down_payload, false) catch {};
-
-        var up_buf: [32]u8 = undefined;
-        const up_payload = std.fmt.bufPrint(&up_buf, "{d:.2}", .{up_kbs}) catch return;
-        client.publish("traffic_up", up_payload, false) catch {};
-    }
-
-    log.debug("MQTT stats published", .{});
 }

@@ -10,12 +10,24 @@ const BmpExporter = @import("bmp.zig").BmpExporter;
 
 const log = std.log.scoped(.display);
 
+/// Bytes per hardware row after the 90° rotation.
+const hw_bytes_per_row = display_config.DISPLAY_HEIGHT / 8;
+
+comptime {
+    // The rotation below packs a whole hardware row from one logical column.
+    std.debug.assert(display_config.DISPLAY_HEIGHT % 8 == 0);
+}
+
 /// Display renderer that manages Bitmap and EPD
 pub const DisplayRenderer = struct {
     bitmap: Bitmap,
     epd: EPD,
     epd_config: *EpdConfig,
     epd_buffer: []u8,
+    last_epd_buffer: []u8,
+    /// Scratch buffer for BMP export, kept around so exporting does not allocate.
+    bmp_buffer: []u8,
+    has_last_epd_buffer: bool = false,
     allocator: std.mem.Allocator,
     io: std.Io,
     bmp_exporter: BmpExporter,
@@ -25,29 +37,39 @@ pub const DisplayRenderer = struct {
         var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
         errdefer bitmap.deinit();
 
+        // EpdConfig is heap-allocated because EPD holds a pointer to it and this
+        // function returns by value — an inline field would dangle immediately.
         const epd_cfg = try allocator.create(EpdConfig);
         errdefer allocator.destroy(epd_cfg);
         epd_cfg.* = EpdConfig.init(allocator);
 
-        const epd = EPD.init(allocator, epd_cfg);
-
-        // Allocate buffer for EPD (128x296 portrait = 4736 bytes)
-        const buffer_size = (display_config.DISPLAY_HEIGHT / 8) * display_config.DISPLAY_WIDTH;
+        // Buffer for EPD (128x296 portrait = 4736 bytes)
+        const buffer_size = hw_bytes_per_row * display_config.DISPLAY_WIDTH;
         const epd_buffer = try allocator.alloc(u8, buffer_size);
+        errdefer allocator.free(epd_buffer);
+        const last_epd_buffer = try allocator.alloc(u8, buffer_size);
+        errdefer allocator.free(last_epd_buffer);
+
+        const bmp_row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
 
         return .{
             .bitmap = bitmap,
-            .epd = epd,
+            .epd = EPD.init(epd_cfg),
             .epd_config = epd_cfg,
             .epd_buffer = epd_buffer,
+            .last_epd_buffer = last_epd_buffer,
+            .bmp_buffer = bmp_buffer,
             .allocator = allocator,
             .io = io,
-            .bmp_exporter = BmpExporter.init(allocator),
+            .bmp_exporter = BmpExporter.init(),
         };
     }
 
     pub fn deinit(self: *DisplayRenderer) void {
         self.bitmap.deinit();
+        self.allocator.free(self.bmp_buffer);
+        self.allocator.free(self.last_epd_buffer);
         self.allocator.free(self.epd_buffer);
         self.epd_config.moduleExit();
         self.allocator.destroy(self.epd_config);
@@ -61,26 +83,26 @@ pub const DisplayRenderer = struct {
 
     /// Show a transient loading screen while metrics initialize
     pub fn showLoading(self: *DisplayRenderer) !void {
-        self.bitmap.clear(.White);
-
-        // Vertical line
-        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, .Black);
-
-        // Icon on the left
-        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, .Black);
-
-        // Title on the right
-        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, .Black);
-
-        // Subtitle
-        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, "Loading...", .Ubuntu14, .Black);
+        self.drawSplash("Loading...", .White);
 
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.display(self.epd_buffer);
 
         self.exportBmp() catch |err| {
-            log.err("Failed to export loading BMP: {}", .{err});
+            log.err("Failed to export loading BMP: {t}", .{err});
         };
+    }
+
+    /// Draw the full-screen splash used by the loading and sleep screens.
+    /// `background` is the page colour; text and rules are drawn inverted to it.
+    fn drawSplash(self: *DisplayRenderer, subtitle: []const u8, background: Graphics.Color) void {
+        const ink: Graphics.Color = if (background == .White) .Black else .White;
+
+        self.bitmap.clear(background);
+        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, subtitle, .Ubuntu14, ink);
     }
 
     /// Render grid layout
@@ -159,7 +181,7 @@ pub const DisplayRenderer = struct {
 
     /// Update display
     pub fn updateDisplay(self: *DisplayRenderer, partial: bool) !void {
-        log.info("updateDisplay: START", .{});
+        log.debug("updateDisplay: START (partial={})", .{partial});
 
         if (display_config.DEBUG_TEXT_AREAS) {
             self.drawTextAreaFrames();
@@ -168,17 +190,33 @@ pub const DisplayRenderer = struct {
         // Convert Bitmap to 1-bit
         self.convertTo1Bit(self.epd_buffer);
 
+        // Skip unchanged frames only on partial updates. A full refresh must always go
+        // through to clear ghosting/artifacts accumulated by partial updates.
+        if (partial and self.has_last_epd_buffer and std.mem.eql(u8, self.epd_buffer, self.last_epd_buffer)) {
+            log.debug("updateDisplay: skipped unchanged partial frame", .{});
+            self.exportBmp() catch |err| {
+                log.err("Failed to export BMP: {t}", .{err});
+            };
+            return;
+        }
+
         if (partial) {
             try self.epd.displayPartial(self.epd_buffer);
         } else {
             try self.epd.display(self.epd_buffer);
         }
+        self.rememberCurrentFrame();
 
-        log.info("updateDisplay: EPD done", .{});
+        log.debug("updateDisplay: EPD done", .{});
 
         self.exportBmp() catch |err| {
-            log.err("Failed to export BMP: {}", .{err});
+            log.err("Failed to export BMP: {t}", .{err});
         };
+    }
+
+    pub fn rememberCurrentFrame(self: *DisplayRenderer) void {
+        @memcpy(self.last_epd_buffer, self.epd_buffer);
+        self.has_last_epd_buffer = true;
     }
 
     fn drawTextAreaFrames(self: *DisplayRenderer) void {
@@ -225,30 +263,27 @@ pub const DisplayRenderer = struct {
         self.bitmap.drawRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
     }
 
-    /// Convert Bitmap to 1-bit packed format for EPD (with rotation)
+    /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
+    /// clockwise. One hardware row comes from one logical column, so each output
+    /// byte is assembled in a register and stored once.
     pub fn convertTo1Bit(self: *DisplayRenderer, output: []u8) void {
-        // Clear output buffer (white = 0xFF)
-        @memset(output, 0xFF);
+        const width = self.bitmap.width;
 
-        var y: u32 = 0;
-        while (y < self.bitmap.height) : (y += 1) {
-            var x: u32 = 0;
-            while (x < self.bitmap.width) : (x += 1) {
-                const idx = y * self.bitmap.stride + x;
-                const val = self.bitmap.data[idx];
-                const is_black = val < 128;
+        var hw_y: u32 = 0;
+        while (hw_y < width) : (hw_y += 1) {
+            const src_x = (width - 1) - hw_y;
+            const row = output[hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
 
-                if (is_black) {
-                    // Rotate 90° clockwise: (x,y) logical -> (y, 295-x) hardware
-                    const hw_x = y;
-                    const hw_y = (self.bitmap.width - 1) - x;
-                    const hw_width: u32 = display_config.DISPLAY_HEIGHT;
-
-                    const byte_idx = (hw_y * (hw_width / 8)) + (hw_x / 8);
-                    const bit_idx: u3 = @intCast(hw_x % 8);
-
-                    output[byte_idx] &= ~(@as(u8, 0x80) >> bit_idx);
+            for (row, 0..) |*out_byte, byte_idx| {
+                // 1 = white, 0 = black, MSB first.
+                var bits: u8 = 0;
+                for (0..8) |b| {
+                    const src_y = byte_idx * 8 + b;
+                    if (self.bitmap.data[src_y * self.bitmap.stride + src_x] >= 128) {
+                        bits |= @as(u8, 0x80) >> @intCast(b);
+                    }
                 }
+                out_byte.* = bits;
             }
         }
     }
@@ -259,27 +294,27 @@ pub const DisplayRenderer = struct {
 
         const width = self.bitmap.width;
         const height = self.bitmap.height;
+        const row_bytes = (width + 7) / 8;
 
-        // Convert to 1-bit without rotation
-        const buffer_size = (height * ((width + 7) / 8));
-        const buffer = try self.allocator.alloc(u8, buffer_size);
-        defer self.allocator.free(buffer);
-        @memset(buffer, 0xFF);
-
+        // Pack to 1-bit without rotation, into the preallocated scratch buffer.
         var y: u32 = 0;
         while (y < height) : (y += 1) {
-            var x: u32 = 0;
-            while (x < width) : (x += 1) {
-                const idx = y * self.bitmap.stride + x;
-                if (self.bitmap.data[idx] < 128) {
-                    const byte_idx = (y * ((width + 7) / 8)) + (x / 8);
-                    const bit_idx: u3 = @intCast(x % 8);
-                    buffer[byte_idx] &= ~(@as(u8, 0x80) >> bit_idx);
+            const src_row = self.bitmap.data[y * self.bitmap.stride ..][0..width];
+            const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
+
+            for (dst_row, 0..) |*out_byte, byte_idx| {
+                var bits: u8 = 0;
+                for (0..8) |b| {
+                    const x = byte_idx * 8 + b;
+                    if (x >= width or src_row[x] >= 128) {
+                        bits |= @as(u8, 0x80) >> @intCast(b);
+                    }
                 }
+                out_byte.* = bits;
             }
         }
 
-        try self.bmp_exporter.save(self.io, buffer, @intCast(width), @intCast(height), config.Config.bmp_export_path);
+        try self.bmp_exporter.save(self.io, self.bmp_buffer, width, height, config.Config.bmp_export_path);
     }
 
     /// Render CPU load and temperature
@@ -337,64 +372,111 @@ pub const DisplayRenderer = struct {
         self.bitmap.drawTextFont(display_config.IP_VALUE_X, display_config.IP_VALUE_Y, display_ip, .Ubuntu14, .Black);
     }
 
-    /// Render uptime
+    /// Render uptime.
+    ///
+    /// The slot runs to the right edge of the panel, where overflow is clipped
+    /// mid-glyph, so pick the most detailed form that fits its 84px:
+    /// "11d 12h 20m" (83px) up to 99 days, then the compact "123d 23:59" (70px),
+    /// which still carries minutes. Only truly absurd uptimes lose them.
     pub fn renderUptime(self: *DisplayRenderer, days: u32, hours: u32, minutes: u32) void {
         self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
 
-        var buf: [32]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
+        var buf = display_config.UptimeBuffers{};
+        const candidates = display_config.uptimeCandidates(&buf, days, hours, minutes);
+
+        const text = self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
         self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
     }
 
-    /// Render signal strength
+    /// Render signal strength.
+    ///
+    /// "-40 dBm" fits; the three-digit "-100 dBm" does not, so the unit is
+    /// dropped at that end of the range rather than clipping the number. -100
+    /// dBm is effectively no signal, where the exact unit matters least.
     pub fn renderSignalStrength(self: *DisplayRenderer, signal: ?i32) void {
         self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
 
         const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
         self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);
 
-        var buf: [16]u8 = undefined;
-        const text = if (signal) |s| std.fmt.bufPrint(&buf, "{d} dBm", .{s}) catch "?" else "N/A";
+        var with_unit: [16]u8 = undefined;
+        var bare: [16]u8 = undefined;
+
+        const text = if (signal) |s| blk: {
+            const candidates = [_][]const u8{
+                std.fmt.bufPrint(&with_unit, "{d} dBm", .{s}) catch "?",
+                std.fmt.bufPrint(&bare, "{d}", .{s}) catch "?",
+            };
+            break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.SIGNAL_VALUE_MAX_W);
+        } else "N/A";
+
         self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
     }
 
     /// Render network traffic
     pub fn renderTraffic(self: *DisplayRenderer, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
-        // Download
-        self.bitmap.fillRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
-
-        var buf1: [16]u8 = undefined;
-        const down_text = std.fmt.bufPrint(&buf1, "{d:.2}", .{download_speed}) catch "?";
-        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_VALUE_Y, down_text, .Ubuntu20, .Black);
-
-        var unit_buf1: [16]u8 = undefined;
-        const down_unit_text = std.fmt.bufPrint(&unit_buf1, "{s}/s", .{download_unit}) catch "?";
-        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_Y, down_unit_text, .Ubuntu14, .Black);
-
-        // Upload
-        self.bitmap.fillRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
-
-        var buf2: [16]u8 = undefined;
-        const up_text = std.fmt.bufPrint(&buf2, "{d:.2}", .{upload_speed}) catch "?";
-        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_VALUE_Y, up_text, .Ubuntu20, .Black);
-
-        var unit_buf2: [16]u8 = undefined;
-        const up_unit_text = std.fmt.bufPrint(&unit_buf2, "{s}/s", .{upload_unit}) catch "?";
-        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_Y, up_unit_text, .Ubuntu14, .Black);
+        self.renderTrafficRow(
+            download_speed,
+            download_unit,
+            display_config.TRAFFIC_DOWN_VALUE_X,
+            display_config.TRAFFIC_DOWN_VALUE_Y,
+            display_config.TRAFFIC_DOWN_AREA_Y,
+            display_config.TRAFFIC_DOWN_UNIT_X,
+            display_config.TRAFFIC_DOWN_UNIT_Y,
+            display_config.TRAFFIC_DOWN_UNIT_AREA_Y,
+        );
+        self.renderTrafficRow(
+            upload_speed,
+            upload_unit,
+            display_config.TRAFFIC_UP_VALUE_X,
+            display_config.TRAFFIC_UP_VALUE_Y,
+            display_config.TRAFFIC_UP_AREA_Y,
+            display_config.TRAFFIC_UP_UNIT_X,
+            display_config.TRAFFIC_UP_UNIT_Y,
+            display_config.TRAFFIC_UP_UNIT_AREA_Y,
+        );
     }
 
-    /// Render APT updates count
-    pub fn renderAptUpdates(self: *DisplayRenderer, count: u32) void {
+    fn renderTrafficRow(
+        self: *DisplayRenderer,
+        speed: f64,
+        unit: []const u8,
+        value_x: i32,
+        value_y: i32,
+        value_area_y: i32,
+        unit_x: i32,
+        unit_y: i32,
+        unit_area_y: i32,
+    ) void {
+        self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+
+        var value_buf: [32]u8 = undefined;
+        const value_text = std.fmt.bufPrint(&value_buf, "{d:.2}", .{speed}) catch "?";
+        self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
+
+        var unit_buf: [32]u8 = undefined;
+        const unit_text = std.fmt.bufPrint(&unit_buf, "{s}/s", .{unit}) catch "?";
+        self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
+    }
+
+    /// Render APT updates count. `null` means the background check has not
+    /// reported yet — show a dash rather than the "all up to date" tick, which
+    /// would claim more than is known.
+    pub fn renderAptUpdates(self: *DisplayRenderer, count: ?u32) void {
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
         self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
 
-        if (count == 0) {
+        const known = count orelse {
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, "-", .Ubuntu24, .Black);
+            return;
+        };
+
+        if (known == 0) {
             self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
         } else {
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}", .{count}) catch "?";
+            const text = std.fmt.bufPrint(&buf, "{d}", .{known}) catch "?";
             self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, text, .Ubuntu24, .Black);
         }
     }
@@ -408,39 +490,31 @@ pub const DisplayRenderer = struct {
         self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
     }
 
-    /// Go to sleep
+    /// Draw the sleep screen, then park the panel in deep sleep.
     pub fn goToSleep(self: *DisplayRenderer) !void {
         log.info("Rendering sleep screen", .{});
 
         // Re-initialize display to ensure Full LUT is loaded (needed after partial updates)
         self.epd.reInit() catch |err| {
-            log.err("Failed to re-init display for sleep: {}", .{err});
+            log.err("Failed to re-init display for sleep: {t}", .{err});
         };
 
-        self.bitmap.clear(.Black);
-
-        // White vertical line
-        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, .White);
-
-        // Icon on the left
-        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, .White);
-
-        // Title on the right
-        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, .White);
-
-        // Subtitle
-        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, "Sleeping...", .Ubuntu14, .White);
-
-        log.info("Converting to 1-bit", .{});
+        self.drawSplash("Sleeping...", .Black);
         self.convertTo1Bit(self.epd_buffer);
 
-        log.info("Sending to EPD display with full refresh", .{});
-        // Use displayBase to reset the display state after partial updates
+        // displayBase also resets the base RAM used by partial updates.
         try self.epd.displayBase(self.epd_buffer);
-        log.info("EPD display updated successfully", .{});
+        self.rememberCurrentFrame();
+
+        // Waveshare requires deep sleep before power is cut.
+        self.epd.sleep() catch |err| {
+            log.err("Failed to put panel into deep sleep: {t}", .{err});
+        };
+
+        log.info("Display parked in deep sleep", .{});
 
         self.exportBmp() catch |err| {
-            log.err("Failed to export sleep screen BMP: {}", .{err});
+            log.err("Failed to export sleep screen BMP: {t}", .{err});
         };
     }
 };

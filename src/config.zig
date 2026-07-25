@@ -1,4 +1,17 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const parse = @import("parse.zig");
+
+const is_linux = builtin.target.os.tag == .linux;
+
+/// Parse a boolean environment variable. Accepts "1", "true", "yes", "on"
+/// (case-insensitive); anything else is false.
+pub fn parseBool(val: []const u8) bool {
+    for ([_][]const u8{ "1", "true", "yes", "on" }) |truthy| {
+        if (std.ascii.eqlIgnoreCase(val, truthy)) return true;
+    }
+    return false;
+}
 
 /// Application configuration loaded from environment variables
 pub const Config = struct {
@@ -22,11 +35,27 @@ pub const Config = struct {
         err,
 
         pub fn parse(str: []const u8) LogLevel {
-            if (std.ascii.eqlIgnoreCase(str, "DEBUG")) return .debug;
-            if (std.ascii.eqlIgnoreCase(str, "INFO")) return .info;
-            if (std.ascii.eqlIgnoreCase(str, "WARNING")) return .warn;
-            if (std.ascii.eqlIgnoreCase(str, "ERROR")) return .err;
+            const table = [_]struct { name: []const u8, level: LogLevel }{
+                .{ .name = "DEBUG", .level = .debug },
+                .{ .name = "INFO", .level = .info },
+                .{ .name = "WARN", .level = .warn },
+                .{ .name = "WARNING", .level = .warn },
+                .{ .name = "ERROR", .level = .err },
+                .{ .name = "ERR", .level = .err },
+            };
+            for (table) |entry| {
+                if (std.ascii.eqlIgnoreCase(str, entry.name)) return entry.level;
+            }
             return .info; // default
+        }
+
+        pub fn toStd(self: LogLevel) std.log.Level {
+            return switch (self) {
+                .debug => .debug,
+                .info => .info,
+                .warn => .warn,
+                .err => .err,
+            };
         }
     };
 
@@ -48,82 +77,109 @@ pub const Config = struct {
     /// GPIO chip path
     pub var gpio_chip: []const u8 = "/dev/gpiochip0";
 
+    /// SPI device path
+    pub var spi_device: []const u8 = "/dev/spidev0.0";
+
     /// Scheduler interval for fast updates (CPU, RAM, etc.) in seconds
     pub var interval_fast: u32 = 30;
 
     /// Scheduler interval for slow updates (IP, APT, Internet) in seconds
     pub var interval_slow: u32 = 10800; // 3 hours
 
+    /// How often to force a full (non-partial) refresh, in seconds. Full
+    /// refreshes clear the ghosting that partial updates accumulate.
+    pub var interval_full_refresh: u32 = 600; // 10 minutes
+
+    /// Host probed to decide whether the machine has internet access.
+    /// Stored in host byte order.
+    pub var internet_check_ip: u32 = 0x08080808; // 8.8.8.8
+    pub var internet_check_port: u16 = 53;
+
     /// Load configuration from environment variables
     pub fn load(init: std.process.Init) void {
-        if (init.environ_map.get("GPIO_CHIP")) |val| {
+        const env = init.environ_map;
+
+        if (env.get("GPIO_CHIP")) |val| {
             gpio_chip = val;
-        } else {
-            // Auto-detect by label if GPIO_CHIP not set explicitly
-            if (findGpioChipByLabel("pinctrl-rp1")) |path| {
-                gpio_chip = path;
-            }
+        } else if (findGpioChip()) |path| {
+            gpio_chip = path;
         }
-        if (init.environ_map.get("EXPORT_BMP")) |val| {
-            export_bmp = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
+        if (env.get("SPI_DEVICE")) |val| {
+            spi_device = val;
         }
-        if (init.environ_map.get("BMP_EXPORT_PATH")) |val| {
+        if (env.get("EXPORT_BMP")) |val| {
+            export_bmp = parseBool(val);
+        }
+        if (env.get("BMP_EXPORT_PATH")) |val| {
             bmp_export_path = val;
         }
-        if (init.environ_map.get("INTERVAL_FAST")) |val| {
+        if (env.get("INTERVAL_FAST")) |val| {
             interval_fast = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_fast);
         }
-        if (init.environ_map.get("INTERVAL_SLOW")) |val| {
+        if (env.get("INTERVAL_SLOW")) |val| {
             interval_slow = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_slow);
         }
+        if (env.get("INTERVAL_FULL_REFRESH")) |val| {
+            interval_full_refresh = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_full_refresh);
+        }
 
-        if (init.environ_map.get("THRESHOLD_CPU_CRITICAL")) |val| {
+        if (env.get("INTERNET_CHECK_IP")) |val| {
+            internet_check_ip = parse.ipv4(val) catch internet_check_ip;
+        }
+        if (env.get("INTERNET_CHECK_PORT")) |val| {
+            internet_check_port = std.fmt.parseInt(u16, val, 10) catch internet_check_port;
+        }
+
+        if (env.get("THRESHOLD_CPU_CRITICAL")) |val| {
             threshold_cpu_critical = std.fmt.parseInt(u8, val, 10) catch threshold_cpu_critical;
         }
-
-        if (init.environ_map.get("THRESHOLD_TEMP_CRITICAL")) |val| {
+        if (env.get("THRESHOLD_TEMP_CRITICAL")) |val| {
             threshold_temp_critical = std.fmt.parseInt(u8, val, 10) catch threshold_temp_critical;
         }
-
-        if (init.environ_map.get("THRESHOLD_MEM_CRITICAL")) |val| {
+        if (env.get("THRESHOLD_MEM_CRITICAL")) |val| {
             threshold_mem_critical = std.fmt.parseInt(u8, val, 10) catch threshold_mem_critical;
         }
-
-        if (init.environ_map.get("THRESHOLD_DISK_CRITICAL")) |val| {
+        if (env.get("THRESHOLD_DISK_CRITICAL")) |val| {
             threshold_disk_critical = std.fmt.parseInt(u8, val, 10) catch threshold_disk_critical;
         }
 
-        if (init.environ_map.get("LOG_LEVEL")) |val| {
+        if (env.get("LOG_LEVEL")) |val| {
             log_level = LogLevel.parse(val);
         }
-
-        if (init.environ_map.get("LOG_TO_FILE")) |val| {
-            log_to_file = std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
+        if (env.get("LOG_TO_FILE")) |val| {
+            log_to_file = parseBool(val);
         }
-
-        if (init.environ_map.get("LOG_FILE_PATH")) |val| {
+        if (env.get("LOG_FILE_PATH")) |val| {
             log_file_path = val;
         }
 
-        log_level_std = toStdLogLevel(log_level);
-    }
-
-    fn toStdLogLevel(level: LogLevel) std.log.Level {
-        return switch (level) {
-            .debug => .debug,
-            .info => .info,
-            .warn => .warn,
-            .err => .err,
-        };
+        log_level_std = log_level.toStd();
     }
 
     /// Check if running as root user
     pub fn isRoot() bool {
+        if (!is_linux) return false;
         return std.os.linux.getuid() == 0;
     }
 
-    /// Static buffer for auto-detected GPIO chip path
+    /// Static buffer for the auto-detected GPIO chip path
     var gpio_chip_buf: [32]u8 = undefined;
+
+    /// GPIO chip labels for the SoCs this runs on, most recent first.
+    const known_gpio_labels = [_][]const u8{
+        "pinctrl-rp1", // Pi 5
+        "pinctrl-bcm2711", // Pi 4
+        "pinctrl-bcm2835", // Pi 3 and older
+    };
+
+    fn findGpioChip() ?[]const u8 {
+        if (!is_linux) return null;
+
+        for (known_gpio_labels) |label| {
+            if (findGpioChipByLabel(label)) |path| return path;
+        }
+        return null;
+    }
 
     /// Scan /dev/gpiochip0..31 and return path of the chip whose label matches.
     /// Returns null if not found. Uses GPIO_GET_CHIPINFO_IOCTL (same as gpiodetect).
@@ -149,10 +205,42 @@ pub const Config = struct {
 
             const chip_label = std.mem.sliceTo(&info.label, 0);
             if (std.mem.eql(u8, chip_label, label)) {
-                const result = std.fmt.bufPrint(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
-                return result;
+                return std.fmt.bufPrint(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
             }
         }
         return null;
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "parseBool accepts the usual truthy spellings" {
+    for ([_][]const u8{ "1", "true", "TRUE", "True", "yes", "YES", "on", "ON" }) |val| {
+        try testing.expect(parseBool(val));
+    }
+    for ([_][]const u8{ "0", "false", "no", "off", "", "2", "maybe" }) |val| {
+        try testing.expect(!parseBool(val));
+    }
+}
+
+test "LogLevel.parse accepts both WARN and WARNING" {
+    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("WARN"));
+    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("WARNING"));
+    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("warn"));
+}
+
+test "LogLevel.parse maps the remaining levels" {
+    try testing.expectEqual(Config.LogLevel.debug, Config.LogLevel.parse("debug"));
+    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse("INFO"));
+    try testing.expectEqual(Config.LogLevel.err, Config.LogLevel.parse("ERROR"));
+    try testing.expectEqual(Config.LogLevel.err, Config.LogLevel.parse("ERR"));
+}
+
+test "LogLevel.parse falls back to info" {
+    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse("nonsense"));
+    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse(""));
+}

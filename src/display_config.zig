@@ -1,6 +1,7 @@
 /// Display configuration constants for e-ink display layout
 /// Display: 296x128 pixels (landscape)
 /// Layout matches original Python version
+const std = @import("std");
 
 // Display dimensions
 pub const DISPLAY_WIDTH = 296;
@@ -112,16 +113,20 @@ pub const IP_VALUE_X = 15;
 pub const IP_VALUE_Y = 125;
 pub const IP_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
-pub const SIGNAL_ICON_X = 125;
+// The signal reading needs 54px for the common "-40 dBm"; the old 80px slot was
+// mostly dead space. Reclaiming it lets uptime show minutes spelled out.
+pub const SIGNAL_ICON_X = 122;
 pub const SIGNAL_ICON_Y = 127;
-pub const SIGNAL_VALUE_X = 140;
+pub const SIGNAL_VALUE_X = 137;
 pub const SIGNAL_VALUE_Y = 125;
-pub const SIGNAL_AREA_X = 120; // SIGNAL_VALUE_X(140) - 20
+pub const SIGNAL_AREA_X = 120;
 pub const SIGNAL_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
+/// Room for the reading itself: area ends at 195, text starts at 137.
+pub const SIGNAL_VALUE_MAX_W = 58;
 
-pub const UPTIME_ICON_X = 205;
+pub const UPTIME_ICON_X = 197;
 pub const UPTIME_ICON_Y = 127;
-pub const UPTIME_VALUE_X = 220;
+pub const UPTIME_VALUE_X = 212;
 pub const UPTIME_VALUE_Y = 125;
 pub const UPTIME_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 
@@ -131,8 +136,11 @@ pub const TEXT_AREA_MEM = .{ .width = 65, .height = 25 };
 pub const TEXT_AREA_DISK = .{ .width = 70, .height = 27 };
 pub const TEXT_AREA_FAN = .{ .width = 60, .height = 27 };
 pub const TEXT_AREA_IP = .{ .width = 105, .height = 14 };
-pub const TEXT_AREA_UPTIME = .{ .width = 76, .height = 14 };
-pub const TEXT_AREA_SIGNAL = .{ .width = 80, .height = 14 };
+// Uptime runs to the right edge of the panel: 212 + 84 = 296.
+pub const TEXT_AREA_UPTIME = .{ .width = 84, .height = 14 };
+// Signal covers icon and value: 120 + 75 = 195, leaving a gap before the
+// uptime icon at 197.
+pub const TEXT_AREA_SIGNAL = .{ .width = 75, .height = 14 };
 pub const TEXT_AREA_TRAFFIC_VALUE = .{ .width = 75, .height = 20 };
 pub const TEXT_AREA_TRAFFIC_UNIT = .{ .width = 35, .height = 14 };
 pub const TEXT_AREA_APT = .{ .width = 35, .height = 24 };
@@ -167,3 +175,33 @@ pub const SLEEP_TITLE_Y = 60;
 pub const SLEEP_SUBTITLE_X = 155;
 pub const SLEEP_SUBTITLE_Y = 82;
 pub const ICON_SLEEP_NET = "\u{eb2f}";
+
+// ----------------------------------------------------------------------------
+// Text that has to be fitted to a slot
+// ----------------------------------------------------------------------------
+
+pub const UptimeBuffers = struct {
+    full: [32]u8 = undefined,
+    compact: [32]u8 = undefined,
+    hours: [32]u8 = undefined,
+    days: [32]u8 = undefined,
+};
+
+/// Uptime renderings from most to least detailed, for `Bitmap.fitText`.
+///
+/// The slot runs to the right edge of the panel, so the caller picks the first
+/// that fits rather than letting a long string clip mid-glyph.
+pub fn uptimeCandidates(buf: *UptimeBuffers, days: u32, hours: u32, minutes: u32) [4][]const u8 {
+    // Under a day the day counter is noise: "5h 3m" beats "0d 5h 3m".
+    const full = if (days == 0)
+        std.fmt.bufPrint(&buf.full, "{d}h {d}m", .{ hours, minutes }) catch "?"
+    else
+        std.fmt.bufPrint(&buf.full, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
+
+    return .{
+        full,
+        std.fmt.bufPrint(&buf.compact, "{d}d {d}:{d:0>2}", .{ days, hours, minutes }) catch "?",
+        std.fmt.bufPrint(&buf.hours, "{d}d {d}h", .{ days, hours }) catch "?",
+        std.fmt.bufPrint(&buf.days, "{d}d", .{days}) catch "?",
+    };
+}

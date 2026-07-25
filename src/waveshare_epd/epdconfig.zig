@@ -1,7 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const GpioNative = @import("../gpio_native.zig").GpioNative;
 
 const log = std.log.scoped(.epd_config);
+
+const is_linux = builtin.target.os.tag == .linux;
 
 /// GPIO and SPI configuration for Waveshare e-ink display using native chardev
 pub const EpdConfig = struct {
@@ -33,14 +36,11 @@ pub const EpdConfig = struct {
 
     /// Initialize SPI and GPIO using chardev
     pub fn moduleInit(self: *EpdConfig) !void {
-        // Only on Linux
-        if (@import("builtin").target.os.tag != .linux) {
-            return error.UnsupportedPlatform;
-        }
+        if (!is_linux) return error.UnsupportedPlatform;
 
-        // Ensure partial initialization is cleaned up on failure
+        // Ensure partial initialization is cleaned up on failure. moduleExit is
+        // idempotent, so the later deinit-time call is a no-op.
         errdefer self.moduleExit();
-        self.spi_fd = -1;
 
         const chip_path = @import("../config.zig").Config.gpio_chip;
         log.info("Requesting GPIO lines from {s}", .{chip_path});
@@ -58,39 +58,42 @@ pub const EpdConfig = struct {
         log.info("Power on, waiting for display to stabilize", .{});
         delayMs(200); // Give display time to power up
 
-        const spi_path = "/dev/spidev0.0";
+        const spi_path = @import("../config.zig").Config.spi_device;
         log.info("Opening SPI device {s}", .{spi_path});
-        // Open SPI device
-        self.spi_fd = @intCast(std.os.linux.open(spi_path, .{ .ACCMODE = .RDWR }, 0));
+        self.spi_fd = std.posix.openat(std.posix.AT.FDCWD, spi_path, .{ .ACCMODE = .RDWR }, 0) catch |err| {
+            log.err("Failed to open SPI device {s}: {t}", .{ spi_path, err });
+            log.err("Is SPI enabled, and is this user in the 'spi' group?", .{});
+            return error.SpiOpenFailed;
+        };
 
         log.info("Configuring SPI", .{});
-        // Configure SPI
         const SPI_IOC_WR_MODE: u32 = 0x40016b01;
         const SPI_IOC_WR_BITS_PER_WORD: u32 = 0x40016b03;
         const SPI_IOC_WR_MAX_SPEED_HZ: u32 = 0x40046b04;
 
         var mode: u8 = 0; // SPI_MODE_0
         var bits: u8 = 8;
-        var speed: u32 = 10000000; // 10MHz (SSD1680 supports up to 20MHz)
+        var speed: u32 = 10_000_000; // 10MHz (SSD1680 supports up to 20MHz)
 
-        if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_MODE, @intFromPtr(&mode)) != 0) {
-            log.err("Failed to set SPI mode", .{});
-            return error.SpiConfigFailed;
-        }
-        if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_BITS_PER_WORD, @intFromPtr(&bits)) != 0) {
-            log.err("Failed to set SPI bits", .{});
-            return error.SpiConfigFailed;
-        }
-        if (std.os.linux.ioctl(self.spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, @intFromPtr(&speed)) != 0) {
-            log.err("Failed to set SPI speed", .{});
-            return error.SpiConfigFailed;
-        }
+        try self.spiIoctl(SPI_IOC_WR_MODE, @intFromPtr(&mode), "mode");
+        try self.spiIoctl(SPI_IOC_WR_BITS_PER_WORD, @intFromPtr(&bits), "bits per word");
+        try self.spiIoctl(SPI_IOC_WR_MAX_SPEED_HZ, @intFromPtr(&speed), "max speed");
+
         log.info("SPI configured successfully", .{});
     }
 
-    /// Cleanup and close SPI/GPIO
+    fn spiIoctl(self: *EpdConfig, request: u32, arg: usize, what: []const u8) !void {
+        const rc = std.os.linux.ioctl(self.spi_fd, request, arg);
+        const err = std.posix.errno(rc);
+        if (err != .SUCCESS) {
+            log.err("Failed to set SPI {s}: errno={t}", .{ what, err });
+            return error.SpiConfigFailed;
+        }
+    }
+
+    /// Cleanup and close SPI/GPIO. Safe to call more than once.
     pub fn moduleExit(self: *EpdConfig) void {
-        if (@import("builtin").target.os.tag != .linux) return;
+        if (!is_linux) return;
 
         // Set pins low before releasing
         self.digitalWrite(RST_PIN, 0) catch {};
@@ -98,20 +101,23 @@ pub const EpdConfig = struct {
         self.digitalWrite(PWR_PIN, 0) catch {};
 
         // Release lines
-        if (self.line_rst) |h| h.deinit();
-        if (self.line_dc) |h| h.deinit();
-        if (self.line_pwr) |h| h.deinit();
-        if (self.line_busy) |h| h.deinit();
+        inline for (.{ "line_rst", "line_dc", "line_pwr", "line_busy" }) |field| {
+            if (@field(self, field)) |h| {
+                h.deinit();
+                @field(self, field) = null;
+            }
+        }
 
         // Close SPI
         if (self.spi_fd >= 0) {
             _ = std.os.linux.close(self.spi_fd);
+            self.spi_fd = -1;
         }
     }
 
     /// Write digital value to GPIO pin
     pub fn digitalWrite(self: *EpdConfig, pin: u32, value: u8) !void {
-        if (@import("builtin").target.os.tag != .linux) return;
+        if (!is_linux) return;
 
         // CS_PIN (Chip Select) is automatically controlled by SPI hardware driver
         // when using /dev/spidev. Manual GPIO control would interfere with SPI timing.
@@ -133,7 +139,7 @@ pub const EpdConfig = struct {
 
     /// Read digital value from GPIO pin
     pub fn digitalRead(self: *EpdConfig, pin: u32) !u8 {
-        if (@import("builtin").target.os.tag != .linux) return 0;
+        if (!is_linux) return 0;
 
         if (pin != BUSY_PIN) return error.InvalidPin;
 
@@ -144,10 +150,18 @@ pub const EpdConfig = struct {
         }
     }
 
-    /// Delay for specified milliseconds
+    /// Delay for specified milliseconds, resuming across signal interruptions.
     pub fn delayMs(millis: u64) void {
-        var ts = std.os.linux.timespec{ .sec = @intCast(millis / 1000), .nsec = @intCast((millis % 1000) * std.time.ns_per_ms) };
-        _ = std.os.linux.nanosleep(&ts, &ts);
+        if (!is_linux) return;
+
+        var ts = std.os.linux.timespec{
+            .sec = @intCast(millis / 1000),
+            .nsec = @intCast((millis % 1000) * std.time.ns_per_ms),
+        };
+        while (true) {
+            const rc = std.os.linux.nanosleep(&ts, &ts);
+            if (std.posix.errno(rc) != .INTR) return;
+        }
     }
 
     /// Write bytes via SPI
@@ -159,11 +173,20 @@ pub const EpdConfig = struct {
         var offset: usize = 0;
 
         while (offset < data.len) {
-            const remaining = data.len - offset;
-            const to_write = @min(remaining, chunk_size);
-            const chunk = data[offset .. offset + to_write];
-            _ = std.os.linux.write(self.spi_fd, chunk.ptr, chunk.len);
-            offset += to_write;
+            const to_write = @min(data.len - offset, chunk_size);
+            const rc = std.os.linux.write(self.spi_fd, data.ptr + offset, to_write);
+            const err = std.posix.errno(rc);
+            switch (err) {
+                .SUCCESS => {
+                    if (rc == 0) return error.SpiWriteFailed;
+                    offset += rc;
+                },
+                .INTR => continue, // retry without advancing
+                else => {
+                    log.err("SPI write failed: errno={t}", .{err});
+                    return error.SpiWriteFailed;
+                },
+            }
         }
     }
 };

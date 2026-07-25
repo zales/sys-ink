@@ -1,4 +1,6 @@
 const std = @import("std");
+const config = @import("config.zig");
+const parse = @import("parse.zig");
 
 // C interop for network functions
 const c = @cImport({
@@ -8,43 +10,61 @@ const c = @cImport({
     @cInclude("arpa/inet.h");
 });
 
-// Linux O_NONBLOCK flag (0x800) applies across supported arches
-const O_NONBLOCK: u32 = 0x800;
+const log = std.log.scoped(.network);
+
+/// Longest IPv4 dotted quad ("255.255.255.255").
+pub const max_ip_len = 15;
+
+/// How long an internet-reachability probe stays valid. The probe blocks for up
+/// to a second, and several callers ask for it each cycle.
+const internet_cache_seconds = 60;
 
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
-    allocator: std.mem.Allocator,
     io: std.Io,
+    cached_internet: ?bool = null,
+    cached_internet_at: i64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) NetworkOps {
-        return .{ .allocator = allocator, .io = io };
+    pub fn init(io: std.Io) NetworkOps {
+        return .{ .io = io };
     }
 
-    pub fn deinit(_: *NetworkOps) void {
-        // No resources to free - allocator is borrowed, not owned
+    /// Whether the machine can reach the configured probe host.
+    ///
+    /// Results are cached for `internet_cache_seconds` so the display, the APT
+    /// check and MQTT publishing share a single probe.
+    pub fn checkInternetConnection(self: *NetworkOps) bool {
+        const now = std.Io.Timestamp.now(self.io, .awake).toSeconds();
+
+        if (self.cached_internet) |cached| {
+            if (now - self.cached_internet_at < internet_cache_seconds) return cached;
+        }
+
+        const reachable = probeInternet();
+        self.cached_internet = reachable;
+        self.cached_internet_at = now;
+        return reachable;
     }
 
-    /// Check internet connection with a 1s bounded TCP connect (non-blocking)
-    pub fn checkInternetConnection(_: *NetworkOps) bool {
+    /// One-second bounded TCP connect against the configured probe host.
+    fn probeInternet() bool {
         const linux = std.os.linux;
+
         const sock_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 6); // 6 = TCP
         if (@as(isize, @bitCast(sock_rc)) < 0) return false;
         const fd: std.posix.fd_t = @intCast(sock_rc);
         defer _ = linux.close(fd);
 
-        // sockaddr_in for 8.8.8.8:53
-        // 0x08080808 is 8.8.8.8 in hex
-        const ip_num: u32 = 0x08080808;
         var addr = linux.sockaddr.in{
             .family = linux.AF.INET,
-            .port = std.mem.nativeToBig(u16, 53),
-            .addr = std.mem.nativeToBig(u32, ip_num),
+            .port = std.mem.nativeToBig(u16, config.Config.internet_check_port),
+            .addr = std.mem.nativeToBig(u32, config.Config.internet_check_ip),
         };
 
         _ = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
 
-        // Non-blocking connect always goes through poll (even if it succeeds immediately on some systems)
-
+        // A non-blocking connect reports completion through poll, even when it
+        // succeeds immediately.
         var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
         const ready = std.posix.poll(&fds, 1_000) catch return false; // 1s timeout
         if (ready <= 0) return false;
@@ -57,100 +77,52 @@ pub const NetworkOps = struct {
         return so_error == 0;
     }
 
-    /// Get WiFi signal strength from /proc/net/wireless
-    pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) !?i32 {
+    /// Get WiFi signal strength in dBm from /proc/net/wireless
+    pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) ?i32 {
         const file = std.Io.Dir.openFileAbsolute(self.io, "/proc/net/wireless", .{}) catch return null;
         defer file.close(self.io);
 
         var buf: [2048]u8 = undefined;
-        const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
-        const content = buf[0..bytes_read];
+        const bytes_read = file.readPositionalAll(self.io, &buf, 0) catch return null;
 
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            if (std.mem.find(u8, line, interface) != null) {
-                // Format: "wlan0: 0000   70.  -40.  -256        0      0      0"
-                var parts = std.mem.tokenizeAny(u8, line, " ");
-                _ = parts.next(); // skip interface name
-                _ = parts.next(); // skip status
-                _ = parts.next(); // skip link quality
-
-                if (parts.next()) |signal_str| {
-                    // Remove trailing dot if present
-                    const clean_str = std.mem.trimEnd(u8, signal_str, ".");
-                    return try std.fmt.parseInt(i32, clean_str, 10);
-                }
-            }
-        }
-
-        return null; // Interface not found
+        return parse.wirelessSignal(buf[0..bytes_read], interface);
     }
 
-    /// Get IP address for the specified interface
-    pub fn getIpAddress(self: *NetworkOps, interface: []const u8) !?[]u8 {
+    /// IPv4 address of the first usable interface, preferring eth0 then wlan0.
+    pub fn getAnyIpAddress(_: *NetworkOps, buf: []u8) !?[]const u8 {
+        if (try findIp(buf, "eth0")) |ip| return ip;
+        if (try findIp(buf, "wlan0")) |ip| return ip;
+        // Anything except loopback.
+        return findIp(buf, null);
+    }
+
+    /// Walk getifaddrs looking for an IPv4 address. A null `interface` accepts
+    /// any non-loopback interface.
+    fn findIp(buf: []u8, interface: ?[]const u8) !?[]const u8 {
         var ifap: ?*c.ifaddrs = null;
-        if (c.getifaddrs(&ifap) != 0) {
-            return error.GetifaddrsFailed;
-        }
+        if (c.getifaddrs(&ifap) != 0) return error.GetifaddrsFailed;
         defer c.freeifaddrs(ifap);
 
         var current = ifap;
         while (current) |ifa| : (current = ifa.ifa_next) {
             const name = std.mem.span(ifa.ifa_name);
 
-            if (std.mem.eql(u8, name, interface)) {
-                if (ifa.ifa_addr) |addr| {
-                    if (addr.*.sa_family == c.AF_INET) {
-                        const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr));
-                        const ip_str = c.inet_ntoa(sin.*.sin_addr);
-                        const ip_len = std.mem.len(ip_str);
-
-                        const result = try self.allocator.alloc(u8, ip_len);
-                        @memcpy(result, ip_str[0..ip_len]);
-                        return result;
-                    }
-                }
+            if (interface) |want| {
+                if (!std.mem.eql(u8, name, want)) continue;
+            } else if (std.mem.eql(u8, name, "lo")) {
+                continue;
             }
-        }
 
-        return null; // Interface not found or no IPv4 address
-    }
+            const addr = ifa.ifa_addr orelse continue;
+            if (addr.*.sa_family != c.AF_INET) continue;
 
-    /// Get IP address from any available interface (prioritize eth0, then wlan0)
-    pub fn getAnyIpAddress(self: *NetworkOps) !?[]u8 {
-        // Try eth0 first
-        if (try self.getIpAddress("eth0")) |ip| {
-            return ip;
-        }
-        // Then try wlan0
-        if (try self.getIpAddress("wlan0")) |ip| {
-            return ip;
-        }
-        // Finally try any interface except lo
-        var ifap: ?*c.ifaddrs = null;
-        if (c.getifaddrs(&ifap) != 0) {
-            return error.GetifaddrsFailed;
-        }
-        defer c.freeifaddrs(ifap);
+            const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr));
+            const ip_str = c.inet_ntoa(sin.*.sin_addr);
+            const ip = std.mem.span(ip_str);
 
-        var current = ifap;
-        while (current) |ifa| : (current = ifa.ifa_next) {
-            const name = std.mem.span(ifa.ifa_name);
-
-            // Skip loopback
-            if (std.mem.eql(u8, name, "lo")) continue;
-
-            if (ifa.ifa_addr) |addr| {
-                if (addr.*.sa_family == c.AF_INET) {
-                    const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr));
-                    const ip_str = c.inet_ntoa(sin.*.sin_addr);
-                    const ip_len = std.mem.len(ip_str);
-
-                    const result = try self.allocator.alloc(u8, ip_len);
-                    @memcpy(result, ip_str[0..ip_len]);
-                    return result;
-                }
-            }
+            if (ip.len > buf.len) return error.NoSpaceLeft;
+            @memcpy(buf[0..ip.len], ip);
+            return buf[0..ip.len];
         }
 
         return null;
@@ -166,15 +138,11 @@ pub const TrafficMonitor = struct {
     last_rx_speed: f64 = 0,
     last_tx_speed: f64 = 0,
 
-    pub fn init(_: std.mem.Allocator, io: std.Io) TrafficMonitor {
+    pub fn init(io: std.Io) TrafficMonitor {
         return .{ .io = io };
     }
 
-    pub fn deinit(_: *TrafficMonitor) void {
-        // No resources to free
-    }
-
-    const TrafficResult = struct {
+    pub const TrafficResult = struct {
         download_speed: f64,
         download_unit: []const u8,
         upload_speed: f64,
@@ -195,117 +163,60 @@ pub const TrafficMonitor = struct {
         };
     }
 
-    /// Get current network traffic using cached measurements
+    /// Current traffic rate, measured against the previous sample.
     pub fn getCurrentTraffic(self: *TrafficMonitor) !TrafficResult {
         const file = try std.Io.Dir.openFileAbsolute(self.io, "/proc/net/dev", .{});
         defer file.close(self.io);
 
-        var buf: [4096]u8 = undefined;
+        var buf: [8192]u8 = undefined;
         const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
-        const content = buf[0..bytes_read];
+        const totals = parse.netDevTotals(buf[0..bytes_read]);
 
-        // Sum all interfaces (skip loopback)
-        var total_rx: u64 = 0;
-        var total_tx: u64 = 0;
+        // Monotonic: a wall-clock step would otherwise fabricate a huge or
+        // negative interval and with it a nonsense rate.
+        const now = std.Io.Timestamp.now(self.io, .awake).toSeconds();
 
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            // Skip header lines
-            if (std.mem.find(u8, line, ":") == null) continue;
-
-            // Skip loopback
-            if (std.mem.find(u8, line, "lo:") != null) continue;
-
-            // Parse line: "interface: rx_bytes rx_packets ... tx_bytes tx_packets ..."
-            var parts = std.mem.tokenizeAny(u8, line, " :");
-            _ = parts.next(); // skip interface name
-
-            if (parts.next()) |rx_str| {
-                const rx = std.fmt.parseInt(u64, rx_str, 10) catch 0;
-                total_rx += rx;
-            }
-
-            // Skip 7 more rx fields (packets, errs, drop, fifo, frame, compressed, multicast)
-            var i: u8 = 0;
-            while (i < 7) : (i += 1) {
-                _ = parts.next();
-            }
-
-            if (parts.next()) |tx_str| {
-                const tx = std.fmt.parseInt(u64, tx_str, 10) catch 0;
-                total_tx += tx;
-            }
+        defer {
+            self.last_rx_bytes = totals.rx_bytes;
+            self.last_tx_bytes = totals.tx_bytes;
         }
 
-        const now: i64 = std.Io.Timestamp.now(self.io, .real).toSeconds();
+        const last_rx = self.last_rx_bytes;
+        const last_tx = self.last_tx_bytes;
+        const last_time = self.last_time;
 
-        // First measurement - initialize cache
-        if (self.last_rx_bytes == null or self.last_tx_bytes == null or self.last_time == null) {
-            self.last_rx_bytes = total_rx;
-            self.last_tx_bytes = total_tx;
+        if (last_rx == null or last_tx == null or last_time == null) {
             self.last_time = now;
-            return TrafficResult{
-                .download_speed = 0.0,
-                .download_unit = "B",
-                .upload_speed = 0.0,
-                .upload_unit = "B",
-            };
+            return self.currentResult();
         }
 
-        const interval = now - self.last_time.?;
-        if (interval < 1) {
-            // Too soon, return zero
-            return TrafficResult{
-                .download_speed = 0.0,
-                .download_unit = "B",
-                .upload_speed = 0.0,
-                .upload_unit = "B",
-            };
-        }
+        const interval = now - last_time.?;
+        // Sampled twice within the same second: keep the previous rate rather
+        // than reporting a spurious zero.
+        if (interval < 1) return self.currentResult();
 
-        // Use saturating subtraction to handle counter resets (reboot, overflow)
-        const rx_diff = total_rx -| self.last_rx_bytes.?;
-        const tx_diff = total_tx -| self.last_tx_bytes.?;
-
-        self.last_rx_bytes = total_rx;
-        self.last_tx_bytes = total_tx;
         self.last_time = now;
 
+        // Saturating: counters reset on reboot and on interface teardown.
+        const rx_diff = totals.rx_bytes -| last_rx.?;
+        const tx_diff = totals.tx_bytes -| last_tx.?;
+
         const interval_f: f64 = @floatFromInt(interval);
-        const rx_speed = @as(f64, @floatFromInt(rx_diff)) / interval_f;
-        const tx_speed = @as(f64, @floatFromInt(tx_diff)) / interval_f;
+        self.last_rx_speed = @as(f64, @floatFromInt(rx_diff)) / interval_f;
+        self.last_tx_speed = @as(f64, @floatFromInt(tx_diff)) / interval_f;
 
-        // Cache raw speeds for MQTT
-        self.last_rx_speed = rx_speed;
-        self.last_tx_speed = tx_speed;
-
-        const download = chooseUnit(rx_speed);
-        const upload = chooseUnit(tx_speed);
-
-        return TrafficResult{
-            .download_speed = download.speed,
-            .download_unit = download.unit,
-            .upload_speed = upload.speed,
-            .upload_unit = upload.unit,
-        };
+        return self.currentResult();
     }
 
-    const UnitResult = struct {
-        speed: f64,
-        unit: []const u8,
-    };
+    fn currentResult(self: *TrafficMonitor) TrafficResult {
+        const download = parse.scaleBytes(self.last_rx_speed);
+        const upload = parse.scaleBytes(self.last_tx_speed);
 
-    fn chooseUnit(speed: f64) UnitResult {
-        var s = speed;
-        const units = [_][]const u8{ "B", "kB", "MB", "GB" };
-
-        for (units, 0..) |unit, i| {
-            if (s < 1024.0 or i == units.len - 1) {
-                return UnitResult{ .speed = s, .unit = unit };
-            }
-            s /= 1024.0;
-        }
-
-        return UnitResult{ .speed = s, .unit = "GB" };
+        return .{
+            .download_speed = download.value,
+            .download_unit = download.unit,
+            .upload_speed = upload.value,
+            .upload_unit = upload.unit,
+        };
     }
 };

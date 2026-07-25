@@ -46,9 +46,6 @@ const WS_20_30 = [_]u8{
 
 pub const EPD = struct {
     config: *EpdConfig,
-    allocator: std.mem.Allocator,
-    width: u16 = EPD_WIDTH,
-    height: u16 = EPD_HEIGHT,
 
     // Command sets as strict Enum
     const Command = enum(u8) {
@@ -76,11 +73,8 @@ pub const EPD = struct {
         NOP = 0x7F,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: *EpdConfig) EPD {
-        return .{
-            .config = config,
-            .allocator = allocator,
-        };
+    pub fn init(config: *EpdConfig) EPD {
+        return .{ .config = config };
     }
 
     /// Hardware reset - V2 uses 10ms delays
@@ -333,55 +327,11 @@ pub const EPD = struct {
         try self.turnOnDisplayPartial();
     }
 
-    /// Partial update of specific window area
-    /// Based on C reference but with windowing support
-    pub fn displayPartialWindow(self: *EPD, image: []const u8, x: u16, y: u16, width: u16, height: u16) !void {
-        // Reset (from C reference)
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 0);
-        EpdConfig.delayMs(1);
-        try self.config.digitalWrite(EpdConfig.RST_PIN, 1);
-        EpdConfig.delayMs(2);
-
-        // Load partial LUT
-        try self.loadLut(&WF_PARTIAL_2IN9);
-
-        // WriteOtpSelection
-        try self.sendCommandArgs(.WRITE_OTP_SELECTION, &[_]u8{
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-        });
-
-        // Border waveform control
-        try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
-
-        // Display update control
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{0xC0});
-        try self.sendCommand(.MASTER_ACTIVATION);
-        try self.readBusy();
-
-        // Set window for partial update
-        try self.setWindows(x, y, x + width - 1, y + height - 1);
-        try self.setCursor(x, y);
-
-        // Calculate buffer position and size
-        const bytes_per_line = EPD_WIDTH / 8; // 16 bytes per line
-        const x_byte = x / 8;
-        const window_bytes_per_line = (width + 7) / 8;
-
-        // Write to RAM (only window area, only 0x24)
-        try self.sendCommand(.WRITE_RAM);
-        for (0..height) |row| {
-            const src_offset = (y + row) * bytes_per_line + x_byte;
-            try self.sendDataSlice(image[src_offset .. src_offset + window_bytes_per_line]);
-        }
-
-        try self.turnOnDisplayPartial();
-
-        // Reset window to full frame
-        try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
-        try self.setCursor(0, 0);
-    }
-
-    /// Enter sleep mode - from C reference EPD_2IN9_V2_Sleep
+    /// Enter deep sleep - from C reference EPD_2IN9_V2_Sleep.
+    ///
+    /// Waveshare requires this before cutting power; leaving the panel driven at
+    /// high voltage shortens its life. Waking up afterwards needs a full
+    /// `initDisplay`, so this is a shutdown-only call.
     pub fn sleep(self: *EPD) !void {
         try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{0x01});
         EpdConfig.delayMs(100);
