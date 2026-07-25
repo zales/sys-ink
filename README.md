@@ -202,7 +202,20 @@ them before running.
 |----------|---------|-------------|
 | `INTERVAL_FAST` | `30` | Seconds between CPU/memory/disk/fan/traffic/uptime updates and display refreshes |
 | `INTERVAL_SLOW` | `10800` | Seconds between IP, APT and internet-reachability checks (3 hours) |
-| `INTERVAL_FULL_REFRESH` | `600` | Seconds between full panel refreshes, which clear the ghosting left by partial updates |
+| `INTERVAL_FULL_REFRESH` | `600` | Seconds between full panel refreshes, which clear the ghosting left by partial updates. A full refresh flashes the panel by design; raise this if that bothers you, at the cost of more accumulated ghosting |
+
+### Panel power
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PANEL_SLEEP` | `true` | Park the panel in deep sleep between refreshes instead of leaving it driven continuously, which Waveshare advises against. Cycles where nothing changed then cost nothing at all. Adds roughly 200 ms to each visible update, and does not add any flashing — waking is done without driving the panel. Set to `false` to keep the controller powered. |
+
+Waking from deep sleep loses the reference frame that partial updates are
+rendered against, so it is restored from the frame the daemon knows is on the
+glass. That restore only takes effect if it happens before the partial update
+sequence powers the analog stage up; see `primeBase` in
+`src/waveshare_epd/epd2in9.zig`. Getting this wrong smears the previous
+content rather than failing outright, which is why it is spelled out here.
 
 ### Thresholds
 

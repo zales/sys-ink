@@ -28,6 +28,12 @@ pub const DisplayRenderer = struct {
     /// Scratch buffer for BMP export, kept around so exporting does not allocate.
     bmp_buffer: []u8,
     has_last_epd_buffer: bool = false,
+    /// True while the panel controller sits in deep sleep.
+    panel_asleep: bool = false,
+    /// Set when an update failed partway through, leaving the panel content
+    /// unknown. The next update must be a full refresh, because a partial one
+    /// would diff against a reference that no longer matches the glass.
+    panel_state_unknown: bool = false,
     allocator: std.mem.Allocator,
     io: std.Io,
     bmp_exporter: BmpExporter,
@@ -179,10 +185,20 @@ pub const DisplayRenderer = struct {
         }
     }
 
-    /// Update display
-    pub fn updateDisplay(self: *DisplayRenderer, partial: bool) !void {
-        log.debug("updateDisplay: START (partial={})", .{partial});
+    /// Push the first frame and establish the reference for later partial updates.
+    pub fn showInitialFrame(self: *DisplayRenderer) !void {
+        self.convertTo1Bit(self.epd_buffer);
+        try self.epd.displayBase(self.epd_buffer);
+        self.rememberCurrentFrame();
+        self.parkPanel();
 
+        self.exportBmp() catch |err| {
+            log.err("Failed to export initial BMP: {t}", .{err});
+        };
+    }
+
+    /// Update display
+    pub fn updateDisplay(self: *DisplayRenderer, partial_requested: bool) !void {
         if (display_config.DEBUG_TEXT_AREAS) {
             self.drawTextAreaFrames();
         }
@@ -190,9 +206,14 @@ pub const DisplayRenderer = struct {
         // Convert Bitmap to 1-bit
         self.convertTo1Bit(self.epd_buffer);
 
+        log.debug("updateDisplay: START (partial requested={})", .{partial_requested});
+
         // Skip unchanged frames only on partial updates. A full refresh must always go
-        // through to clear ghosting/artifacts accumulated by partial updates.
-        if (partial and self.has_last_epd_buffer and std.mem.eql(u8, self.epd_buffer, self.last_epd_buffer)) {
+        // through to clear ghosting/artifacts accumulated by partial updates, and so
+        // must any update while the glass contents are in doubt.
+        // A skipped frame also leaves a sleeping panel undisturbed.
+        const unchanged = self.has_last_epd_buffer and std.mem.eql(u8, self.epd_buffer, self.last_epd_buffer);
+        if (partial_requested and unchanged and !self.panel_state_unknown) {
             log.debug("updateDisplay: skipped unchanged partial frame", .{});
             self.exportBmp() catch |err| {
                 log.err("Failed to export BMP: {t}", .{err});
@@ -200,18 +221,71 @@ pub const DisplayRenderer = struct {
             return;
         }
 
-        if (partial) {
-            try self.epd.displayPartial(self.epd_buffer);
-        } else {
-            try self.epd.display(self.epd_buffer);
-        }
-        self.rememberCurrentFrame();
+        try self.wakePanel();
 
-        log.debug("updateDisplay: EPD done", .{});
+        // Decided only after waking: restoring the reference frame can itself
+        // fail, and that rules a partial update out.
+        const partial = partial_requested and !self.panel_state_unknown;
+
+        {
+            // Any failure below leaves the glass in an unknown state.
+            errdefer self.panel_state_unknown = true;
+
+            if (partial) {
+                try self.epd.displayPartial(self.epd_buffer);
+            } else {
+                // displayBase, not display: it refreshes fully *and* rewrites the
+                // reference RAM, keeping later partial updates diffing against
+                // what is actually on the glass.
+                try self.epd.displayBase(self.epd_buffer);
+            }
+        }
+
+        self.rememberCurrentFrame();
+        self.panel_state_unknown = false;
+        self.parkPanel();
+
+        log.debug("updateDisplay: EPD done (partial={})", .{partial});
 
         self.exportBmp() catch |err| {
             log.err("Failed to export BMP: {t}", .{err});
         };
+    }
+
+    /// Bring the controller out of deep sleep, if it is in it.
+    ///
+    /// Deep sleep drops the reference frame that partial updates diff against,
+    /// so it has to be restored from the frame we know is on the glass — before
+    /// the partial sequence powers the analog stage up, or the write is ignored.
+    fn wakePanel(self: *DisplayRenderer) !void {
+        if (!self.panel_asleep) return;
+
+        log.debug("panel: waking from deep sleep", .{});
+        try self.epd.reInit();
+        if (self.has_last_epd_buffer) {
+            self.epd.primeBase(self.last_epd_buffer) catch |err| {
+                // Without a reference a partial update would smear, so fall back
+                // to a full refresh instead.
+                log.warn("Failed to restore panel reference frame: {t}", .{err});
+                self.panel_state_unknown = true;
+            };
+        } else {
+            self.panel_state_unknown = true;
+        }
+
+        self.panel_asleep = false;
+    }
+
+    /// Park the controller in deep sleep until the next visible update.
+    fn parkPanel(self: *DisplayRenderer) void {
+        if (!config.Config.panel_sleep or self.panel_asleep) return;
+
+        self.epd.sleep() catch |err| {
+            log.warn("Failed to park panel in deep sleep: {t}", .{err});
+            return;
+        };
+        self.panel_asleep = true;
+        log.debug("panel: parked in deep sleep", .{});
     }
 
     pub fn rememberCurrentFrame(self: *DisplayRenderer) void {
@@ -494,10 +568,12 @@ pub const DisplayRenderer = struct {
     pub fn goToSleep(self: *DisplayRenderer) !void {
         log.info("Rendering sleep screen", .{});
 
-        // Re-initialize display to ensure Full LUT is loaded (needed after partial updates)
+        // Re-initialize display to ensure Full LUT is loaded (needed after partial
+        // updates) and to wake the controller if it was parked between refreshes.
         self.epd.reInit() catch |err| {
             log.err("Failed to re-init display for sleep: {t}", .{err});
         };
+        self.panel_asleep = false;
 
         self.drawSplash("Sleeping...", .Black);
         self.convertTo1Bit(self.epd_buffer);
@@ -506,10 +582,12 @@ pub const DisplayRenderer = struct {
         try self.epd.displayBase(self.epd_buffer);
         self.rememberCurrentFrame();
 
-        // Waveshare requires deep sleep before power is cut.
+        // Unconditional, unlike parkPanel: Waveshare requires deep sleep before
+        // power is cut, whatever PANEL_SLEEP is set to.
         self.epd.sleep() catch |err| {
             log.err("Failed to put panel into deep sleep: {t}", .{err});
         };
+        self.panel_asleep = true;
 
         log.info("Display parked in deep sleep", .{});
 

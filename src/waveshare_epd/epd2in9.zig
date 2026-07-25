@@ -292,8 +292,12 @@ pub const EPD = struct {
         try self.turnOnDisplay();
     }
 
-    /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
-    pub fn displayPartial(self: *EPD, image: []const u8) !void {
+    /// Soft-reset and arm the panel for a partial update: partial LUT, border
+    /// waveform and analog power-up. Drives nothing, so it cannot flicker.
+    ///
+    /// The RST pulse resets the registers but leaves both RAM banks intact —
+    /// which is why partial updates work at all, given this runs before each one.
+    fn beginPartial(self: *EPD) !void {
         // Reset (from C reference - only 1ms delays)
         try self.config.digitalWrite(EpdConfig.RST_PIN, 0);
         EpdConfig.delayMs(1);
@@ -311,10 +315,34 @@ pub const EPD = struct {
         // Border waveform control
         try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
 
-        // Display update control
+        // Display update control: clock and analog on, no display activation.
         try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{0xC0});
         try self.sendCommand(.MASTER_ACTIVATION);
         try self.readBusy();
+    }
+
+    /// Overwrite the base RAM (0x26) with `image` without driving the panel.
+    ///
+    /// Partial updates render the difference between the new frame in 0x24 and
+    /// this reference. Deep sleep loses it, so it has to be restored from the
+    /// frame the caller knows is on the panel — otherwise the next partial
+    /// update tries to repaint everything with a waveform too weak for it, and
+    /// smears the old content instead.
+    ///
+    /// Must be called straight after `reInit`, before any partial update begins:
+    /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
+    /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
+    /// Verified on a 2.9" V2 panel — priming afterwards smears.
+    pub fn primeBase(self: *EPD, image: []const u8) !void {
+        try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+        try self.setCursor(0, 0);
+        try self.sendCommand(.WRITE_RAM_BASE);
+        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+    }
+
+    /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
+    pub fn displayPartial(self: *EPD, image: []const u8) !void {
+        try self.beginPartial();
 
         // Reset window to full frame
         try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);

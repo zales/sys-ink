@@ -349,15 +349,9 @@ pub fn main(init: std.process.Init) !u8 {
     // Populate every field before the first frame reaches the panel.
     scheduler.runAll();
 
-    // displayBase seeds the RAM that later partial updates diff against.
-    renderer.convertTo1Bit(renderer.epd_buffer);
-    try renderer.epd.displayBase(renderer.epd_buffer);
-    renderer.rememberCurrentFrame();
+    // Seeds the RAM that later partial updates diff against.
+    try renderer.showInitialFrame();
     app.last_full_refresh = app.nowSeconds();
-
-    renderer.exportBmp() catch |err| {
-        log.err("Failed to export initial BMP: {t}", .{err});
-    };
 
     // Registered last so it does not run before the base frame exists. Its first
     // tick is a no-op anyway: the frame is unchanged, so the update is skipped.

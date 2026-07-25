@@ -90,6 +90,12 @@ pub const Config = struct {
     /// refreshes clear the ghosting that partial updates accumulate.
     pub var interval_full_refresh: u32 = 600; // 10 minutes
 
+    /// Park the panel in deep sleep between refreshes. Waveshare advises against
+    /// leaving an e-paper panel driven continuously, and idle cycles (an
+    /// unchanged frame) then cost nothing at all. Costs ~200ms per visible
+    /// update to wake and restore the partial-update reference.
+    pub var panel_sleep: bool = true;
+
     /// Host probed to decide whether the machine has internet access.
     /// Stored in host byte order.
     pub var internet_check_ip: u32 = 0x08080808; // 8.8.8.8
@@ -121,6 +127,9 @@ pub const Config = struct {
         }
         if (env.get("INTERVAL_FULL_REFRESH")) |val| {
             interval_full_refresh = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_full_refresh);
+        }
+        if (env.get("PANEL_SLEEP")) |val| {
+            panel_sleep = parseBool(val);
         }
 
         if (env.get("INTERNET_CHECK_IP")) |val| {
