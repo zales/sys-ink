@@ -329,6 +329,12 @@ After enabling MQTT, sensors will automatically appear in Home Assistant under t
 ### "Memory leak detected on exit!"
 - This is a warning from the Zig allocator in debug/release-safe modes. It usually indicates a clean shutdown didn't happen (e.g., `kill -9`). Use `Ctrl+C`, `SIGTERM` or `systemctl stop` for a graceful shutdown, which also parks the panel in deep sleep.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
+top — most recently the switch to decimal network units in 1.5.0 and the MQTT
+`internet` entity becoming a `binary_sensor` in 1.4.0.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
