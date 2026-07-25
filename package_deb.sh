@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="sys-ink"
-VERSION="${VERSION:-1.4.1}"
+VERSION="${VERSION:-1.4.2}"
 TARGET_ARCH="${TARGET_ARCH:-amd64}" # debian architecture name: amd64, arm64, armhf
 BINARY_PATH="${BINARY_PATH:-zig-out/bin/sys-ink}"
 # Override to publish under your own address.
