@@ -3,10 +3,61 @@ const EpdConfig = @import("epdconfig.zig").EpdConfig;
 
 const log = std.log.scoped(.epd);
 
-// Display resolution - Portrait (hardware orientation)
-pub const EPD_WIDTH = 128;
-pub const EPD_HEIGHT = 296;
-pub const EPD_BUFFER_SIZE = (EPD_WIDTH / 8) * EPD_HEIGHT; // 4736 bytes
+/// Everything about the driver that is specific to a particular panel.
+///
+/// This makes the panel a parameter instead of a set of module-level constants,
+/// so a second one is a spec rather than a fork of this file. Only the panel
+/// below is provided, because it is the only one that can be verified here — a
+/// spec written from a datasheet and never run would look like support while
+/// being a guess.
+///
+/// Note what this does *not* buy: the renderer above is equally specific, since
+/// `display_config.zig` is 296x128 pixel coordinates throughout. A different
+/// panel size needs that layout redone as well.
+pub const PanelSpec = struct {
+    /// Short side, in pixels. Must be a multiple of 8: one byte of RAM covers
+    /// eight pixels along it.
+    width: u16,
+    /// Long side, in pixels.
+    height: u16,
+    /// Full-refresh waveform, 159 bytes: 153 of LUT plus six voltage settings.
+    lut_full: *const [lut_len]u8,
+    /// Partial-refresh waveform, same layout.
+    lut_partial: *const [lut_len]u8,
+    /// Gate scan configuration for DRIVER_OUTPUT_CONTROL. The first two bytes
+    /// are the gate line count minus one, little endian; the third selects the
+    /// scan order.
+    gate_scan_order: u8 = 0x00,
+
+    pub fn bufferSize(self: PanelSpec) usize {
+        return (self.width / 8) * @as(usize, self.height);
+    }
+
+    /// DRIVER_OUTPUT_CONTROL argument, derived rather than written out: the
+    /// leading 0x27 0x01 in the vendor reference is just 295, the panel's gate
+    /// line count minus one.
+    pub fn driverOutputControl(self: PanelSpec) [3]u8 {
+        const lines = self.height - 1;
+        return .{ @truncate(lines), @truncate(lines >> 8), self.gate_scan_order };
+    }
+};
+
+/// Length of a waveform table: 153 LUT bytes plus six voltage settings.
+const lut_len = 159;
+
+/// Waveshare 2.9inch e-Paper Module (B/W) V2, the panel this project targets and
+/// the only one verified on hardware.
+pub const waveshare_2in9_v2: PanelSpec = .{
+    .width = 128,
+    .height = 296,
+    .lut_full = &WS_20_30,
+    .lut_partial = &WF_PARTIAL_2IN9,
+};
+
+// Kept for the production instance's users.
+pub const EPD_WIDTH = waveshare_2in9_v2.width;
+pub const EPD_HEIGHT = waveshare_2in9_v2.height;
+pub const EPD_BUFFER_SIZE = waveshare_2in9_v2.bufferSize(); // 4736 bytes
 
 /// One full panel frame, 1 bit per pixel. Taking this by pointer rather than as
 /// a slice makes the length a compile-time guarantee: a short buffer used to be
@@ -56,10 +107,20 @@ const WS_20_30 = [_]u8{
 /// The contract is checked at comptime, so a transport missing a declaration
 /// fails with a direct message instead of an error deep inside a call.
 pub fn Epd(comptime Transport: type) type {
+    return EpdPanel(Transport, waveshare_2in9_v2);
+}
+
+/// As `Epd`, but for an explicit panel.
+pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
     comptime verifyTransport(Transport);
+    comptime std.debug.assert(panel.width % 8 == 0);
 
     return struct {
     const Self = @This();
+
+    /// One frame for this panel. Sized from the spec, so a buffer of the wrong
+    /// length cannot be passed in.
+    pub const PanelFrame = [panel.bufferSize()]u8;
 
     config: *Transport,
 
@@ -272,17 +333,17 @@ pub fn Epd(comptime Transport: type) type {
         try self.sendCommand(.SW_RESET);
         try self.readBusy();
 
-        try self.sendCommandArgs(.DRIVER_OUTPUT_CONTROL, &[_]u8{ 0x27, 0x01, 0x00 });
+        try self.sendCommandArgs(.DRIVER_OUTPUT_CONTROL, &panel.driverOutputControl());
         try self.sendCommandArgs(.DATA_ENTRY_MODE, &[_]u8{0x03});
 
-        try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
 
         try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_1, &[_]u8{ 0x00, 0x80 });
 
         try self.setCursor(0, 0);
         try self.readBusy();
 
-        try self.loadLutByHost(&WS_20_30);
+        try self.loadLutByHost(panel.lut_full);
     }
 
     /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
@@ -296,7 +357,7 @@ pub fn Epd(comptime Transport: type) type {
     /// Written in one go per bank: spiWrite already splits at the spidev
     /// transfer limit, so the old 128-byte loop just multiplied the syscalls.
     pub fn clear(self: *Self, color: u8) !void {
-        var frame: Frame = undefined;
+        var frame: PanelFrame = undefined;
         @memset(&frame, color);
 
         try self.sendCommand(.WRITE_RAM);
@@ -309,14 +370,14 @@ pub fn Epd(comptime Transport: type) type {
     }
 
     /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
-    pub fn display(self: *Self, image: *const Frame) !void {
+    pub fn display(self: *Self, image: *const PanelFrame) !void {
         try self.sendCommand(.WRITE_RAM);
         try self.sendDataSlice(image);
         try self.turnOnDisplay();
     }
 
     /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
-    pub fn displayBase(self: *Self, image: *const Frame) !void {
+    pub fn displayBase(self: *Self, image: *const PanelFrame) !void {
         try self.sendCommand(.WRITE_RAM); // Write to black RAM
         try self.sendDataSlice(image);
 
@@ -339,7 +400,7 @@ pub fn Epd(comptime Transport: type) type {
         self.config.delayMs(2);
 
         // Load partial LUT
-        try self.loadLut(&WF_PARTIAL_2IN9);
+        try self.loadLut(panel.lut_partial);
 
         // WriteOtpSelection (0x37 in C, not 0x2F!)
         try self.sendCommandArgs(.WRITE_OTP_SELECTION, &[_]u8{
@@ -367,19 +428,19 @@ pub fn Epd(comptime Transport: type) type {
     /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
     /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
     /// Verified on a 2.9" V2 panel — priming afterwards smears.
-    pub fn primeBase(self: *Self, image: *const Frame) !void {
-        try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+    pub fn primeBase(self: *Self, image: *const PanelFrame) !void {
+        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
         try self.setCursor(0, 0);
         try self.sendCommand(.WRITE_RAM_BASE);
         try self.sendDataSlice(image);
     }
 
     /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
-    pub fn displayPartial(self: *Self, image: *const Frame) !void {
+    pub fn displayPartial(self: *Self, image: *const PanelFrame) !void {
         try self.beginPartial();
 
         // Reset window to full frame
-        try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
+        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
         try self.setCursor(0, 0);
 
         // Write to RAM (only 0x24, NOT 0x26!)
@@ -436,6 +497,32 @@ const TestEpd = Epd(FakeTransport);
 
 fn testEpd(fake: *FakeTransport) TestEpd {
     return TestEpd.init(fake);
+}
+
+test "the 2.9in V2 spec reproduces the vendor's literals exactly" {
+    // These bytes used to be written out by hand. Deriving them is only an
+    // improvement if the derivation agrees with what the panel has always been
+    // sent, so pin that rather than trusting the arithmetic.
+    const panel = waveshare_2in9_v2;
+
+    // Vendor reference: { 0x27, 0x01, 0x00 }. 0x0127 = 295 = height - 1.
+    try testing.expectEqual([3]u8{ 0x27, 0x01, 0x00 }, panel.driverOutputControl());
+    try testing.expectEqual(@as(usize, 4736), panel.bufferSize());
+    try testing.expectEqual(@as(usize, 4736), @sizeOf(Frame));
+    try testing.expectEqual(@as(u16, 128), panel.width);
+    try testing.expectEqual(@as(u16, 296), panel.height);
+}
+
+test "a hypothetical other panel derives its own gate count" {
+    // The point of the spec: nothing above is hardcoded to 296 lines.
+    const other: PanelSpec = .{
+        .width = 122,
+        .height = 250,
+        .lut_full = &WS_20_30,
+        .lut_partial = &WF_PARTIAL_2IN9,
+    };
+    // 249 = 0x00F9
+    try testing.expectEqual([3]u8{ 0xF9, 0x00, 0x00 }, other.driverOutputControl());
 }
 
 test "sendCommandArgs frames the command and its payload separately" {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const parse = @import("parse.zig");
+const bounded_connect = @import("bounded_connect.zig");
 
 // C interop for network functions
 const c = @cImport({
@@ -51,43 +52,14 @@ pub const NetworkOps = struct {
     }
 
     /// Bounded TCP connect against the configured probe host.
-    ///
-    /// Hand-rolled rather than `IpAddress.connect`, because the connect has to be
-    /// bounded and std cannot do that yet: `ConnectOptions.timeout` exists in Zig
-    /// 0.16 but `Io.Threaded.netConnectIpPosix` panics with "TODO implement
-    /// netConnectIpPosix with timeout". Without a bound, an unroutable probe host
-    /// would stall the render loop for the kernel's SYN timeout. Replace this with
-    /// the std call once the timeout is implemented.
     fn probeInternet() bool {
-        const linux = std.os.linux;
-
-        const sock_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 6); // 6 = TCP
-        if (@as(isize, @bitCast(sock_rc)) < 0) return false;
-        const fd: std.posix.fd_t = @intCast(sock_rc);
-        defer _ = linux.close(fd);
-
-        var addr = linux.sockaddr.in{
-            .family = linux.AF.INET,
-            .port = std.mem.nativeToBig(u16, config.Config.internet_check_port),
-            // The octets are already in network order in memory, so a bitcast
-            // needs no byte swapping and cannot get the direction wrong.
-            .addr = @bitCast(config.Config.internet_check_ip),
-        };
-
-        _ = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-
-        // A non-blocking connect reports completion through poll, even when it
-        // succeeds immediately.
-        var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
-        const ready = std.posix.poll(&fds, probe_timeout_ms) catch return false;
-        if (ready <= 0) return false;
-        if ((fds[0].revents & std.posix.POLL.OUT) == 0) return false;
-
-        var so_error: c_int = 0;
-        var so_error_len: linux.socklen_t = @sizeOf(c_int);
-        const gso_rc = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&so_error), &so_error_len);
-        if (@as(isize, @bitCast(gso_rc)) != 0) return false;
-        return so_error == 0;
+        const fd = bounded_connect.connect(
+            config.Config.internet_check_ip,
+            config.Config.internet_check_port,
+            probe_timeout_ms,
+        ) catch return false;
+        bounded_connect.closeFd(fd);
+        return true;
     }
 
     /// Get WiFi signal strength in dBm from /proc/net/wireless

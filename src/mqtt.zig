@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const bounded_connect = @import("bounded_connect.zig");
 const net = std.Io.net;
 
 const c = @cImport({
@@ -62,6 +63,11 @@ pub const MqttClient = struct {
     /// Max backoff between reconnect attempts, in seconds.
     const max_backoff_seconds: i64 = 300;
 
+    /// Cap on the TCP connect. Without one, a broker host that drops SYNs rather
+    /// than refusing them would block the render loop for the kernel's SYN
+    /// timeout, around two minutes.
+    const connect_timeout_ms = 5000;
+
 
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
@@ -119,21 +125,13 @@ pub const MqttClient = struct {
         log.info("Connecting to MQTT broker {s}:{d}", .{ self.host, self.port });
 
         // Resolve hostname via libc getaddrinfo (supports DNS, mDNS, /etc/hosts)
-        const address = resolveHost(self.io, self.host, self.port) catch |err| {
+        const address = resolveHost(self.host) catch |err| {
             self.recordFailure();
             log.err("Failed to resolve MQTT broker {s}: {t} (next retry in {d}s)", .{ self.host, err, self.backoffDelay() });
             return err;
         };
 
-        // KNOWN LIMITATION: this connect is unbounded. A broker host that drops
-        // SYNs rather than refusing them blocks here for the kernel's TCP
-        // timeout, around two minutes, and this runs on the render loop's
-        // thread, so the display freezes for the duration.
-        //
-        // ConnectOptions.timeout exists in Zig 0.16 but is a stub:
-        // Io.Threaded.netConnectIpPosix panics with "TODO implement
-        // netConnectIpPosix with timeout". Revisit when std implements it.
-        self.stream = address.connect(self.io, .{ .mode = .stream }) catch |err| {
+        self.stream = bounded_connect.connectStream(address, self.port, connect_timeout_ms) catch |err| {
             self.recordFailure();
             log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{ self.host, self.port, err, self.backoffDelay() });
             return err;
@@ -404,9 +402,13 @@ fn buildConnect(buf: []u8, client_id: []const u8, username: ?[]const u8, passwor
     return buf[0..pos];
 }
 
-/// Resolve hostname to IpAddress using libc getaddrinfo.
-/// Supports DNS, mDNS (.local via nss-mdns/avahi), and /etc/hosts.
-fn resolveHost(io: std.Io, host: []const u8, port: u16) !net.IpAddress {
+/// Resolve a hostname to its four IPv4 octets using libc getaddrinfo.
+///
+/// libc rather than std's resolver on purpose: this is what makes `.local` names
+/// work through nss-mdns, and MQTT_HOST is commonly an mDNS name on these
+/// networks. It is still an unbounded call — getaddrinfo has its own internal
+/// timeouts but none we control.
+fn resolveHost(host: []const u8) ![4]u8 {
     var host_buf: [256]u8 = undefined;
     const host_z = std.fmt.bufPrintZ(&host_buf, "{s}", .{host}) catch return error.HostTooLong;
 
@@ -420,9 +422,9 @@ fn resolveHost(io: std.Io, host: []const u8, port: u16) !net.IpAddress {
 
     const addr_info = result orelse return error.DnsResolutionFailed;
     const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr_info.ai_addr));
-    const ip_slice = std.mem.span(c.inet_ntoa(sin.sin_addr));
 
-    return net.IpAddress.resolve(io, ip_slice, port);
+    // s_addr is already in network order, which is the octet order we want.
+    return @bitCast(sin.sin_addr.s_addr);
 }
 
 /// MQTT configuration
