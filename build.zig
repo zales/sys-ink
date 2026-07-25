@@ -58,4 +58,21 @@ pub fn build(b: *std.Build) void {
 
     const check_step = b.step("check", "Type-check the Linux-only modules");
     check_step.dependOn(&check_exe.step);
+
+    // Regenerates the reference frame the renderer's layout test compares
+    // against. Deliberately a separate step: the test must never rewrite its own
+    // expectation as a side effect.
+    const golden = b.addExecutable(.{
+        .name = "gen-golden",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/golden_gen.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .link_libc = true,
+        }),
+    });
+
+    const run_golden = b.addRunArtifact(golden);
+    const golden_step = b.step("golden", "Regenerate the golden reference frame");
+    golden_step.dependOn(&run_golden.step);
 }

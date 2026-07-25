@@ -1,6 +1,5 @@
 const std = @import("std");
 const epd2in9 = @import("waveshare_epd/epd2in9.zig");
-const EPD = epd2in9.EPD;
 const Frame = epd2in9.Frame;
 const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
 const display_config = @import("display_config.zig");
@@ -23,11 +22,16 @@ comptime {
     std.debug.assert(@sizeOf(Frame) == hw_bytes_per_row * display_config.DISPLAY_WIDTH);
 }
 
-/// Display renderer that manages Bitmap and EPD
-pub const DisplayRenderer = struct {
+/// Drives the panel from a Bitmap, parameterised by the transport underneath so
+/// tests can render and drive the whole state machine without hardware.
+/// `DisplayRenderer` below is the production instance.
+pub fn Renderer(comptime Transport: type) type {
+    return struct {
+    const Self = @This();
+    const EPD = epd2in9.Epd(Transport);
+
     bitmap: Bitmap,
     epd: EPD,
-    epd_config: *EpdConfig,
     epd_buffer: *Frame,
     last_epd_buffer: *Frame,
     /// Scratch buffer for BMP export, kept around so exporting does not allocate.
@@ -44,15 +48,13 @@ pub const DisplayRenderer = struct {
     bmp_exporter: BmpExporter,
     grid_cached: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !DisplayRenderer {
+    /// `transport` is borrowed, not owned: the caller outlives the renderer and
+    /// is responsible for tearing it down. It used to be heap-allocated here
+    /// purely because this function returns by value and EPD holds a pointer to
+    /// it, which would have dangled.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, transport: *Transport) !Self {
         var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
         errdefer bitmap.deinit();
-
-        // EpdConfig is heap-allocated because EPD holds a pointer to it and this
-        // function returns by value — an inline field would dangle immediately.
-        const epd_cfg = try allocator.create(EpdConfig);
-        errdefer allocator.destroy(epd_cfg);
-        epd_cfg.* = EpdConfig.init(allocator);
 
         // Buffers for EPD (128x296 portrait = 4736 bytes each)
         const epd_buffer = try allocator.create(Frame);
@@ -65,8 +67,7 @@ pub const DisplayRenderer = struct {
 
         return .{
             .bitmap = bitmap,
-            .epd = EPD.init(epd_cfg),
-            .epd_config = epd_cfg,
+            .epd = EPD.init(transport),
             .epd_buffer = epd_buffer,
             .last_epd_buffer = last_epd_buffer,
             .bmp_buffer = bmp_buffer,
@@ -76,23 +77,21 @@ pub const DisplayRenderer = struct {
         };
     }
 
-    pub fn deinit(self: *DisplayRenderer) void {
+    pub fn deinit(self: *Self) void {
         self.bitmap.deinit();
         self.allocator.free(self.bmp_buffer);
         self.allocator.destroy(self.last_epd_buffer);
         self.allocator.destroy(self.epd_buffer);
-        self.epd_config.moduleExit();
-        self.allocator.destroy(self.epd_config);
     }
 
     /// Initialize display
-    pub fn startup(self: *DisplayRenderer) !void {
+    pub fn startup(self: *Self) !void {
         try self.epd.initDisplay();
         try self.epd.clear(0xFF);
     }
 
     /// Show a transient loading screen while metrics initialize
-    pub fn showLoading(self: *DisplayRenderer) !void {
+    pub fn showLoading(self: *Self) !void {
         self.drawSplash("Loading...", .White);
 
         self.convertTo1Bit(self.epd_buffer);
@@ -105,7 +104,7 @@ pub const DisplayRenderer = struct {
 
     /// Draw the full-screen splash used by the loading and sleep screens.
     /// `background` is the page colour; text and rules are drawn inverted to it.
-    fn drawSplash(self: *DisplayRenderer, subtitle: []const u8, background: Graphics.Color) void {
+    fn drawSplash(self: *Self, subtitle: []const u8, background: Graphics.Color) void {
         const ink: Graphics.Color = if (background == .White) .Black else .White;
 
         self.bitmap.clear(background);
@@ -116,7 +115,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render grid layout
-    pub fn renderGrid(self: *DisplayRenderer) void {
+    pub fn renderGrid(self: *Self) void {
         if (self.grid_cached) return;
 
         self.bitmap.clear(.White);
@@ -176,7 +175,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Simple unified text rendering in a defined area with optional inversion
-    fn drawTextInArea(self: *DisplayRenderer, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
+    fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
         // Clear the area
         self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
 
@@ -190,7 +189,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Push the first frame and establish the reference for later partial updates.
-    pub fn showInitialFrame(self: *DisplayRenderer) !void {
+    pub fn showInitialFrame(self: *Self) !void {
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.displayBase(self.epd_buffer);
         self.rememberCurrentFrame();
@@ -202,7 +201,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Update display
-    pub fn updateDisplay(self: *DisplayRenderer, partial_requested: bool) !void {
+    pub fn updateDisplay(self: *Self, partial_requested: bool) !void {
         if (display_config.DEBUG_TEXT_AREAS) {
             self.drawTextAreaFrames();
         }
@@ -261,7 +260,7 @@ pub const DisplayRenderer = struct {
     /// Deep sleep drops the reference frame that partial updates diff against,
     /// so it has to be restored from the frame we know is on the glass — before
     /// the partial sequence powers the analog stage up, or the write is ignored.
-    fn wakePanel(self: *DisplayRenderer) !void {
+    fn wakePanel(self: *Self) !void {
         if (!self.panel_asleep) return;
 
         log.debug("panel: waking from deep sleep", .{});
@@ -281,7 +280,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Park the controller in deep sleep until the next visible update.
-    fn parkPanel(self: *DisplayRenderer) void {
+    fn parkPanel(self: *Self) void {
         if (!config.Config.panel_sleep or self.panel_asleep) return;
 
         self.epd.sleep() catch |err| {
@@ -292,12 +291,12 @@ pub const DisplayRenderer = struct {
         log.debug("panel: parked in deep sleep", .{});
     }
 
-    pub fn rememberCurrentFrame(self: *DisplayRenderer) void {
+    pub fn rememberCurrentFrame(self: *Self) void {
         @memcpy(self.last_epd_buffer, self.epd_buffer);
         self.has_last_epd_buffer = true;
     }
 
-    fn drawTextAreaFrames(self: *DisplayRenderer) void {
+    fn drawTextAreaFrames(self: *Self) void {
         const color: Graphics.Color = .Black;
 
         // CPU
@@ -344,7 +343,7 @@ pub const DisplayRenderer = struct {
     /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
     /// clockwise. One hardware row comes from one logical column, so each output
     /// byte is assembled in a register and stored once.
-    pub fn convertTo1Bit(self: *DisplayRenderer, output: *Frame) void {
+    pub fn convertTo1Bit(self: *Self, output: *Frame) void {
         // One hardware row is packed from one logical column, so the panel's
         // short side has to be exactly the bitmap's height. `output` carries its
         // own length in its type.
@@ -372,7 +371,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Export as BMP
-    pub fn exportBmp(self: *DisplayRenderer) !void {
+    pub fn exportBmp(self: *Self) !void {
         if (!config.Config.export_bmp) return;
 
         const width = self.bitmap.width;
@@ -401,7 +400,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render CPU load and temperature
-    pub fn renderCpuLoad(self: *DisplayRenderer, load: u8, temp: u32) void {
+    pub fn renderCpuLoad(self: *Self, load: u8, temp: u32) void {
         const is_load_critical = load >= config.Config.threshold_cpu_critical;
         const is_temp_critical = temp >= config.Config.threshold_temp_critical;
 
@@ -415,7 +414,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render memory usage
-    pub fn renderMemory(self: *DisplayRenderer, usage: u8) void {
+    pub fn renderMemory(self: *Self, usage: u8) void {
         const is_critical = usage >= config.Config.threshold_mem_critical;
 
         var buf: [16]u8 = undefined;
@@ -424,7 +423,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render disk stats
-    pub fn renderDiskStats(self: *DisplayRenderer, usage: u8, temp: u32) void {
+    pub fn renderDiskStats(self: *Self, usage: u8, temp: u32) void {
         const is_usage_critical = usage >= config.Config.threshold_disk_critical;
         const is_temp_critical = temp >= config.Config.threshold_temp_critical;
 
@@ -438,7 +437,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render fan speed
-    pub fn renderFanSpeed(self: *DisplayRenderer, rpm: u32) void {
+    pub fn renderFanSpeed(self: *Self, rpm: u32) void {
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
         self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
@@ -448,7 +447,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render IP address
-    pub fn renderIpAddress(self: *DisplayRenderer, ip: []const u8) void {
+    pub fn renderIpAddress(self: *Self, ip: []const u8) void {
         self.bitmap.fillRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
 
         const display_ip = if (ip.len > 15) ip[0..15] else ip;
@@ -461,7 +460,7 @@ pub const DisplayRenderer = struct {
     /// mid-glyph, so pick the most detailed form that fits its 84px:
     /// "11d 12h 20m" (83px) up to 99 days, then the compact "123d 23:59" (70px),
     /// which still carries minutes. Only truly absurd uptimes lose them.
-    pub fn renderUptime(self: *DisplayRenderer, days: u32, hours: u32, minutes: u32) void {
+    pub fn renderUptime(self: *Self, days: u32, hours: u32, minutes: u32) void {
         self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
 
         var buf = display_config.UptimeBuffers{};
@@ -476,7 +475,7 @@ pub const DisplayRenderer = struct {
     /// "-40 dBm" fits; the three-digit "-100 dBm" does not, so the unit is
     /// dropped at that end of the range rather than clipping the number. -100
     /// dBm is effectively no signal, where the exact unit matters least.
-    pub fn renderSignalStrength(self: *DisplayRenderer, signal: ?i32) void {
+    pub fn renderSignalStrength(self: *Self, signal: ?i32) void {
         self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
 
         const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
@@ -497,7 +496,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render network traffic
-    pub fn renderTraffic(self: *DisplayRenderer, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
+    pub fn renderTraffic(self: *Self, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
         self.renderTrafficRow(
             download_speed,
             download_unit,
@@ -521,7 +520,7 @@ pub const DisplayRenderer = struct {
     }
 
     fn renderTrafficRow(
-        self: *DisplayRenderer,
+        self: *Self,
         speed: f64,
         unit: []const u8,
         value_x: i32,
@@ -556,7 +555,7 @@ pub const DisplayRenderer = struct {
     /// Render APT updates count. `null` means the background check has not
     /// reported yet — show a dash rather than the "all up to date" tick, which
     /// would claim more than is known.
-    pub fn renderAptUpdates(self: *DisplayRenderer, count: ?u32) void {
+    pub fn renderAptUpdates(self: *Self, count: ?u32) void {
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
         self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
 
@@ -575,7 +574,7 @@ pub const DisplayRenderer = struct {
     }
 
     /// Render internet connection status
-    pub fn renderInternetStatus(self: *DisplayRenderer, connected: bool) void {
+    pub fn renderInternetStatus(self: *Self, connected: bool) void {
         const ascent = self.bitmap.getFontAscent(.Material24);
         self.bitmap.fillRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
 
@@ -583,8 +582,25 @@ pub const DisplayRenderer = struct {
         self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
     }
 
+    /// Draw a fixed screen with hard-coded values, for the golden reference
+    /// frame. Lives here rather than in the test so that `zig build golden` and
+    /// the test that checks against its output cannot drift apart.
+    pub fn drawReferenceScreen(self: *Self) void {
+        self.renderGrid();
+        self.renderCpuLoad(42, 51);
+        self.renderMemory(28);
+        self.renderDiskStats(84, 33);
+        self.renderFanSpeed(543);
+        self.renderTraffic(999.99, "kB", 3.01, "B");
+        self.renderAptUpdates(35);
+        self.renderInternetStatus(true);
+        self.renderIpAddress("192.168.1.231");
+        self.renderUptime(11, 22, 47);
+        self.renderSignalStrength(null);
+    }
+
     /// Draw the sleep screen, then park the panel in deep sleep.
-    pub fn goToSleep(self: *DisplayRenderer) !void {
+    pub fn goToSleep(self: *Self) !void {
         log.info("Rendering sleep screen", .{});
 
         // Re-initialize display to ensure Full LUT is loaded (needed after partial
@@ -614,4 +630,243 @@ pub const DisplayRenderer = struct {
             log.err("Failed to export sleep screen BMP: {t}", .{err});
         };
     }
+    };
+}
+
+/// The renderer as used in production.
+pub const DisplayRenderer = Renderer(EpdConfig);
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
+
+const TestRenderer = Renderer(FakeTransport);
+
+/// Path of the reference frame, relative to this file.
+const golden_path = "testdata/golden_main.bin";
+const golden_frame = @embedFile(golden_path);
+
+/// A renderer wired to a recorder instead of a panel.
+const Harness = struct {
+    transport: FakeTransport,
+    renderer: TestRenderer,
+
+    fn init() !Harness {
+        var h: Harness = .{
+            .transport = FakeTransport.init(testing.allocator),
+            .renderer = undefined,
+        };
+        h.renderer = try TestRenderer.init(testing.allocator, undefined, &h.transport);
+        return h;
+    }
+
+    /// Must be called on the final address; `renderer.epd` holds a pointer to
+    /// `transport`, so the struct cannot be moved after this.
+    fn wire(self: *Harness) void {
+        self.renderer.epd = TestRenderer.EPD.init(&self.transport);
+    }
+
+    fn deinit(self: *Harness) void {
+        self.renderer.deinit();
+        self.transport.deinit();
+    }
+
+    fn drawReferenceScreen(self: *Harness) void {
+        self.renderer.drawReferenceScreen();
+    }
 };
+
+test "the rendered screen matches the checked-in reference" {
+    // A golden-image test: it pins the entire layout at once, so a coordinate,
+    // a font metric or a format string that shifts anything fails here rather
+    // than being noticed on the panel weeks later. Both layout bugs found by
+    // eye during development — clipped uptime, clipped traffic rate — would
+    // have changed this frame.
+    //
+    // To regenerate after an intentional layout change:
+    //     zig build golden
+    // then look at the diff before committing it.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.convertTo1Bit(h.renderer.epd_buffer);
+    const actual: []const u8 = h.renderer.epd_buffer;
+
+    if (!std.mem.eql(u8, golden_frame, actual)) {
+        var differing_rows: usize = 0;
+        var first_row: ?usize = null;
+        var row: usize = 0;
+        while (row < display_config.DISPLAY_WIDTH) : (row += 1) {
+            const at = row * hw_bytes_per_row;
+            if (!std.mem.eql(u8, golden_frame[at..][0..hw_bytes_per_row], actual[at..][0..hw_bytes_per_row])) {
+                differing_rows += 1;
+                if (first_row == null) first_row = row;
+            }
+        }
+        std.debug.print(
+            "\n  rendered frame differs from {s}: {d} of {d} hardware rows, first at {d}\n" ++
+                "  run `zig build golden` to accept the new frame if this was intended\n",
+            .{ golden_path, differing_rows, display_config.DISPLAY_WIDTH, first_row.? },
+        );
+        return error.GoldenFrameMismatch;
+    }
+}
+
+test "rendering is deterministic" {
+    // The golden test is only meaningful if the same inputs always produce the
+    // same frame.
+    var a = try Harness.init();
+    a.wire();
+    defer a.deinit();
+    var b = try Harness.init();
+    b.wire();
+    defer b.deinit();
+
+    a.drawReferenceScreen();
+    b.drawReferenceScreen();
+    a.renderer.convertTo1Bit(a.renderer.epd_buffer);
+    b.renderer.convertTo1Bit(b.renderer.epd_buffer);
+
+    try testing.expectEqualSlices(u8, a.renderer.epd_buffer, b.renderer.epd_buffer);
+}
+
+// --- panel power state machine ----------------------------------------------
+
+test "an unchanged frame leaves a sleeping panel alone" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+    try testing.expect(h.renderer.panel_asleep);
+
+    h.transport.resetLog();
+    try h.renderer.updateDisplay(true);
+
+    // The whole point of parking the panel: an idle cycle costs nothing.
+    try testing.expectEqual(@as(usize, 0), h.transport.events.items.len);
+    try testing.expect(h.renderer.panel_asleep);
+}
+
+test "a changed frame wakes the panel, restores the reference and parks it again" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+
+    h.transport.resetLog();
+    h.renderer.renderCpuLoad(99, 60); // change the frame
+    try h.renderer.updateDisplay(true);
+
+    // Reference frame restored before the partial update, or it would smear.
+    try testing.expect(h.transport.sentCommand(0x26));
+    try testing.expect(h.transport.sentCommand(0x24));
+    // Partial waveform, not the full one. The last 0x22 is the one that selects
+    // it; the first powers the analog stage up.
+    try testing.expectEqualSlices(u8, &.{0x0F}, h.transport.lastArgsAfter(0x22).?);
+    // Deep sleep mode 1 on the way out.
+    try testing.expectEqualSlices(u8, &.{0x01}, h.transport.argsAfter(0x10).?);
+    try testing.expect(h.renderer.panel_asleep);
+}
+
+test "PANEL_SLEEP=false keeps the controller powered" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = false;
+    defer config.Config.panel_sleep = true;
+
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+
+    try testing.expect(!h.renderer.panel_asleep);
+    try testing.expect(!h.transport.sentCommand(0x10)); // never told to sleep
+}
+
+test "a full refresh rewrites the reference bank" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+
+    h.transport.resetLog();
+    h.renderer.renderCpuLoad(1, 2);
+    try h.renderer.updateDisplay(false);
+
+    // displayBase, not display: leaving the reference stale would make the
+    // following partial updates diff against something that is not on the glass.
+    try testing.expect(h.transport.sentCommand(0x26));
+    try testing.expectEqualSlices(u8, &.{0xC7}, h.transport.argsAfter(0x22).?);
+}
+
+test "a failed update forces the next one to be a full refresh" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    // Awake throughout, so the failure lands in the update itself rather than in
+    // the wake that precedes it.
+    config.Config.panel_sleep = false;
+    defer config.Config.panel_sleep = true;
+
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+
+    // Panel stops releasing BUSY, so the update dies partway through and the
+    // glass no longer matches the reference frame.
+    h.transport.busy_reads_remaining = std.math.maxInt(u32);
+    h.renderer.renderCpuLoad(50, 50);
+    try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
+    try testing.expect(h.renderer.panel_state_unknown);
+
+    // A partial update would now smear, so it must be promoted to a full one.
+    h.transport.busy_reads_remaining = 0;
+    h.transport.resetLog();
+    try h.renderer.updateDisplay(true);
+
+    try testing.expectEqualSlices(u8, &.{0xC7}, h.transport.lastArgsAfter(0x22).?);
+    try testing.expect(!h.renderer.panel_state_unknown);
+}
+
+test "a failed wake leaves the panel marked asleep and the glass trusted" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+    try testing.expect(h.renderer.panel_asleep);
+
+    // reInit fails, so the wake never completes.
+    h.transport.busy_reads_remaining = std.math.maxInt(u32);
+    h.renderer.renderCpuLoad(50, 50);
+    try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
+
+    // reInit drives nothing, so the glass still matches the reference and the
+    // next update may still be partial. The panel stays marked asleep, which is
+    // what makes the next attempt retry the wake.
+    try testing.expect(!h.renderer.panel_state_unknown);
+    try testing.expect(h.renderer.panel_asleep);
+
+    // And it does recover on its own once the panel responds again.
+    h.transport.busy_reads_remaining = 0;
+    h.transport.resetLog();
+    try h.renderer.updateDisplay(true);
+    try testing.expect(h.transport.sentCommand(0x26)); // reference restored
+    try testing.expect(h.renderer.panel_asleep);
+}

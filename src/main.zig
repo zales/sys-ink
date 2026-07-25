@@ -7,6 +7,7 @@ const NetworkOps = network_ops.NetworkOps;
 const TrafficMonitor = network_ops.TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
 const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
+const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
 const MqttClient = @import("mqtt.zig").MqttClient;
 const MqttConfig = @import("mqtt.zig").MqttConfig;
 
@@ -279,7 +280,11 @@ pub fn main(init: std.process.Init) !u8 {
     var net_ops = NetworkOps.init(io);
     var traffic_mon = TrafficMonitor.init(io);
 
-    var renderer = DisplayRenderer.init(allocator, io) catch |err| {
+    // The transport outlives the renderer, which only borrows it.
+    var epd_config = EpdConfig.init(allocator);
+    defer epd_config.moduleExit();
+
+    var renderer = DisplayRenderer.init(allocator, io, &epd_config) catch |err| {
         log.err("Failed to initialize display: {t}", .{err});
         log.err("Check GPIO/SPI permissions", .{});
         return 1;
