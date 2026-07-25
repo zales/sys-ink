@@ -185,22 +185,28 @@ pub const Bitmap = struct {
             const draw_x = cursor_x + glyph.bearing_x;
             const draw_y = y + glyph.bearing_y;
 
-            var bit_idx: usize = 0;
-            var byte_idx: usize = 0;
+            // Pixels are one continuous MSB-first bitstream with no per-row
+            // padding, so the glyph needs ceil(w*h/8) bytes. The generator emits
+            // exactly that, with no slack: assert it in safe builds and bound the
+            // read anyway, because release builds have no bounds checks and an
+            // overrun here would be silent.
+            const bits_needed = @as(usize, glyph.width) * @as(usize, glyph.height);
+            std.debug.assert(glyph.data.len >= (bits_needed + 7) / 8);
+            const available_bits = glyph.data.len * 8;
+
+            var bit: usize = 0;
             var gy: u16 = 0;
-            while (gy < glyph.height) : (gy += 1) {
+            rows: while (gy < glyph.height) : (gy += 1) {
                 var gx: u16 = 0;
                 while (gx < glyph.width) : (gx += 1) {
-                    const bit = (glyph.data[byte_idx] >> @intCast(7 - bit_idx)) & 1;
-                    if (bit == 1) {
+                    if (bit >= available_bits) break :rows;
+
+                    const byte = glyph.data[bit >> 3];
+                    const shift: u3 = @intCast(7 - (bit & 7));
+                    if ((byte >> shift) & 1 == 1) {
                         self.setPixel(draw_x + gx, draw_y + gy, color);
                     }
-
-                    bit_idx += 1;
-                    if (bit_idx == 8) {
-                        bit_idx = 0;
-                        byte_idx += 1;
-                    }
+                    bit += 1;
                 }
             }
 
@@ -398,6 +404,28 @@ test "font glyph tables are sorted for binary search" {
             try testing.expect(prev.codepoint < next_glyph.codepoint);
         }
     }
+}
+
+test "every glyph carries enough data for its own dimensions" {
+    // drawTextFont walks width*height bits of glyph.data. Release builds do not
+    // bounds check, so a generator that disagreed with its own metadata by a
+    // single byte would read past the array and draw whatever followed it.
+    // The generator leaves no slack, which makes this worth pinning down.
+    const fonts = [_]*const font_data.Font{
+        &font_data.ubuntu_14,   &font_data.ubuntu_20,   &font_data.ubuntu_24,
+        &font_data.ubuntu_26,   &font_data.ubuntu_34,   &font_data.material_14,
+        &font_data.material_24, &font_data.material_50,
+    };
+
+    var glyphs_checked: u32 = 0;
+    for (fonts) |font| {
+        for (font.glyphs) |glyph| {
+            const bits = @as(usize, glyph.width) * @as(usize, glyph.height);
+            try testing.expect(glyph.data.len >= (bits + 7) / 8);
+            glyphs_checked += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 525), glyphs_checked);
 }
 
 test "font lookup misses return null" {

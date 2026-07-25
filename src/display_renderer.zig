@@ -1,5 +1,7 @@
 const std = @import("std");
-const EPD = @import("waveshare_epd/epd2in9.zig").EPD;
+const epd2in9 = @import("waveshare_epd/epd2in9.zig");
+const EPD = epd2in9.EPD;
+const Frame = epd2in9.Frame;
 const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
 const display_config = @import("display_config.zig");
 const config = @import("config.zig");
@@ -16,6 +18,9 @@ const hw_bytes_per_row = display_config.DISPLAY_HEIGHT / 8;
 comptime {
     // The rotation below packs a whole hardware row from one logical column.
     std.debug.assert(display_config.DISPLAY_HEIGHT % 8 == 0);
+    // Ties the layout constants to the driver: a mismatch would otherwise only
+    // show up as a corrupted panel.
+    std.debug.assert(@sizeOf(Frame) == hw_bytes_per_row * display_config.DISPLAY_WIDTH);
 }
 
 /// Display renderer that manages Bitmap and EPD
@@ -23,8 +28,8 @@ pub const DisplayRenderer = struct {
     bitmap: Bitmap,
     epd: EPD,
     epd_config: *EpdConfig,
-    epd_buffer: []u8,
-    last_epd_buffer: []u8,
+    epd_buffer: *Frame,
+    last_epd_buffer: *Frame,
     /// Scratch buffer for BMP export, kept around so exporting does not allocate.
     bmp_buffer: []u8,
     has_last_epd_buffer: bool = false,
@@ -49,12 +54,11 @@ pub const DisplayRenderer = struct {
         errdefer allocator.destroy(epd_cfg);
         epd_cfg.* = EpdConfig.init(allocator);
 
-        // Buffer for EPD (128x296 portrait = 4736 bytes)
-        const buffer_size = hw_bytes_per_row * display_config.DISPLAY_WIDTH;
-        const epd_buffer = try allocator.alloc(u8, buffer_size);
-        errdefer allocator.free(epd_buffer);
-        const last_epd_buffer = try allocator.alloc(u8, buffer_size);
-        errdefer allocator.free(last_epd_buffer);
+        // Buffers for EPD (128x296 portrait = 4736 bytes each)
+        const epd_buffer = try allocator.create(Frame);
+        errdefer allocator.destroy(epd_buffer);
+        const last_epd_buffer = try allocator.create(Frame);
+        errdefer allocator.destroy(last_epd_buffer);
 
         const bmp_row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
         const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
@@ -75,8 +79,8 @@ pub const DisplayRenderer = struct {
     pub fn deinit(self: *DisplayRenderer) void {
         self.bitmap.deinit();
         self.allocator.free(self.bmp_buffer);
-        self.allocator.free(self.last_epd_buffer);
-        self.allocator.free(self.epd_buffer);
+        self.allocator.destroy(self.last_epd_buffer);
+        self.allocator.destroy(self.epd_buffer);
         self.epd_config.moduleExit();
         self.allocator.destroy(self.epd_config);
     }
@@ -340,7 +344,12 @@ pub const DisplayRenderer = struct {
     /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
     /// clockwise. One hardware row comes from one logical column, so each output
     /// byte is assembled in a register and stored once.
-    pub fn convertTo1Bit(self: *DisplayRenderer, output: []u8) void {
+    pub fn convertTo1Bit(self: *DisplayRenderer, output: *Frame) void {
+        // One hardware row is packed from one logical column, so the panel's
+        // short side has to be exactly the bitmap's height. `output` carries its
+        // own length in its type.
+        std.debug.assert(self.bitmap.height == hw_bytes_per_row * 8);
+
         const width = self.bitmap.width;
 
         var hw_y: u32 = 0;

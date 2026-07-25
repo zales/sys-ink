@@ -7,6 +7,10 @@ var app_io: std.Io = undefined;
 var log_file: ?std.Io.File = null;
 /// Kept alive alongside `file_writer`, which borrows it.
 var file_write_buf: [4096]u8 = undefined;
+/// Must stay at a fixed address: `Io.Writer` finds its parent through
+/// `@fieldParentPtr` on the embedded `interface`, so this may be written once at
+/// init and thereafter only reached as `&file_writer.?.interface`. Copying or
+/// moving it would silently break that link.
 var file_writer: ?std.Io.File.Writer = null;
 
 /// ANSI colour is only useful on a terminal; under systemd the escapes would be

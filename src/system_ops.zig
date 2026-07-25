@@ -19,6 +19,10 @@ pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     last_cpu_times: ?parse.CpuTimes = null,
+    // All three are owned heap copies, freed in deinit. Uniform on purpose: two
+    // of them used to be duped while this one aliased a static string, with the
+    // difference recorded only in a comment. Same type, different ownership is
+    // how a stray free or leak gets introduced later.
     cached_cpu_temp_path: ?[]const u8 = null,
     cached_disk_temp_path: ?[]const u8 = null,
     cached_fan_path: ?[]const u8 = null,
@@ -50,15 +54,12 @@ pub const SystemOps = struct {
         // usually lives on main's stack. Wait for it before tearing down.
         self.waitForAptCheck(5_000);
 
-        if (self.cached_disk_temp_path) |path| {
-            self.allocator.free(path);
-            self.cached_disk_temp_path = null;
+        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path" }) |field| {
+            if (@field(self, field)) |path| {
+                self.allocator.free(path);
+                @field(self, field) = null;
+            }
         }
-        if (self.cached_fan_path) |path| {
-            self.allocator.free(path);
-            self.cached_fan_path = null;
-        }
-        // cached_cpu_temp_path points to a static string, no need to free
     }
 
     // ------------------------------------------------------------------------
@@ -102,7 +103,7 @@ pub const SystemOps = struct {
 
         for (zones) |zone_path| {
             const temp = self.readTempFromFile(zone_path) catch continue;
-            self.cached_cpu_temp_path = zone_path;
+            self.cached_cpu_temp_path = try self.allocator.dupe(u8, zone_path);
             self.last_cpu_temp = temp;
             return temp;
         }

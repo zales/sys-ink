@@ -8,6 +8,12 @@ pub const EPD_WIDTH = 128;
 pub const EPD_HEIGHT = 296;
 pub const EPD_BUFFER_SIZE = (EPD_WIDTH / 8) * EPD_HEIGHT; // 4736 bytes
 
+/// One full panel frame, 1 bit per pixel. Taking this by pointer rather than as
+/// a slice makes the length a compile-time guarantee: a short buffer used to be
+/// sliced to EPD_BUFFER_SIZE unchecked, which reads past the end in release
+/// builds and clocks the result out over SPI.
+pub const Frame = [EPD_BUFFER_SIZE]u8;
+
 // Partial update LUT for V2 (159 bytes) - from C reference
 const WF_PARTIAL_2IN9 = [_]u8{
     0x0,  0x40, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x0, 0x0,  0x0,  0x0,
@@ -275,19 +281,19 @@ pub const EPD = struct {
     }
 
     /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
-    pub fn display(self: *EPD, image: []const u8) !void {
+    pub fn display(self: *EPD, image: *const Frame) !void {
         try self.sendCommand(.WRITE_RAM);
-        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+        try self.sendDataSlice(image);
         try self.turnOnDisplay();
     }
 
     /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
-    pub fn displayBase(self: *EPD, image: []const u8) !void {
+    pub fn displayBase(self: *EPD, image: *const Frame) !void {
         try self.sendCommand(.WRITE_RAM); // Write to black RAM
-        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+        try self.sendDataSlice(image);
 
         try self.sendCommand(.WRITE_RAM_BASE); // Write to base RAM
-        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+        try self.sendDataSlice(image);
 
         try self.turnOnDisplay();
     }
@@ -333,15 +339,15 @@ pub const EPD = struct {
     /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
     /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
     /// Verified on a 2.9" V2 panel — priming afterwards smears.
-    pub fn primeBase(self: *EPD, image: []const u8) !void {
+    pub fn primeBase(self: *EPD, image: *const Frame) !void {
         try self.setWindows(0, 0, EPD_WIDTH - 1, EPD_HEIGHT - 1);
         try self.setCursor(0, 0);
         try self.sendCommand(.WRITE_RAM_BASE);
-        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+        try self.sendDataSlice(image);
     }
 
     /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
-    pub fn displayPartial(self: *EPD, image: []const u8) !void {
+    pub fn displayPartial(self: *EPD, image: *const Frame) !void {
         try self.beginPartial();
 
         // Reset window to full frame
@@ -350,7 +356,7 @@ pub const EPD = struct {
 
         // Write to RAM (only 0x24, NOT 0x26!)
         try self.sendCommand(.WRITE_RAM);
-        try self.sendDataSlice(image[0..EPD_BUFFER_SIZE]);
+        try self.sendDataSlice(image);
 
         try self.turnOnDisplayPartial();
     }
