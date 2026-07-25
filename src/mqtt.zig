@@ -62,6 +62,7 @@ pub const MqttClient = struct {
     /// Max backoff between reconnect attempts, in seconds.
     const max_backoff_seconds: i64 = 300;
 
+
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
 
@@ -124,6 +125,14 @@ pub const MqttClient = struct {
             return err;
         };
 
+        // KNOWN LIMITATION: this connect is unbounded. A broker host that drops
+        // SYNs rather than refusing them blocks here for the kernel's TCP
+        // timeout, around two minutes, and this runs on the render loop's
+        // thread, so the display freezes for the duration.
+        //
+        // ConnectOptions.timeout exists in Zig 0.16 but is a stub:
+        // Io.Threaded.netConnectIpPosix panics with "TODO implement
+        // netConnectIpPosix with timeout". Revisit when std implements it.
         self.stream = address.connect(self.io, .{ .mode = .stream }) catch |err| {
             self.recordFailure();
             log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{ self.host, self.port, err, self.backoffDelay() });

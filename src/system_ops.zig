@@ -26,6 +26,12 @@ pub const SystemOps = struct {
     cached_cpu_temp_path: ?[]const u8 = null,
     cached_disk_temp_path: ?[]const u8 = null,
     cached_fan_path: ?[]const u8 = null,
+    /// Owns the in-flight check rather than detaching it: the task holds a
+    /// pointer to this struct, which normally lives on main's stack.
+    apt_check: ?std.Io.Future(void) = null,
+    /// Read by the main thread to decide whether the future can be reaped
+    /// without blocking. `Future` offers only a blocking await, no completion
+    /// poll, so this stays.
     apt_check_running: std.atomic.Value(bool),
     apt_updates_count: std.atomic.Value(u32),
     /// False until a check has actually produced a count, so the UI can tell
@@ -50,9 +56,9 @@ pub const SystemOps = struct {
     }
 
     pub fn deinit(self: *SystemOps) void {
-        // A detached APT thread still holds a pointer to this struct, which
-        // usually lives on main's stack. Wait for it before tearing down.
-        self.waitForAptCheck(5_000);
+        // Waits properly rather than polling for a few seconds and hoping: the
+        // task is bounded by its own `timeout` invocations.
+        self.reapAptCheck();
 
         inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path" }) |field| {
             if (@field(self, field)) |path| {
@@ -242,37 +248,35 @@ pub const SystemOps = struct {
     /// finishes. Running `apt update` can take tens of seconds, which is far too
     /// long to hold up the render loop.
     pub fn refreshUpdates(self: *SystemOps, is_root: bool, has_internet: bool) void {
-        // Claim the "running" flag; if another check holds it, do nothing.
-        if (self.apt_check_running.cmpxchgStrong(false, true, .acquire, .monotonic) != null) {
+        if (self.apt_check_running.load(.acquire)) {
             log.debug("APT check already in flight, skipping", .{});
             return;
         }
 
-        const run_update = is_root and has_internet;
-        const thread = std.Thread.spawn(.{}, aptCheckThread, .{ self, run_update }) catch |err| {
-            log.err("Failed to spawn APT check thread: {t}", .{err});
+        // Nothing is running, so this returns straight away; it exists to release
+        // the previous task's resources before starting another.
+        self.reapAptCheck();
+
+        self.apt_check_running.store(true, .release);
+        self.apt_check = self.io.concurrent(aptCheck, .{ self, is_root and has_internet }) catch |err| {
+            // Single-threaded builds and resource exhaustion land here. Running
+            // the check inline would stall the display for up to 40s, so skip
+            // this cycle instead.
+            log.warn("Cannot run APT check concurrently: {t}", .{err});
             self.apt_check_running.store(false, .release);
             return;
         };
-        thread.detach();
     }
 
-    /// Block until any in-flight APT check finishes, up to `timeout_ms`.
-    fn waitForAptCheck(self: *SystemOps, timeout_ms: u32) void {
-        const poll_ms = 50;
-        var waited: u32 = 0;
-
-        while (self.apt_check_running.load(.acquire)) {
-            if (waited >= timeout_ms) {
-                log.warn("Timed out waiting for in-flight APT check", .{});
-                return;
-            }
-            self.io.sleep(std.Io.Duration.fromMilliseconds(poll_ms), .awake) catch return;
-            waited += poll_ms;
+    /// Release a finished check. Blocks only if one is still running.
+    fn reapAptCheck(self: *SystemOps) void {
+        if (self.apt_check) |*future| {
+            future.await(self.io);
+            self.apt_check = null;
         }
     }
 
-    fn aptCheckThread(self: *SystemOps, run_update: bool) void {
+    fn aptCheck(self: *SystemOps, run_update: bool) void {
         defer self.apt_check_running.store(false, .release);
 
         if (run_update) {

@@ -97,8 +97,7 @@ pub const Config = struct {
     pub var panel_sleep: bool = true;
 
     /// Host probed to decide whether the machine has internet access.
-    /// Stored in host byte order.
-    pub var internet_check_ip: u32 = 0x08080808; // 8.8.8.8
+    pub var internet_check_ip: [4]u8 = .{ 8, 8, 8, 8 };
     pub var internet_check_port: u16 = 53;
 
     /// Load configuration from environment variables

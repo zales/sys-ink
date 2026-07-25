@@ -15,9 +15,13 @@ const log = std.log.scoped(.network);
 /// Longest IPv4 dotted quad ("255.255.255.255").
 pub const max_ip_len = 15;
 
-/// How long an internet-reachability probe stays valid. The probe blocks for up
-/// to a second, and several callers ask for it each cycle.
+/// How long an internet-reachability probe stays valid. Several callers ask for
+/// it each cycle and the probe blocks while it runs.
 const internet_cache_seconds = 60;
+
+/// Bound on the reachability probe, so an unreachable host cannot stall the
+/// render loop for the kernel's TCP timeout.
+const probe_timeout_ms = 1000;
 
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
@@ -46,7 +50,14 @@ pub const NetworkOps = struct {
         return reachable;
     }
 
-    /// One-second bounded TCP connect against the configured probe host.
+    /// Bounded TCP connect against the configured probe host.
+    ///
+    /// Hand-rolled rather than `IpAddress.connect`, because the connect has to be
+    /// bounded and std cannot do that yet: `ConnectOptions.timeout` exists in Zig
+    /// 0.16 but `Io.Threaded.netConnectIpPosix` panics with "TODO implement
+    /// netConnectIpPosix with timeout". Without a bound, an unroutable probe host
+    /// would stall the render loop for the kernel's SYN timeout. Replace this with
+    /// the std call once the timeout is implemented.
     fn probeInternet() bool {
         const linux = std.os.linux;
 
@@ -58,7 +69,9 @@ pub const NetworkOps = struct {
         var addr = linux.sockaddr.in{
             .family = linux.AF.INET,
             .port = std.mem.nativeToBig(u16, config.Config.internet_check_port),
-            .addr = std.mem.nativeToBig(u32, config.Config.internet_check_ip),
+            // The octets are already in network order in memory, so a bitcast
+            // needs no byte swapping and cannot get the direction wrong.
+            .addr = @bitCast(config.Config.internet_check_ip),
         };
 
         _ = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
@@ -66,7 +79,7 @@ pub const NetworkOps = struct {
         // A non-blocking connect reports completion through poll, even when it
         // succeeds immediately.
         var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
-        const ready = std.posix.poll(&fds, 1_000) catch return false; // 1s timeout
+        const ready = std.posix.poll(&fds, probe_timeout_ms) catch return false;
         if (ready <= 0) return false;
         if ((fds[0].revents & std.posix.POLL.OUT) == 0) return false;
 

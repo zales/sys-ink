@@ -190,15 +190,18 @@ pub fn scaleBytes(bytes_per_sec: f64) Scaled {
     unreachable;
 }
 
-/// Parse a dotted-quad IPv4 address into host byte order.
-pub fn ipv4(text: []const u8) !u32 {
+/// Parse a dotted-quad IPv4 address into its four octets.
+///
+/// Octets rather than a packed integer: that is what the socket APIs want, and
+/// it leaves no byte-order question to get wrong.
+pub fn ipv4(text: []const u8) ![4]u8 {
     var octets = std.mem.splitScalar(u8, text, '.');
-    var addr: u32 = 0;
-    var count: u8 = 0;
+    var addr: [4]u8 = undefined;
+    var count: usize = 0;
 
     while (octets.next()) |octet| {
         if (count == 4) return error.InvalidAddress;
-        addr = (addr << 8) | try std.fmt.parseInt(u8, octet, 10);
+        addr[count] = try std.fmt.parseInt(u8, octet, 10);
         count += 1;
     }
 
@@ -355,10 +358,10 @@ test "scaleBytes picks the right unit" {
 }
 
 test "ipv4 parses dotted quads" {
-    try testing.expectEqual(@as(u32, 0x08080808), try ipv4("8.8.8.8"));
-    try testing.expectEqual(@as(u32, 0xC0A80101), try ipv4("192.168.1.1"));
-    try testing.expectEqual(@as(u32, 0), try ipv4("0.0.0.0"));
-    try testing.expectEqual(@as(u32, 0xFFFFFFFF), try ipv4("255.255.255.255"));
+    try testing.expectEqual([4]u8{ 8, 8, 8, 8 }, try ipv4("8.8.8.8"));
+    try testing.expectEqual([4]u8{ 192, 168, 1, 1 }, try ipv4("192.168.1.1"));
+    try testing.expectEqual([4]u8{ 0, 0, 0, 0 }, try ipv4("0.0.0.0"));
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, try ipv4("255.255.255.255"));
 }
 
 test "ipv4 rejects malformed input" {
