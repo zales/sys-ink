@@ -181,14 +181,29 @@ jobs:
         run: |
           echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
           KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          if [ -z "$KEY_ID" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY did not import a secret key"
+            exit 1
+          fi
+
+          # loopback pinentry: the key carries no passphrase, and runners have no
+          # tty for gpg to ask on.
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase '' --default-key "$KEY_ID" "$@"; }
 
           cd public
-          gpg --batch --yes --default-key "$KEY_ID" --armor --detach-sign -o Release.gpg Release
-          gpg --batch --yes --default-key "$KEY_ID" --clearsign -o InRelease Release
+          sign --armor --detach-sign -o Release.gpg Release
+          sign --clearsign -o InRelease Release
           # Public key for /etc/apt/keyrings, so clients can verify.
           gpg --export "$KEY_ID" > sys-ink-archive-keyring.gpg
 
-          echo "APT repository signed with $KEY_ID"
+          # Verify before publishing. A repository whose signature does not check
+          # out breaks `apt update` for everyone who already trusts the key, so
+          # failing the build is much cheaper than shipping it.
+          LC_ALL=C gpg --verify Release.gpg Release
+          LC_ALL=C gpg --verify InRelease
+          test -s sys-ink-archive-keyring.gpg
+
+          echo "APT repository signed and verified with $KEY_ID"
 
       - name: Warn when unsigned
         if: ${{ env.APT_GPG_PRIVATE_KEY == '' }}
