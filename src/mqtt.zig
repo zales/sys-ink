@@ -404,10 +404,14 @@ fn buildConnect(buf: []u8, client_id: []const u8, username: ?[]const u8, passwor
 
 /// Resolve a hostname to its four IPv4 octets using libc getaddrinfo.
 ///
-/// libc rather than std's resolver on purpose: this is what makes `.local` names
-/// work through nss-mdns, and MQTT_HOST is commonly an mDNS name on these
-/// networks. It is still an unbounded call — getaddrinfo has its own internal
-/// timeouts but none we control.
+/// libc rather than std's resolver on purpose: it follows the system resolver
+/// configuration, which is what makes `.local` names work in practice. Not via
+/// NSS — nss-mdns is a glibc plugin mechanism that can never load into a
+/// statically linked musl binary. musl reads /etc/resolv.conf and sends a plain
+/// DNS query; on a stock Raspberry Pi OS that points at the systemd-resolved
+/// stub (127.0.0.53), and *resolved* does the mDNS part server-side. Verified on
+/// the target host rather than assumed. It is still an unbounded call —
+/// getaddrinfo has internal timeouts but none we control.
 fn resolveHost(host: []const u8) ![4]u8 {
     var host_buf: [256]u8 = undefined;
     const host_z = std.fmt.bufPrintZ(&host_buf, "{s}", .{host}) catch return error.HostTooLong;
