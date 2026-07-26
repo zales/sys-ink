@@ -27,10 +27,6 @@ pub const std_options: std.Options = .{
 /// a useful trace here, because release builds are stripped.
 pub const panic = std.debug.simple_panic;
 
-const c = @cImport({
-    @cInclude("signal.h");
-});
-
 /// Set from the signal handler; read by the main loop.
 var should_exit: std.atomic.Value(bool) = .init(false);
 
@@ -38,7 +34,7 @@ var should_exit: std.atomic.Value(bool) = .init(false);
 /// waiting out the sleep interval.
 var wake_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
-fn signalHandler(_: c_int) callconv(.c) void {
+fn signalHandler(_: std.os.linux.SIG) callconv(.c) void {
     should_exit.store(true, .release);
 
     // write() is async-signal-safe; the payload does not matter.
@@ -383,9 +379,19 @@ fn installSignalHandlers() void {
         log.warn("Failed to create wake pipe; shutdown may lag by up to a second", .{});
     }
 
-    _ = c.signal(c.SIGINT, signalHandler);
-    _ = c.signal(c.SIGTERM, signalHandler);
-    _ = c.signal(c.SIGHUP, signalHandler);
+    // std.posix.sigaction rather than libc signal(): same effect, but the
+    // semantics are spelled out instead of inherited from whatever the libc's
+    // signal() maps to. SA_RESTART matches musl's signal() behaviour; the main
+    // loop does not depend on it either way, since the self-pipe write makes the
+    // restarted poll return immediately.
+    const action: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.os.linux.SA.RESTART,
+    };
+    std.posix.sigaction(.INT, &action, null);
+    std.posix.sigaction(.TERM, &action, null);
+    std.posix.sigaction(.HUP, &action, null);
 }
 
 /// Run scheduled tasks until a signal arrives.
