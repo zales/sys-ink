@@ -100,6 +100,13 @@ pub const Config = struct {
     pub var internet_check_ip: [4]u8 = .{ 8, 8, 8, 8 };
     pub var internet_check_port: u16 = 53;
 
+    /// Serve the current panel frame over HTTP. See `web_preview.zig`.
+    pub var web_preview: bool = false;
+    /// Loopback by default: the preview has no authentication and the frame
+    /// carries addresses and load figures. Widening this is a decision.
+    pub var web_preview_addr: []const u8 = "127.0.0.1";
+    pub var web_preview_port: u16 = 8390;
+
     /// Load configuration from environment variables
     pub fn load(init: std.process.Init) void {
         const env = init.environ_map;
@@ -136,6 +143,16 @@ pub const Config = struct {
         }
         if (env.get("INTERNET_CHECK_PORT")) |val| {
             internet_check_port = std.fmt.parseInt(u16, val, 10) catch internet_check_port;
+        }
+
+        if (env.get("WEB_PREVIEW")) |val| {
+            web_preview = parseBool(val);
+        }
+        if (env.get("WEB_PREVIEW_ADDR")) |val| {
+            web_preview_addr = val;
+        }
+        if (env.get("WEB_PREVIEW_PORT")) |val| {
+            web_preview_port = std.fmt.parseInt(u16, val, 10) catch web_preview_port;
         }
 
         if (env.get("THRESHOLD_CPU_CRITICAL")) |val| {

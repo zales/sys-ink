@@ -132,6 +132,8 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   transport; `fake_transport.zig` is the recorder the tests drive it with.
 - `src/syscall.zig`: Interpreting raw Linux syscall returns (see the module comment).
 - `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
+- `src/web_preview.zig`: optional HTTP view of the current frame, off by default.
+- `src/frame_server.zig`: the HTTP bits the preview and the simulator share.
 - `src/sim_frame.zig`: what the simulators draw; the front ends are
   `src/sim_native.zig` (macOS window) and `src/sim_web.zig` with
   `src/sim_page.html` (served preview).
@@ -294,6 +296,30 @@ Values at or above these are rendered inverted.
 |----------|---------|-------------|
 | `INTERNET_CHECK_IP` | `8.8.8.8` | IPv4 address probed with a 1-second TCP connect |
 | `INTERNET_CHECK_PORT` | `53` | Port for the probe |
+
+### Panel preview
+
+The running daemon can serve the frame currently on the panel, which is the only
+way to see it on a machine you are not standing next to.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEB_PREVIEW` | `false` | Serve the current frame over HTTP |
+| `WEB_PREVIEW_ADDR` | `127.0.0.1` | Address to bind |
+| `WEB_PREVIEW_PORT` | `8390` | Port to bind |
+
+What it serves is the frame the daemon drew, not a re-render, so it agrees with
+the glass including the fault overlay.
+
+> **It has no authentication,** and the frame shows the host's address, load and
+> disk figures. It binds loopback, so viewing it from elsewhere means a tunnel:
+>
+> ```bash
+> ssh -L 8390:127.0.0.1:8390 user@raspberrypi
+> ```
+>
+> `WEB_PREVIEW_ADDR=0.0.0.0` puts it on the network for anyone who can reach the
+> port. Set that only on a network where that is acceptable.
 
 ### Logging and export
 

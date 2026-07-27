@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const logger = @import("logger.zig");
 const syscall = @import("syscall.zig");
+const WebPreview = @import("web_preview.zig").WebPreview;
 const network_ops = @import("network_ops.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
@@ -54,6 +55,7 @@ const App = struct {
     traffic: *TrafficMonitor,
     renderer: *DisplayRenderer,
     mqtt: ?*MqttClient = null,
+    preview: ?*WebPreview = null,
     /// Monotonic timestamp of the last full (non-partial) panel refresh.
     last_full_refresh: i64 = 0,
     /// Previous readings, so transitions are logged once rather than every
@@ -262,6 +264,14 @@ const App = struct {
         self.renderer.updateDisplay(!full_refresh) catch |err| {
             log.warn("Failed to update display: {t}", .{err});
         };
+
+        self.publishPreview();
+    }
+
+    /// Hand the frame just drawn to the preview, if one is running.
+    fn publishPreview(self: *App) void {
+        const preview = self.preview orelse return;
+        preview.publish(self.renderer.packedFrame());
     }
 
     // ------------------------------------------------------------------------
@@ -439,6 +449,22 @@ pub fn main(init: std.process.Init) !u8 {
     // Seeds the RAM that later partial updates diff against.
     try renderer.showInitialFrame();
     app.last_full_refresh = app.nowSeconds();
+
+    // Bound and started here, at its final address: `start` hands the runtime a
+    // pointer to it, so it must not move afterwards.
+    var preview: ?WebPreview = null;
+    if (config.Config.web_preview) {
+        preview = WebPreview.init(io, config.Config.web_preview_addr, config.Config.web_preview_port) catch |err| blk: {
+            log.err("Cannot start the panel preview: {t}", .{err});
+            break :blk null;
+        };
+    }
+    defer if (preview) |*p| p.deinit();
+    if (preview) |*p| {
+        p.start();
+        app.preview = p;
+        app.publishPreview();
+    }
 
     // Registered last so it does not run before the base frame exists. Its first
     // tick is a no-op anyway: the frame is unchanged, so the update is skipped.
