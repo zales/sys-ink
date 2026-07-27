@@ -405,10 +405,14 @@
             <div class="install-steps">
                 <div class="install-step">
                     <span class="step-number">1</span>
-                    <h3>Add the APT repository</h3>
+                    <h3>Add the signing key and repository</h3>
                     <div class="code-block">
-                        <code>echo "deb [trusted=yes] https://zales.github.io/sys-ink/ ./" | sudo tee /etc/apt/sources.list.d/sys-ink.list</code>
+                        <code>sudo mkdir -p /etc/apt/keyrings<br>sudo curl -fsSL -o /etc/apt/keyrings/sys-ink.gpg https://zales.github.io/sys-ink/sys-ink-archive-keyring.gpg<br>echo "deb [signed-by=/etc/apt/keyrings/sys-ink.gpg] https://zales.github.io/sys-ink/ ./" | sudo tee /etc/apt/sources.list.d/sys-ink.list</code>
                     </div>
+                    <p style="color: var(--text-secondary); margin-top: 10px;">
+                        The repository is signed; key fingerprint
+                        <code>C834 8411 213F 794E 2773 8104 82A9 AAFF 9189 5891</code>.
+                    </p>
                 </div>
                 <div class="install-step">
                     <span class="step-number">2</span>

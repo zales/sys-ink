@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- Under-voltage warning: read from the `rpi_volt` hwmon alarm, shown as an
+  inverted status bar and published as an MQTT problem entity.
+- NVMe SMART monitoring: the drive's critical-warning bits, read via the admin
+  ioctl with no external tools, surfaced the same three ways, plus an SSD wear
+  sensor. Requires root; unprivileged runs disable it silently.
+
 ## [1.5.0] — 2026-07-25
 
 ### Added

@@ -7,6 +7,8 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 - **Real-time Monitoring**: CPU load, temperature, memory usage, disk usage, fan speed.
 - **Network Stats**: IP address, signal strength (WiFi), upload/download speeds.
 - **System Info**: Uptime, APT updates availability, Internet connection status.
+- **Hardware Health**: Under-voltage and NVMe SMART critical warnings — shown as an
+  inverted status bar on the panel and published over MQTT as problem entities.
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.
 - **Home Assistant**: Optional MQTT publishing with auto-discovery.
 - **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
@@ -89,16 +91,21 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/main.zig`: Entry point, signal handling, scheduled tasks, main event loop.
 - `src/scheduler.zig`: Monotonic-clock task scheduler for periodic updates.
 - `src/parse.zig`: I/O-free parsers for procfs/sysfs and command output (unit tested).
-- `src/display_renderer.zig`: High-level rendering logic (drawing text, icons, graphs).
+- `src/display_renderer.zig`: High-level rendering logic (text, icons, fault overlay).
 - `src/display_config.zig`: Layout constants and configuration.
 - `src/graphics.zig`: Bitmap drawing primitives and text rendering.
 - `src/font_data.zig`: Generated static glyph tables.
-- `src/system_ops.zig`: System metrics collection (CPU, RAM, Disk, etc.).
+- `src/system_ops.zig`: System metrics collection (CPU, RAM, disk, SMART, under-voltage).
+- `src/gpio_native.zig`: GPIO character device access (v2 ABI).
+- `src/bounded_connect.zig`: TCP connect with a deadline, shared by MQTT and the
+  reachability probe until `std` implements `ConnectOptions.timeout`.
 - `src/network_ops.zig`: Network status and traffic monitoring.
 - `src/mqtt.zig`: MQTT 3.1.1 client and Home Assistant discovery.
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging.
-- `src/waveshare_epd/`: Low-level driver for the e-Paper display.
+- `src/waveshare_epd/`: Low-level driver for the e-Paper display, generic over its
+  transport; `fake_transport.zig` is the recorder the tests drive it with.
+- `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
 
 ## Build Instructions
 
@@ -310,7 +317,11 @@ Add:
 EnvironmentFile=/etc/sys-ink/mqtt.env
 ```
 
-After enabling MQTT, sensors will automatically appear in Home Assistant under the "SysInk" device.
+After enabling MQTT, sensors will automatically appear in Home Assistant under
+the "SysInk" device — the metrics shown on the panel plus SSD wear, and two
+problem entities (`Under-voltage`, `NVMe SMART Fault`) that Home Assistant can
+turn into notifications. SMART reading needs the daemon to run as root, which
+the packaged service does; unprivileged runs disable it silently.
 
 ## Troubleshooting
 
