@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Type-check Linux-only modules
+        run: zig build check
+
+      - name: Formatting
+        run: zig fmt --check src build.zig
