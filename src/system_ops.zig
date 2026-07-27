@@ -30,6 +30,12 @@ pub const SystemOps = struct {
     /// Set once the hwmon scan has run, so hardware without the sensor is not
     /// rescanned on every cycle.
     undervoltage_probed: bool = false,
+    /// Controller device path, e.g. "/dev/nvme0"; owned heap copy.
+    cached_nvme_dev: ?[]const u8 = null,
+    /// Set once the controller scan has run, so hardware without NVMe — or a
+    /// process without the root needed to open it — is not rescanned and does
+    /// not log about it on every cycle.
+    nvme_probed: bool = false,
     /// Owns the in-flight check rather than detaching it: the task holds a
     /// pointer to this struct, which normally lives on main's stack.
     apt_check: ?std.Io.Future(void) = null,
@@ -49,6 +55,7 @@ pub const SystemOps = struct {
     last_disk_temp: u32 = 0,
     last_fan_speed: u32 = 0,
     last_undervoltage: bool = false,
+    last_nvme_health: ?parse.NvmeHealth = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) SystemOps {
         return .{
@@ -65,7 +72,7 @@ pub const SystemOps = struct {
         // task is bounded by its own `timeout` invocations.
         self.reapAptCheck();
 
-        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path", "cached_undervoltage_path" }) |field| {
+        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path", "cached_undervoltage_path", "cached_nvme_dev" }) |field| {
             if (@field(self, field)) |path| {
                 self.allocator.free(path);
                 @field(self, field) = null;
@@ -272,6 +279,97 @@ pub const SystemOps = struct {
         self.cached_undervoltage_path = self.allocator.dupe(u8, path) catch return null;
         self.last_undervoltage = alarm != 0;
         return self.last_undervoltage;
+    }
+
+    // ------------------------------------------------------------------------
+    // NVMe SMART
+    // ------------------------------------------------------------------------
+
+    /// struct nvme_passthru_cmd from uapi/linux/nvme_ioctl.h.
+    const NvmePassthruCmd = extern struct {
+        opcode: u8,
+        flags: u8,
+        rsvd1: u16,
+        nsid: u32,
+        cdw2: u32,
+        cdw3: u32,
+        metadata: u64,
+        addr: u64,
+        metadata_len: u32,
+        data_len: u32,
+        cdw10: u32,
+        cdw11: u32,
+        cdw12: u32,
+        cdw13: u32,
+        cdw14: u32,
+        cdw15: u32,
+        timeout_ms: u32,
+        result: u32,
+    };
+
+    comptime {
+        // The struct size is part of the ioctl request number, so a layout that
+        // disagrees with the kernel's produces an unrecognised ioctl rather than
+        // a silently wrong result. Same approach as gpio_native.
+        std.debug.assert(@sizeOf(NvmePassthruCmd) == 72);
+    }
+
+    /// _IOWR('N', 0x41, struct nvme_passthru_cmd), derived rather than literal.
+    const NVME_IOCTL_ADMIN_CMD: u32 =
+        (3 << 30) | (@as(u32, @sizeOf(NvmePassthruCmd)) << 16) | (@as(u32, 'N') << 8) | 0x41;
+
+    const nvme_admin_get_log_page = 0x02;
+    const nvme_log_smart = 0x02;
+    /// Get Log Page addresses all namespaces for controller-scoped pages.
+    const nvme_nsid_all = 0xFFFF_FFFF;
+
+    /// SMART / Health for the first NVMe controller, or null when there is no
+    /// NVMe, or this process lacks the root needed to open the controller node
+    /// (/dev/nvmeX is 0600 root). Null keeps the fault indicator off rather
+    /// than inventing a healthy reading.
+    pub fn getNvmeHealth(self: *SystemOps) ?parse.NvmeHealth {
+        const dev = self.nvmeDevPath() orelse return null;
+
+        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+        defer _ = std.os.linux.close(fd);
+
+        var page: [512]u8 = undefined;
+        var cmd = std.mem.zeroes(NvmePassthruCmd);
+        cmd.opcode = nvme_admin_get_log_page;
+        cmd.nsid = nvme_nsid_all;
+        cmd.addr = @intFromPtr(&page);
+        cmd.data_len = page.len;
+        // cdw10: number of dwords minus one in the upper half, log id below.
+        cmd.cdw10 = ((page.len / 4 - 1) << 16) | nvme_log_smart;
+
+        const rc = std.os.linux.ioctl(fd, NVME_IOCTL_ADMIN_CMD, @intFromPtr(&cmd));
+        if (std.posix.errno(rc) != .SUCCESS) return null;
+
+        const health = parse.nvmeSmartLog(&page) catch return null;
+        self.last_nvme_health = health;
+        return health;
+    }
+
+    /// Locate the first NVMe controller node, caching the result.
+    fn nvmeDevPath(self: *SystemOps) ?[]const u8 {
+        if (self.cached_nvme_dev) |dev| return dev;
+        if (self.nvme_probed) return null;
+        self.nvme_probed = true;
+
+        var path_buf: [64]u8 = undefined;
+        // Controllers are numbered from zero; scanning a fixed range avoids
+        // directory iteration and matches the hwmon approach.
+        for (0..4) |i| {
+            const path = std.fmt.bufPrint(&path_buf, "/dev/nvme{d}", .{i}) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            _ = std.os.linux.close(fd);
+
+            self.cached_nvme_dev = self.allocator.dupe(u8, path) catch return null;
+            return self.cached_nvme_dev;
+        }
+
+        log.debug("No accessible NVMe controller; SMART monitoring disabled", .{});
+        return null;
     }
 
     /// Get system uptime in days, hours, and minutes

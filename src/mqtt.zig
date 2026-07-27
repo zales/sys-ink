@@ -42,6 +42,10 @@ pub const sensors = [_]Sensor{
     // device_class problem makes Home Assistant treat ON as a fault, so it shows
     // up in the "problems" view and can drive a notification without a template.
     .{ .id = "undervoltage", .name = "Under-voltage", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:flash-alert" },
+    .{ .id = "nvme_fault", .name = "NVMe SMART Fault", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:harddisk-remove" },
+    // Vendor's life-used estimate from the same SMART page; the long-term trend
+    // is the early warning the fault bit only gives at the end.
+    .{ .id = "ssd_wear", .name = "SSD Wear", .unit = "%", .icon = "mdi:chart-donut" },
 };
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration

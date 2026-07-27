@@ -55,9 +55,10 @@ const App = struct {
     mqtt: ?*MqttClient = null,
     /// Monotonic timestamp of the last full (non-partial) panel refresh.
     last_full_refresh: i64 = 0,
-    /// Previous under-voltage reading, so the transition is logged once rather
-    /// than every cycle.
+    /// Previous readings, so transitions are logged once rather than every
+    /// cycle. Null means the source has not reported yet.
     last_undervoltage: ?bool = null,
+    last_nvme_fault: ?bool = null,
 
     fn nowSeconds(self: *App) i64 {
         return std.Io.Timestamp.now(self.io, .awake).toSeconds();
@@ -188,13 +189,11 @@ const App = struct {
     /// automation can turn it into an actual notification.
     fn updateUndervoltage(self: *App) void {
         const active = self.sys.getUndervoltage() orelse {
-            // No sensor on this hardware; leave the indicator off rather than
-            // claiming the supply is fine.
-            self.renderer.setUndervoltageWarning(false);
+            // No sensor on this hardware; report nothing rather than a healthy
+            // reading, and leave the shared fault bar to the other sources.
+            self.applyFaultState();
             return;
         };
-
-        self.renderer.setUndervoltageWarning(active);
 
         if (self.last_undervoltage != active) {
             if (active) {
@@ -204,6 +203,50 @@ const App = struct {
             }
             self.last_undervoltage = active;
         }
+        self.applyFaultState();
+    }
+
+    /// Poll the drive's SMART / Health page and surface a critical warning.
+    ///
+    /// The fault bit covers spare exhaustion, temperature excursions, degraded
+    /// reliability, read-only fallback and backup failure — the drive's own
+    /// declaration that something is wrong, which on a NAS is the single most
+    /// important thing this display can show.
+    fn updateNvmeHealth(self: *App) void {
+        const health = self.sys.getNvmeHealth() orelse {
+            self.applyFaultState();
+            return;
+        };
+
+        log.debug("NVMe SMART: wear {d}%, spare {d}%, {d}°C, warning 0x{x}", .{
+            health.percentage_used,
+            health.available_spare,
+            health.compositeTempCelsius(),
+            health.critical_warning,
+        });
+
+        const faulted = health.faulted();
+        if (self.last_nvme_fault != faulted) {
+            if (faulted) {
+                var buf: [256]u8 = undefined;
+                log.warn("NVMe SMART critical warning (0x{x}): {s}", .{
+                    health.critical_warning,
+                    @import("parse.zig").nvmeWarningNames(&buf, health.critical_warning),
+                });
+            } else if (self.last_nvme_fault != null) {
+                log.info("NVMe SMART warning cleared", .{});
+            }
+            self.last_nvme_fault = faulted;
+        }
+        self.applyFaultState();
+    }
+
+    /// The fault bar shows the OR of every source, so one clearing while another
+    /// is still active cannot blank it.
+    fn applyFaultState(self: *App) void {
+        const uv = self.last_undervoltage orelse false;
+        const smart = self.last_nvme_fault orelse false;
+        self.renderer.setFaultWarning(uv or smart);
     }
 
     fn updateDisplay(self: *App) void {
@@ -249,6 +292,12 @@ const App = struct {
         publishFmt(client, "fan_speed", "{d}", .{self.sys.last_fan_speed});
         if (self.last_undervoltage) |active| {
             client.publish("undervoltage", if (active) "ON" else "OFF", false) catch {};
+        }
+        if (self.last_nvme_fault) |faulted| {
+            client.publish("nvme_fault", if (faulted) "ON" else "OFF", false) catch {};
+        }
+        if (self.sys.last_nvme_health) |health| {
+            publishFmt(client, "ssd_wear", "{d}", .{health.percentage_used});
         }
         // Withheld until a check has actually run, so Home Assistant is not told
         // "0 updates" on the basis of no data.
@@ -373,6 +422,7 @@ pub fn main(init: std.process.Init) !u8 {
     // finishes mid-cycle shows up promptly.
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
     try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
+    try scheduler.every(fast, "nvme_health", &app, App.updateNvmeHealth);
 
     try scheduler.every(slow, "ip", &app, App.updateIp);
     try scheduler.every(slow, "apt", &app, App.updateApt);

@@ -200,6 +200,76 @@ pub fn scaleBytes(bytes_per_sec: f64) Scaled {
     unreachable;
 }
 
+/// The SMART / Health Information log page (NVMe spec, log identifier 02h).
+///
+/// Only the leading fields are decoded; the rest of the 512-byte page is
+/// counters this daemon has no use for.
+pub const NvmeHealth = struct {
+    /// Bitfield of active critical warnings; zero means healthy.
+    critical_warning: u8,
+    /// Composite temperature in Kelvin.
+    composite_temp_k: u16,
+    /// Remaining spare capacity, percent.
+    available_spare: u8,
+    /// Firmware's threshold under which spare is considered critical, percent.
+    spare_threshold: u8,
+    /// Vendor's estimate of life used, percent. May exceed 100.
+    percentage_used: u8,
+
+    pub fn faulted(self: NvmeHealth) bool {
+        return self.critical_warning != 0;
+    }
+
+    pub fn compositeTempCelsius(self: NvmeHealth) i32 {
+        return @as(i32, self.composite_temp_k) - 273;
+    }
+};
+
+/// Names of the critical-warning bits, per the NVMe specification.
+const nvme_warning_names = [_][]const u8{
+    "spare capacity below threshold",
+    "temperature outside limits",
+    "reliability degraded",
+    "media in read-only mode",
+    "volatile memory backup failed",
+    "persistent memory unreliable",
+};
+
+/// Render the set critical-warning bits as a comma-separated list into `buf`.
+/// Unknown high bits are reported numerically rather than dropped.
+pub fn nvmeWarningNames(buf: []u8, bits: u8) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var first = true;
+
+    for (nvme_warning_names, 0..) |name, bit| {
+        if (bits & (@as(u8, 1) << @intCast(bit)) == 0) continue;
+        if (!first) w.writeAll(", ") catch break;
+        w.writeAll(name) catch break;
+        first = false;
+    }
+
+    const known_mask: u8 = (1 << nvme_warning_names.len) - 1;
+    if (bits & ~known_mask != 0) {
+        if (!first) w.writeAll(", ") catch {};
+        w.print("unknown bits 0x{x}", .{bits & ~known_mask}) catch {};
+    }
+
+    return w.buffered();
+}
+
+/// Decode the SMART/Health log page. `page` must be the full 512-byte page.
+pub fn nvmeSmartLog(page: []const u8) !NvmeHealth {
+    if (page.len < 512) return error.ShortLogPage;
+
+    return .{
+        .critical_warning = page[0],
+        .composite_temp_k = std.mem.readInt(u16, page[1..3], .little),
+        .available_spare = page[3],
+        .spare_threshold = page[4],
+        .percentage_used = page[5],
+    };
+}
+
 /// Parse a dotted-quad IPv4 address into its four octets.
 ///
 /// Octets rather than a packed integer: that is what the socket APIs want, and
@@ -395,4 +465,46 @@ test "ipv4 rejects malformed input" {
     try testing.expectError(error.InvalidAddress, ipv4("1.2.3.4.5"));
     try testing.expectError(error.Overflow, ipv4("256.0.0.1"));
     try testing.expectError(error.InvalidCharacter, ipv4("a.b.c.d"));
+}
+
+test "nvmeSmartLog decodes the leading fields" {
+    var page = [_]u8{0} ** 512;
+    page[0] = 0x04; // reliability degraded
+    std.mem.writeInt(u16, page[1..3], 307, .little); // 34 C
+    page[3] = 100;
+    page[4] = 10;
+    page[5] = 2;
+
+    const h = try nvmeSmartLog(&page);
+    try testing.expectEqual(@as(u8, 0x04), h.critical_warning);
+    try testing.expect(h.faulted());
+    try testing.expectEqual(@as(i32, 34), h.compositeTempCelsius());
+    try testing.expectEqual(@as(u8, 100), h.available_spare);
+    try testing.expectEqual(@as(u8, 2), h.percentage_used);
+}
+
+test "a healthy drive reports no fault" {
+    var page = [_]u8{0} ** 512;
+    page[3] = 100;
+    const h = try nvmeSmartLog(&page);
+    try testing.expect(!h.faulted());
+}
+
+test "nvmeSmartLog rejects a truncated page" {
+    const short = [_]u8{0} ** 100;
+    try testing.expectError(error.ShortLogPage, nvmeSmartLog(&short));
+}
+
+test "nvmeWarningNames decodes each bit and combinations" {
+    var buf: [256]u8 = undefined;
+
+    try testing.expectEqualStrings("", nvmeWarningNames(&buf, 0));
+    try testing.expectEqualStrings("spare capacity below threshold", nvmeWarningNames(&buf, 0x01));
+    try testing.expectEqualStrings("media in read-only mode", nvmeWarningNames(&buf, 0x08));
+    try testing.expectEqualStrings(
+        "temperature outside limits, reliability degraded",
+        nvmeWarningNames(&buf, 0x06),
+    );
+    // Bits the spec has not assigned must not vanish from a fault report.
+    try testing.expectEqualStrings("unknown bits 0xc0", nvmeWarningNames(&buf, 0xC0));
 }
