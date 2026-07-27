@@ -89,6 +89,66 @@ pub fn expand(packed_frame: []const u8, dest: []u8, comptime scale: u32) void {
     }
 }
 
+test "successive frames differ" {
+    // The window once sat on its first frame for minutes while everything
+    // upstream worked: the preview was handing Cocoa an image it had already
+    // cached. Nothing catches a frozen window from here, but this does pin the
+    // half that is testable — that the content offered up actually varies, so a
+    // future change cannot quietly make every frame identical.
+    const testing = std.testing;
+
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+
+    var renderer = try SimRenderer.init(testing.allocator, undefined, &transport);
+    defer renderer.deinit();
+    renderer.epd = SimRenderer.EPD.init(&transport);
+    renderer.renderGrid();
+
+    var seen = std.AutoHashMap(u64, void).init(testing.allocator);
+    defer seen.deinit();
+
+    var previous: ?u64 = null;
+    for (0..30) |t| {
+        draw(&renderer, @floatFromInt(t), t);
+        transport.resetLog();
+
+        const hash = std.hash.Wyhash.hash(0, renderer.packedFrame());
+        try seen.put(hash, {});
+
+        // Consecutive seconds must not render identically.
+        if (previous) |prev| try testing.expect(hash != prev);
+        previous = hash;
+    }
+    try testing.expectEqual(@as(u32, 30), seen.count());
+}
+
+test "the fault overlay is part of the frame it hands over" {
+    const testing = std.testing;
+
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+
+    var renderer = try SimRenderer.init(testing.allocator, undefined, &transport);
+    defer renderer.deinit();
+    renderer.epd = SimRenderer.EPD.init(&transport);
+    renderer.renderGrid();
+
+    // A moment inside the fault window and one outside, with the same metrics.
+    var quiet: [row_bytes * height]u8 = undefined;
+    draw(&renderer, 0, 0);
+    renderer.setFaultWarning(false);
+    @memcpy(&quiet, renderer.packedFrame());
+
+    renderer.setFaultWarning(true);
+    const faulted = renderer.packedFrame();
+
+    try testing.expect(!std.mem.eql(u8, &quiet, faulted));
+    // Only the status bar moves: rows above it are untouched.
+    const bar_start = 113 * row_bytes;
+    try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
+}
+
 test "expand magnifies without smearing neighbouring pixels" {
     const testing = std.testing;
     const scale = 3;

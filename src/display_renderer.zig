@@ -28,7 +28,9 @@ comptime {
 pub fn Renderer(comptime Transport: type) type {
     return struct {
         const Self = @This();
-        const EPD = epd2in9.Epd(Transport);
+        /// Public so a caller that constructs a renderer at its final address can
+        /// re-point `epd`, which holds a pointer to the transport.
+        pub const EPD = epd2in9.Epd(Transport);
 
         bitmap: Bitmap,
         epd: EPD,

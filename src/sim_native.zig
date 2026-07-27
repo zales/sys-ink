@@ -145,11 +145,6 @@ pub fn main(init: std.process.Init) !u8 {
     _ = send(Msg.Void, window, "center", .{});
 
     const image_view = send(Msg.RetRect, send(Msg.Ret, class("NSImageView"), "alloc", .{}), "initWithFrame:", .{frame});
-    // One image, built over `pixels` and kept: the representation borrows that
-    // memory rather than copying it, so each frame is a write into the buffer
-    // plus an invalidation. Rebuilding the image every frame instead leaked
-    // steadily, and there is no reason to allocate for content of a fixed size.
-    _ = send(Msg.VoidId, image_view, "setImage:", .{buildImage(colour_space, pixels.ptr, view_width, view_height)});
     // Show the frame at its true size; magnification already happened in `expand`.
     _ = send(Msg.VoidUint, image_view, "setImageScaling:", .{@as(usize, image_scale_none)});
     // On a high-density display the view is backed by more physical pixels than
@@ -180,10 +175,17 @@ pub fn main(init: std.process.Init) !u8 {
         try renderer.updateDisplay(true);
 
         sim_frame.expand(renderer.packedFrame(), pixels, scale);
-        // The image draws from a cache, which has to be dropped for the new
-        // contents of the borrowed buffer to be seen.
-        _ = send(Msg.Void, send(Msg.Ret, image_view, "image", .{}), "recache", .{});
-        _ = send(Msg.VoidBool, image_view, "setNeedsDisplay:", .{@as(u8, 1)});
+
+        // A fresh image each frame. Keeping one and invalidating it with
+        // `recache` looks cheaper, but a layer-backed view draws from
+        // CoreAnimation's own copy of the contents, which that does not reach —
+        // the window then sits on its first frame forever. Handing over a new
+        // image leaves nothing stale to consult. It costs two small objects,
+        // reclaimed by the frame's pool; the growth this was once blamed for
+        // was the transport's recorder, not this.
+        const image = buildImage(colour_space, pixels.ptr, view_width, view_height);
+        defer _ = send(Msg.Void, image, "release", .{});
+        _ = send(Msg.VoidId, image_view, "setImage:", .{image});
 
         // Drain the queue so the window stays responsive without [NSApp run],
         // which would take over the thread and need a delegate to get it back.
@@ -209,7 +211,10 @@ pub fn main(init: std.process.Init) !u8 {
 ///
 /// 8 bits per sample, one sample per pixel, no alpha: the greyscale buffer maps
 /// onto a device-white bitmap with no conversion. The representation borrows the
-/// buffer, so it must outlive the image — here it lives as long as the process.
+/// buffer rather than copying it, so `pixels` must outlive the image — it lives
+/// as long as the process, while images are per frame.
+///
+/// Returned with a retain count of one: the caller owns it.
 fn buildImage(colour_space: Id, pixels: [*]u8, w: usize, h: usize) Id {
     var planes: [1][*]u8 = .{pixels};
 
