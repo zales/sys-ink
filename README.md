@@ -25,7 +25,9 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 ## Hardware Requirements
 
-- **Raspberry Pi**: Tested on Pi 4 and Pi 5. Uses modern Linux GPIO character device API (`/dev/gpiochip*`), compatible with RPi 5's RP1 chip.
+- **Raspberry Pi**: Tested on Pi 5; uses the modern Linux GPIO character device
+  API (`/dev/gpiochip*`), including the Pi 5's RP1 chip. Older models may work —
+  `armhf` builds are published — but are untested.
 - **Display**: [Waveshare 2.9inch e-Paper Module (B/W) V2](https://www.waveshare.com/wiki/2.9inch_e-Paper_Module).
   - *Note: This project is specifically tuned for the V2 version of the display.*
 - **Connections**: SPI interface and GPIO pins (RST, DC, BUSY, PWR).
@@ -159,7 +161,7 @@ The easiest way to install and keep SysInk updated is using our APT repository.
 
 ### Option B: Debian Package (.deb)
 
-1. **Download the `.deb` package** for your architecture (`arm64` for Pi 3/4/5, `armhf` for Pi Zero/2) from the [Releases](https://github.com/zales/sys-ink/releases) page.
+1. **Download the `.deb` package** for your architecture (`arm64` for 64-bit Raspberry Pi OS, `armhf` for 32-bit) from the [Releases](https://github.com/zales/sys-ink/releases) page.
 2. **Install**:
    ```bash
    sudo dpkg -i sys-ink_*.deb
@@ -219,7 +221,7 @@ them before running.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GPIO_CHIP` | auto-detected | Path to GPIO chip device. Auto-detected from the chip label (`pinctrl-rp1`, `pinctrl-bcm2711`, `pinctrl-bcm2835`), falling back to `/dev/gpiochip0`. Check with `gpiodetect`. |
+| `GPIO_CHIP` | auto-detected | Path to GPIO chip device. Auto-detected from known `pinctrl` chip labels, falling back to `/dev/gpiochip0`. Check with `gpiodetect`. |
 | `SPI_DEVICE` | `/dev/spidev0.0` | Path to SPI device |
 
 ### Intervals
