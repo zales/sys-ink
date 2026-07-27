@@ -14,6 +14,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const linux = std.os.linux;
+const socket_timeout = @import("socket_timeout.zig");
 
 pub const Error = error{
     SocketFailed,
@@ -68,7 +69,7 @@ pub fn connectStream(address: [4]u8, port: u16, timeout_ms: i32) Error!net.Strea
     errdefer closeFd(fd);
 
     try clearNonBlocking(fd);
-    try setIoDeadlines(fd, timeout_ms);
+    socket_timeout.set(fd, @intCast(timeout_ms)) catch return error.ConnectFailed;
 
     return .{ .socket = .{
         .handle = fd,
@@ -83,18 +84,6 @@ fn clearNonBlocking(fd: std.posix.fd_t) Error!void {
     const blocking = flags & ~@as(usize, 0o4000); // O_NONBLOCK
     const rc = linux.fcntl(fd, linux.F.SETFL, blocking);
     if (@as(isize, @bitCast(rc)) < 0) return error.ConnectFailed;
-}
-
-fn setIoDeadlines(fd: std.posix.fd_t, timeout_ms: i32) Error!void {
-    const tv = linux.timeval{
-        .sec = @intCast(@divTrunc(timeout_ms, 1000)),
-        .usec = @intCast(@mod(timeout_ms, 1000) * 1000),
-    };
-
-    for ([_]u32{ linux.SO.RCVTIMEO, linux.SO.SNDTIMEO }) |option| {
-        const rc = linux.setsockopt(fd, linux.SOL.SOCKET, option, @ptrCast(&tv), @sizeOf(linux.timeval));
-        if (@as(isize, @bitCast(rc)) != 0) return error.ConnectFailed;
-    }
 }
 
 /// Close and discard a connection opened above, without needing an `Io`.

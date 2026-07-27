@@ -11,6 +11,44 @@
 const std = @import("std");
 const net = std.Io.net;
 const bmp = @import("bmp.zig");
+const socket_timeout = @import("socket_timeout.zig");
+
+const log = std.log.scoped(.preview);
+
+/// How long a client gets to send its request, or to take a response.
+///
+/// Short on purpose. A stalled peer costs at most this much, and the page asks
+/// for a frame once a second, so nothing legitimate comes near it.
+pub const io_timeout_ms = 2000;
+
+/// After a failed `accept`, wait this long before trying again.
+///
+/// Without it, a persistent failure — descriptor exhaustion is the realistic one
+/// — turns the loop into a busy spin competing with the render loop for the CPU.
+pub const accept_backoff_ms = 250;
+
+/// Accept a connection with deadlines already installed.
+///
+/// Returns null when nothing usable arrived, having already waited out the
+/// backoff; the caller should simply go round again. `running` is checked by the
+/// caller, not here.
+pub fn accept(server: *net.Server, io: std.Io) ?net.Stream {
+    const stream = server.accept(io) catch |err| {
+        log.debug("Preview accept failed: {t}", .{err});
+        std.Io.sleep(io, .fromMilliseconds(accept_backoff_ms), .awake) catch {};
+        return null;
+    };
+
+    socket_timeout.set(stream.socket.handle, io_timeout_ms) catch |err| {
+        // Without a deadline this connection could block the loop for as long as
+        // the peer likes, which is the whole thing being prevented.
+        log.warn("Cannot set preview socket deadline: {t}; dropping connection", .{err});
+        stream.close(io);
+        return null;
+    };
+
+    return stream;
+}
 
 /// The viewer page, with `{{LABEL}}` still in it. Render it with `renderPage`.
 const page_template = @embedFile("viewer_page.html");

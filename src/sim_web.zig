@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     var image: [bmp.byteSize(sim_frame.width, sim_frame.height)]u8 = undefined;
 
     while (true) {
-        const stream = server.accept(io) catch continue;
+        const stream = frame_server.accept(&server, io) orelse continue;
         defer stream.close(io);
 
         switch (frame_server.readRequest(stream, io, &request_buf) orelse continue) {

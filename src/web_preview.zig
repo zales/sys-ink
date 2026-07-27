@@ -126,11 +126,7 @@ pub const WebPreview = struct {
         var snapshot: [frame_bytes]u8 = undefined;
 
         while (self.running.load(.acquire)) {
-            const stream = self.server.accept(self.io) catch |err| {
-                if (!self.running.load(.acquire)) return;
-                log.debug("Preview accept failed: {t}", .{err});
-                continue;
-            };
+            const stream = frame_server.accept(&self.server, self.io) orelse continue;
             defer stream.close(self.io);
 
             if (!self.running.load(.acquire)) return;

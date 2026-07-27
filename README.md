@@ -122,6 +122,7 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/font_data.zig`: Generated static glyph tables.
 - `src/system_ops.zig`: System metrics collection (CPU, RAM, disk, SMART, under-voltage).
 - `src/gpio_native.zig`: GPIO character device access (v2 ABI).
+- `src/socket_timeout.zig`: send and receive deadlines on a socket.
 - `src/bounded_connect.zig`: TCP connect with a deadline, shared by MQTT and the
   reachability probe until `std` implements `ConnectOptions.timeout`.
 - `src/network_ops.zig`: Network status and traffic monitoring.
@@ -320,6 +321,16 @@ the glass including the fault overlay.
 >
 > `WEB_PREVIEW_ADDR=0.0.0.0` puts it on the network for anyone who can reach the
 > port. Set that only on a network where that is acceptable.
+
+Reads and writes carry a two-second deadline, so a client that connects and then
+says nothing costs one pause rather than taking the preview down — which is what
+used to happen. Failed accepts back off instead of spinning.
+
+One connection is served at a time, which is ample for a page fetching one image
+a second but does mean many simultaneous stalled connections slow it down, each
+for up to its deadline. Nothing recovers from that but waiting, so treat the
+preview as a diagnostic aid on a network you trust rather than a service to
+expose.
 
 ### Logging and export
 
