@@ -39,6 +39,9 @@ pub const sensors = [_]Sensor{
     .{ .id = "traffic_up", .name = "Upload Speed", .unit = "kB/s", .device_class = "data_rate", .icon = "mdi:upload" },
     .{ .id = "uptime_days", .name = "Uptime Days", .unit = "d", .icon = "mdi:clock-outline" },
     .{ .id = "apt_updates", .name = "APT Updates", .icon = "mdi:package-up" },
+    // device_class problem makes Home Assistant treat ON as a fault, so it shows
+    // up in the "problems" view and can drive a notification without a template.
+    .{ .id = "undervoltage", .name = "Under-voltage", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:flash-alert" },
 };
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration

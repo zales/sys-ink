@@ -39,6 +39,8 @@ pub fn Renderer(comptime Transport: type) type {
     has_last_epd_buffer: bool = false,
     /// True while the panel controller sits in deep sleep.
     panel_asleep: bool = false,
+    /// Draws the status bar inverted, signalling a hardware fault.
+    warn_undervoltage: bool = false,
     /// Set when an update failed partway through, leaving the panel content
     /// unknown. The next update must be a full refresh, because a partial one
     /// would diff against a reference that no longer matches the glass.
@@ -188,8 +190,31 @@ pub fn Renderer(comptime Transport: type) type {
         }
     }
 
+    /// Show or clear the under-voltage warning: the status bar is drawn inverted.
+    pub fn setUndervoltageWarning(self: *Self, active: bool) void {
+        self.warn_undervoltage = active;
+    }
+
+    fn invertStatusBar(self: *Self) void {
+        self.bitmap.invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
+    }
+
+    /// Toggle the fault overlay on the bitmap. Its own inverse, so a paired call
+    /// restores the bitmap.
+    ///
+    /// Not drawn into the layout, because the status bar's three slots are each
+    /// redrawn by their own scheduled task and any of them would erase part of it.
+    /// Call it around everything that reads the bitmap — the panel conversion and
+    /// the BMP export both — or the preview disagrees with the glass.
+    fn toggleFaultOverlay(self: *Self) void {
+        if (self.warn_undervoltage) self.invertStatusBar();
+    }
+
     /// Push the first frame and establish the reference for later partial updates.
     pub fn showInitialFrame(self: *Self) !void {
+        self.toggleFaultOverlay();
+        defer self.toggleFaultOverlay();
+
         self.convertTo1Bit(self.epd_buffer);
         try self.epd.displayBase(self.epd_buffer);
         self.rememberCurrentFrame();
@@ -205,6 +230,11 @@ pub fn Renderer(comptime Transport: type) type {
         if (display_config.DEBUG_TEXT_AREAS) {
             self.drawTextAreaFrames();
         }
+
+        // Held for the whole function, so the BMP export on every exit path below
+        // sees the same overlay the panel does.
+        self.toggleFaultOverlay();
+        defer self.toggleFaultOverlay();
 
         // Convert Bitmap to 1-bit
         self.convertTo1Bit(self.epd_buffer);
@@ -374,6 +404,12 @@ pub fn Renderer(comptime Transport: type) type {
     pub fn exportBmp(self: *Self) !void {
         if (!config.Config.export_bmp) return;
 
+        self.packBmpBuffer();
+        try self.bmp_exporter.save(self.io, self.bmp_buffer, self.bitmap.width, self.bitmap.height, config.Config.bmp_export_path);
+    }
+
+    /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
+    fn packBmpBuffer(self: *Self) void {
         const width = self.bitmap.width;
         const height = self.bitmap.height;
         const row_bytes = (width + 7) / 8;
@@ -395,8 +431,6 @@ pub fn Renderer(comptime Transport: type) type {
                 out_byte.* = bits;
             }
         }
-
-        try self.bmp_exporter.save(self.io, self.bmp_buffer, width, height, config.Config.bmp_export_path);
     }
 
     /// Render CPU load and temperature
@@ -733,6 +767,130 @@ test "rendering is deterministic" {
     b.renderer.convertTo1Bit(b.renderer.epd_buffer);
 
     try testing.expectEqualSlices(u8, a.renderer.epd_buffer, b.renderer.epd_buffer);
+}
+
+// --- under-voltage warning ---------------------------------------------------
+
+/// Rows of the unrotated BMP buffer covering the status bar.
+fn statusBarRows(r: *TestRenderer) []const u8 {
+    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    return r.bmp_buffer[display_config.STATUS_BAR_Y * row_bytes ..];
+}
+
+test "the warning inverts the status bar in the frame sent to the panel" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+    const clean: Frame = h.renderer.epd_buffer.*;
+
+    h.renderer.setUndervoltageWarning(true);
+    try h.renderer.updateDisplay(false);
+
+    try testing.expect(!std.mem.eql(u8, &clean, h.renderer.epd_buffer));
+}
+
+test "the warning reaches the BMP preview too" {
+    // Regression: the overlay used to be applied only around the panel
+    // conversion, so the exported preview showed a clean status bar while the
+    // glass showed an inverted one. A preview that disagrees with the device is
+    // worse than no preview.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.packBmpBuffer();
+    const clean = try testing.allocator.dupe(u8, statusBarRows(&h.renderer));
+    defer testing.allocator.free(clean);
+
+    h.renderer.setUndervoltageWarning(true);
+    h.renderer.toggleFaultOverlay();
+    h.renderer.packBmpBuffer();
+    h.renderer.toggleFaultOverlay();
+
+    const warned = statusBarRows(&h.renderer);
+    try testing.expect(!std.mem.eql(u8, clean, warned));
+
+    // Every bit of the bar flips, so the rows are the exact complement.
+    for (clean, warned) |a, b| try testing.expectEqual(a, ~b);
+}
+
+test "the warning does not leak into the bitmap" {
+    // The status bar's slots are each redrawn by their own task, so an inversion
+    // left behind would be partially erased and the frame would come out half
+    // inverted. toggleFaultOverlay relies on invertRect being its own inverse.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const pristine = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(pristine);
+
+    h.renderer.setUndervoltageWarning(true);
+    try h.renderer.showInitialFrame();
+
+    try testing.expectEqualSlices(u8, pristine, h.renderer.bitmap.data);
+}
+
+test "repeated refreshes with the warning on are stable" {
+    // An inversion that accumulated would alternate the bar between normal and
+    // inverted on every refresh.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    h.renderer.setUndervoltageWarning(true);
+
+    try h.renderer.showInitialFrame();
+    const first: Frame = h.renderer.epd_buffer.*;
+    try h.renderer.updateDisplay(false);
+
+    try testing.expectEqualSlices(u8, &first, h.renderer.epd_buffer);
+}
+
+test "the warning leaves everything above the status bar alone" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.packBmpBuffer();
+    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const above_len = display_config.STATUS_BAR_Y * row_bytes;
+    const clean_above = try testing.allocator.dupe(u8, h.renderer.bmp_buffer[0..above_len]);
+    defer testing.allocator.free(clean_above);
+
+    h.renderer.setUndervoltageWarning(true);
+    h.renderer.toggleFaultOverlay();
+    h.renderer.packBmpBuffer();
+    h.renderer.toggleFaultOverlay();
+
+    try testing.expectEqualSlices(u8, clean_above, h.renderer.bmp_buffer[0..above_len]);
+}
+
+test "no warning means no overlay at all" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.packBmpBuffer();
+    const clean = try testing.allocator.dupe(u8, h.renderer.bmp_buffer);
+    defer testing.allocator.free(clean);
+
+    h.renderer.setUndervoltageWarning(false);
+    h.renderer.toggleFaultOverlay();
+    h.renderer.packBmpBuffer();
+    h.renderer.toggleFaultOverlay();
+
+    try testing.expectEqualSlices(u8, clean, h.renderer.bmp_buffer);
 }
 
 // --- panel power state machine ----------------------------------------------

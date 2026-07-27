@@ -55,6 +55,9 @@ const App = struct {
     mqtt: ?*MqttClient = null,
     /// Monotonic timestamp of the last full (non-partial) panel refresh.
     last_full_refresh: i64 = 0,
+    /// Previous under-voltage reading, so the transition is logged once rather
+    /// than every cycle.
+    last_undervoltage: ?bool = null,
 
     fn nowSeconds(self: *App) i64 {
         return std.Io.Timestamp.now(self.io, .awake).toSeconds();
@@ -177,6 +180,32 @@ const App = struct {
         self.renderer.renderInternetStatus(connected);
     }
 
+    /// Read the firmware's under-voltage flag and surface it.
+    ///
+    /// Sustained under-voltage on a Pi with an NVMe drive risks corrupting
+    /// storage, so it is worth more than a log line: the status bar is drawn
+    /// inverted and the state is published to MQTT as a problem, where an
+    /// automation can turn it into an actual notification.
+    fn updateUndervoltage(self: *App) void {
+        const active = self.sys.getUndervoltage() orelse {
+            // No sensor on this hardware; leave the indicator off rather than
+            // claiming the supply is fine.
+            self.renderer.setUndervoltageWarning(false);
+            return;
+        };
+
+        self.renderer.setUndervoltageWarning(active);
+
+        if (self.last_undervoltage != active) {
+            if (active) {
+                log.warn("Under-voltage detected: check the power supply and cable", .{});
+            } else if (self.last_undervoltage != null) {
+                log.info("Under-voltage cleared", .{});
+            }
+            self.last_undervoltage = active;
+        }
+    }
+
     fn updateDisplay(self: *App) void {
         const now = self.nowSeconds();
         const elapsed = now - self.last_full_refresh;
@@ -218,6 +247,9 @@ const App = struct {
         publishFmt(client, "disk_usage", "{d}", .{self.sys.last_disk_usage});
         publishFmt(client, "disk_temp", "{d}", .{self.sys.last_disk_temp});
         publishFmt(client, "fan_speed", "{d}", .{self.sys.last_fan_speed});
+        if (self.last_undervoltage) |active| {
+            client.publish("undervoltage", if (active) "ON" else "OFF", false) catch {};
+        }
         // Withheld until a check has actually run, so Home Assistant is not told
         // "0 updates" on the basis of no data.
         if (self.sys.updatesCount()) |count| publishFmt(client, "apt_updates", "{d}", .{count});
@@ -340,6 +372,7 @@ pub fn main(init: std.process.Init) !u8 {
     // The APT count is repainted on the fast tick so a background check that
     // finishes mid-cycle shows up promptly.
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
+    try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
 
     try scheduler.every(slow, "ip", &app, App.updateIp);
     try scheduler.every(slow, "apt", &app, App.updateApt);

@@ -124,6 +124,10 @@ pub const SIGNAL_AREA_Y = 113; // VALUE_Y(125) - ascent(11) - 1 = 113
 /// Room for the reading itself: area ends at 195, text starts at 137.
 pub const SIGNAL_VALUE_MAX_W = 58;
 
+/// The bottom status bar as a whole, inverted to signal a hardware fault.
+pub const STATUS_BAR_Y = 113;
+pub const STATUS_BAR_H = DISPLAY_HEIGHT - STATUS_BAR_Y;
+
 pub const UPTIME_ICON_X = 197;
 pub const UPTIME_ICON_Y = 127;
 pub const UPTIME_VALUE_X = 212;

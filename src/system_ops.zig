@@ -26,6 +26,10 @@ pub const SystemOps = struct {
     cached_cpu_temp_path: ?[]const u8 = null,
     cached_disk_temp_path: ?[]const u8 = null,
     cached_fan_path: ?[]const u8 = null,
+    cached_undervoltage_path: ?[]const u8 = null,
+    /// Set once the hwmon scan has run, so hardware without the sensor is not
+    /// rescanned on every cycle.
+    undervoltage_probed: bool = false,
     /// Owns the in-flight check rather than detaching it: the task holds a
     /// pointer to this struct, which normally lives on main's stack.
     apt_check: ?std.Io.Future(void) = null,
@@ -44,6 +48,7 @@ pub const SystemOps = struct {
     last_disk_usage: u8 = 0,
     last_disk_temp: u32 = 0,
     last_fan_speed: u32 = 0,
+    last_undervoltage: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) SystemOps {
         return .{
@@ -60,7 +65,7 @@ pub const SystemOps = struct {
         // task is bounded by its own `timeout` invocations.
         self.reapAptCheck();
 
-        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path" }) |field| {
+        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path", "cached_undervoltage_path" }) |field| {
             if (@field(self, field)) |path| {
                 self.allocator.free(path);
                 @field(self, field) = null;
@@ -195,15 +200,13 @@ pub const SystemOps = struct {
         return self.last_disk_usage;
     }
 
-    /// Get disk temperature in Celsius
-    pub fn getDiskTemp(self: *SystemOps) !u32 {
-        if (self.cached_disk_temp_path) |path| {
-            self.last_disk_temp = try self.readTempFromFile(path);
-            return self.last_disk_temp;
-        }
-
+    /// Locate `file` inside the hwmon device whose name contains `sensor_name`,
+    /// writing the full path into `buf`.
+    ///
+    /// The hwmon index is assigned in probe order and is not stable across boots,
+    /// so devices have to be found by name rather than by a fixed number.
+    fn findHwmonFile(self: *SystemOps, buf: []u8, sensor_name: []const u8, file: []const u8) ?[]const u8 {
         var name_path_buf: [64]u8 = undefined;
-        var temp_path_buf: [64]u8 = undefined;
         var name_buf: [64]u8 = undefined;
 
         for (0..max_hwmon_devices) |i| {
@@ -211,18 +214,64 @@ pub const SystemOps = struct {
             const raw_name = self.readFile(name_path, &name_buf) catch continue;
             const name = std.mem.trim(u8, raw_name, &std.ascii.whitespace);
 
-            if (std.mem.find(u8, name, "nvme") == null) continue;
+            if (std.mem.find(u8, name, sensor_name) == null) continue;
 
-            const temp_path = std.fmt.bufPrint(&temp_path_buf, "/sys/class/hwmon/hwmon{d}/temp1_input", .{i}) catch continue;
-            const temp = self.readTempFromFile(temp_path) catch continue;
+            return std.fmt.bufPrint(buf, "/sys/class/hwmon/hwmon{d}/{s}", .{ i, file }) catch continue;
+        }
+        return null;
+    }
 
-            self.cached_disk_temp_path = try self.allocator.dupe(u8, temp_path);
-            self.last_disk_temp = temp;
-            return temp;
+    /// Get disk temperature in Celsius
+    pub fn getDiskTemp(self: *SystemOps) !u32 {
+        if (self.cached_disk_temp_path) |path| {
+            self.last_disk_temp = try self.readTempFromFile(path);
+            return self.last_disk_temp;
+        }
+
+        var temp_path_buf: [64]u8 = undefined;
+        if (self.findHwmonFile(&temp_path_buf, "nvme", "temp1_input")) |temp_path| {
+            if (self.readTempFromFile(temp_path)) |temp| {
+                self.cached_disk_temp_path = try self.allocator.dupe(u8, temp_path);
+                self.last_disk_temp = temp;
+                return temp;
+            } else |_| {}
         }
 
         self.last_disk_temp = 0;
         return 0; // No disk sensor found
+    }
+
+    /// Whether the firmware currently reports a low input voltage.
+    ///
+    /// Returns null on hardware without the sensor, which is every non-Raspberry
+    /// Pi and lets the caller hide the indicator entirely rather than claim the
+    /// supply is fine.
+    ///
+    /// Source is `in0_lcrit_alarm` on the `rpi_volt` hwmon device, which the
+    /// raspberrypi-hwmon driver derives from the firmware's live under-voltage
+    /// flag — not the sticky "has occurred since boot" one. A dip shorter than
+    /// the poll interval is therefore missed; sustained under-voltage, which is
+    /// the case that corrupts storage, is not.
+    pub fn getUndervoltage(self: *SystemOps) ?bool {
+        if (self.cached_undervoltage_path) |path| {
+            const alarm = self.readIntFromFile(path) catch return null;
+            self.last_undervoltage = alarm != 0;
+            return self.last_undervoltage;
+        }
+
+        if (self.undervoltage_probed) return null;
+        self.undervoltage_probed = true;
+
+        var path_buf: [64]u8 = undefined;
+        const path = self.findHwmonFile(&path_buf, "rpi_volt", "in0_lcrit_alarm") orelse {
+            log.debug("No rpi_volt sensor; under-voltage reporting disabled", .{});
+            return null;
+        };
+
+        const alarm = self.readIntFromFile(path) catch return null;
+        self.cached_undervoltage_path = self.allocator.dupe(u8, path) catch return null;
+        self.last_undervoltage = alarm != 0;
+        return self.last_undervoltage;
     }
 
     /// Get system uptime in days, hours, and minutes
