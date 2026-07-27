@@ -79,19 +79,25 @@ zig build golden
 ### Panel simulator
 
 The daemon itself only runs on Linux, but the whole rendering path is host-
-independent. `zig build sim` runs the real renderer against the fake transport
-and serves a live preview, so layout work needs no hardware:
+independent: the renderer is generic over its transport, which is what the
+golden test already relies on. The simulator drives that same path against the
+recorder and shows the result, so layout work needs no hardware:
 
 ```bash
 zig build sim
 ```
 
-Then open <http://127.0.0.1:8390>. The page shows the panel at 3x with pixels
-left unsmoothed, refreshing once a second. Metrics are synthesized as smooth
-functions of time to walk every slot through its formatting — traffic sweeps
-several orders of magnitude so each unit appears, the signal reading crosses the
-width where it drops its `dBm` suffix — and the fault overlay flares for six
-seconds out of every thirty so the inverted status bar can be checked too.
+On macOS that opens a native window. Elsewhere — and with `zig build sim-web`
+anywhere — it serves the frame at <http://127.0.0.1:8390> instead. Both show the
+panel magnified 3x with pixels left unsmoothed, and both go through the same
+export the daemon uses, so the fault overlay appears exactly as it would on the
+glass.
+
+Metrics are synthesized as smooth functions of time, which walks every slot
+through its own formatting without anyone driving it: traffic sweeps several
+orders of magnitude so each unit appears, the signal reading crosses the width
+where it drops its `dBm` suffix, and the fault overlay flares for six seconds
+out of every thirty so the inverted status bar can be checked too.
 
 ### Regenerating fonts
 
@@ -126,7 +132,9 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   transport; `fake_transport.zig` is the recorder the tests drive it with.
 - `src/syscall.zig`: Interpreting raw Linux syscall returns (see the module comment).
 - `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
-- `src/sim.zig`, `src/sim_page.html`: the desktop panel simulator.
+- `src/sim_frame.zig`: what the simulators draw; the front ends are
+  `src/sim_native.zig` (macOS window) and `src/sim_web.zig` with
+  `src/sim_page.html` (served preview).
 
 ## Build Instructions
 

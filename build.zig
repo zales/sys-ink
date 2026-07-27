@@ -76,19 +76,34 @@ pub fn build(b: *std.Build) void {
     const golden_step = b.step("golden", "Regenerate the golden reference frame");
     golden_step.dependOn(&run_golden.step);
 
-    // Desktop simulator: the real renderer against the fake transport, served
-    // as a live preview in a browser. Runs anywhere the tests run.
-    const sim = b.addExecutable(.{
-        .name = "sys-ink-sim",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sim.zig"),
+    // Desktop simulator: the real renderer against the fake transport, showing
+    // what the panel would show. A native window where there is one, and an
+    // HTTP-served preview everywhere else.
+    const sim_web_module = b.createModule(.{
+        .root_source_file = b.path("src/sim_web.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    const sim_web = b.addExecutable(.{ .name = "sys-ink-sim-web", .root_module = sim_web_module });
+    const run_sim_web = b.addRunArtifact(sim_web);
+
+    const sim_web_step = b.step("sim-web", "Serve a panel preview at http://127.0.0.1:8390");
+    sim_web_step.dependOn(&run_sim_web.step);
+
+    const sim_step = b.step("sim", "Show the panel in a window (HTTP preview off macOS)");
+    if (b.graph.host.result.os.tag == .macos) {
+        const sim_native_module = b.createModule(.{
+            .root_source_file = b.path("src/sim_native.zig"),
             .target = b.graph.host,
             .optimize = .Debug,
             .link_libc = true,
-        }),
-    });
+        });
+        sim_native_module.linkFramework("Cocoa", .{});
 
-    const run_sim = b.addRunArtifact(sim);
-    const sim_step = b.step("sim", "Serve a live panel preview at http://127.0.0.1:8390");
-    sim_step.dependOn(&run_sim.step);
+        const sim_native = b.addExecutable(.{ .name = "sys-ink-sim", .root_module = sim_native_module });
+        sim_step.dependOn(&b.addRunArtifact(sim_native).step);
+    } else {
+        sim_step.dependOn(&run_sim_web.step);
+    }
 }
