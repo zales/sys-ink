@@ -394,8 +394,8 @@ test "font lookup finds every glyph in the table" {
 
 test "font glyph tables are sorted for binary search" {
     const fonts = [_]*const font_data.Font{
-        &font_data.ubuntu_14,  &font_data.ubuntu_20,   &font_data.ubuntu_24,
-        &font_data.ubuntu_26,  &font_data.ubuntu_34,   &font_data.material_14,
+        &font_data.ubuntu_14,   &font_data.ubuntu_20,   &font_data.ubuntu_24,
+        &font_data.ubuntu_26,   &font_data.ubuntu_34,   &font_data.material_14,
         &font_data.material_24, &font_data.material_50,
     };
     for (fonts) |font| {

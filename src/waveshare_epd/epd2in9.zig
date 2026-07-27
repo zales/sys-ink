@@ -116,349 +116,349 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
     comptime std.debug.assert(panel.width % 8 == 0);
 
     return struct {
-    const Self = @This();
+        const Self = @This();
 
-    /// One frame for this panel. Sized from the spec, so a buffer of the wrong
-    /// length cannot be passed in.
-    pub const PanelFrame = [panel.bufferSize()]u8;
+        /// One frame for this panel. Sized from the spec, so a buffer of the wrong
+        /// length cannot be passed in.
+        pub const PanelFrame = [panel.bufferSize()]u8;
 
-    config: *Transport,
+        config: *Transport,
 
-    /// Argument to DISPLAY_UPDATE_CONTROL_2, which selects what the next
-    /// MASTER_ACTIVATION actually does.
-    ///
-    /// Left as opaque values on purpose: 0x22 is a bitfield in the SSD1680, but
-    /// the published bit assignments disagree between sources and these three
-    /// values are the ones Waveshare's reference uses and that are verified
-    /// working on this panel. Naming individual bits from guesswork would read
-    /// as authoritative while being wrong.
-    const DisplayUpdate = enum(u8) {
-        /// Full waveform: repaints every pixel, which is what makes it flash.
-        full = 0xC7,
-        /// Weak waveform, applied only where the frame differs from the
-        /// reference in the base RAM.
-        partial = 0x0F,
-        /// Clock and analog on, without activating an update — so it cannot
-        /// disturb the glass.
-        power_on = 0xC0,
-    };
+        /// Argument to DISPLAY_UPDATE_CONTROL_2, which selects what the next
+        /// MASTER_ACTIVATION actually does.
+        ///
+        /// Left as opaque values on purpose: 0x22 is a bitfield in the SSD1680, but
+        /// the published bit assignments disagree between sources and these three
+        /// values are the ones Waveshare's reference uses and that are verified
+        /// working on this panel. Naming individual bits from guesswork would read
+        /// as authoritative while being wrong.
+        const DisplayUpdate = enum(u8) {
+            /// Full waveform: repaints every pixel, which is what makes it flash.
+            full = 0xC7,
+            /// Weak waveform, applied only where the frame differs from the
+            /// reference in the base RAM.
+            partial = 0x0F,
+            /// Clock and analog on, without activating an update — so it cannot
+            /// disturb the glass.
+            power_on = 0xC0,
+        };
 
-    // Command sets as strict Enum
-    const Command = enum(u8) {
-        DRIVER_OUTPUT_CONTROL = 0x01,
-        DEEP_SLEEP_MODE = 0x10,
-        DATA_ENTRY_MODE = 0x11,
-        SW_RESET = 0x12,
-        MASTER_ACTIVATION = 0x20,
-        DISPLAY_UPDATE_CONTROL_1 = 0x21,
-        DISPLAY_UPDATE_CONTROL_2 = 0x22,
-        WRITE_RAM = 0x24,
-        WRITE_RAM_BASE = 0x26,
-        WRITE_VCOM_REGISTER = 0x2C,
-        WRITE_LUT_REGISTER = 0x32,
-        WRITE_OTP_SELECTION = 0x37,
-        BORDER_WAVEFORM_CONTROL = 0x3C,
-        SET_RAM_X_ADDRESS_START_END_POSITION = 0x44,
-        SET_RAM_Y_ADDRESS_START_END_POSITION = 0x45,
-        SET_RAM_X_ADDRESS_COUNTER = 0x4E,
-        SET_RAM_Y_ADDRESS_COUNTER = 0x4F,
-        GATE_DRIVING_VOLTAGE_CONTROL = 0x03,
-        SOURCE_DRIVING_VOLTAGE_CONTROL = 0x04,
-        // 0x3F is often undocumented or specific LUT/Power setting
-        WRITE_VCOM_REGISTER_OPT = 0x3F,
-        NOP = 0x7F,
-    };
+        // Command sets as strict Enum
+        const Command = enum(u8) {
+            DRIVER_OUTPUT_CONTROL = 0x01,
+            DEEP_SLEEP_MODE = 0x10,
+            DATA_ENTRY_MODE = 0x11,
+            SW_RESET = 0x12,
+            MASTER_ACTIVATION = 0x20,
+            DISPLAY_UPDATE_CONTROL_1 = 0x21,
+            DISPLAY_UPDATE_CONTROL_2 = 0x22,
+            WRITE_RAM = 0x24,
+            WRITE_RAM_BASE = 0x26,
+            WRITE_VCOM_REGISTER = 0x2C,
+            WRITE_LUT_REGISTER = 0x32,
+            WRITE_OTP_SELECTION = 0x37,
+            BORDER_WAVEFORM_CONTROL = 0x3C,
+            SET_RAM_X_ADDRESS_START_END_POSITION = 0x44,
+            SET_RAM_Y_ADDRESS_START_END_POSITION = 0x45,
+            SET_RAM_X_ADDRESS_COUNTER = 0x4E,
+            SET_RAM_Y_ADDRESS_COUNTER = 0x4F,
+            GATE_DRIVING_VOLTAGE_CONTROL = 0x03,
+            SOURCE_DRIVING_VOLTAGE_CONTROL = 0x04,
+            // 0x3F is often undocumented or specific LUT/Power setting
+            WRITE_VCOM_REGISTER_OPT = 0x3F,
+            NOP = 0x7F,
+        };
 
-    pub fn init(config: *Transport) Self {
-        return .{ .config = config };
-    }
-
-    /// Hardware reset - V2 uses 10ms delays
-    fn reset(self: *Self) !void {
-        try self.config.digitalWrite(Transport.RST_PIN, 1);
-        self.config.delayMs(10);
-        try self.config.digitalWrite(Transport.RST_PIN, 0);
-        self.config.delayMs(2);
-        try self.config.digitalWrite(Transport.RST_PIN, 1);
-        self.config.delayMs(10);
-    }
-
-    // Each spiWrite is one write() to /dev/spidev, and the kernel frames every
-    // write with its own chip-select assertion. DC therefore only has to be
-    // correct before the call; the driver never touches CS itself.
-
-    /// Send command byte
-    fn sendCommand(self: *Self, command: Command) !void {
-        try self.config.digitalWrite(Transport.DC_PIN, 0);
-        try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
-    }
-
-    /// Send a command followed by its arguments, as two framed transfers.
-    fn sendCommandArgs(self: *Self, command: Command, args: []const u8) !void {
-        try self.config.digitalWrite(Transport.DC_PIN, 0);
-        try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
-
-        if (args.len > 0) {
-            try self.config.digitalWrite(Transport.DC_PIN, 1);
-            try self.config.spiWrite(args);
+        pub fn init(config: *Transport) Self {
+            return .{ .config = config };
         }
-    }
 
-    /// Send single data byte
-    fn sendData(self: *Self, data: u8) !void {
-        try self.config.digitalWrite(Transport.DC_PIN, 1);
-        try self.config.spiWrite(&[_]u8{data});
-    }
+        /// Hardware reset - V2 uses 10ms delays
+        fn reset(self: *Self) !void {
+            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            self.config.delayMs(10);
+            try self.config.digitalWrite(Transport.RST_PIN, 0);
+            self.config.delayMs(2);
+            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            self.config.delayMs(10);
+        }
 
-    /// Send multiple data bytes
-    fn sendDataSlice(self: *Self, data: []const u8) !void {
-        try self.config.digitalWrite(Transport.DC_PIN, 1);
-        try self.config.spiWrite(data);
-    }
+        // Each spiWrite is one write() to /dev/spidev, and the kernel frames every
+        // write with its own chip-select assertion. DC therefore only has to be
+        // correct before the call; the driver never touches CS itself.
 
-    /// Longest a refresh may keep BUSY asserted before we give up on the panel.
-    pub const busy_timeout_ms: u64 = 5000;
-    /// Interval between BUSY samples while waiting.
-    const busy_poll_ms: u64 = 2;
+        /// Send command byte
+        fn sendCommand(self: *Self, command: Command) !void {
+            try self.config.digitalWrite(Transport.DC_PIN, 0);
+            try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
+        }
 
-    /// Wait until the BUSY line goes LOW.
-    /// V2: LOW (0) = IDLE, HIGH (1) = BUSY.
-    ///
-    /// Polled rather than waited on. The chardev ABI can deliver a falling-edge
-    /// event instead, replacing roughly a thousand ioctls per full refresh with
-    /// one poll; the obvious race (the edge passing between arming the event and
-    /// blocking on it) is avoidable by sampling the level once after arming.
-    /// It stays polled because at a 30-second cadence this averages a few dozen
-    /// ioctls per second, and switching would change the behaviour of working
-    /// hardware for no measurable gain.
-    fn readBusy(self: *Self) !void {
-        log.debug("e-Paper busy", .{});
+        /// Send a command followed by its arguments, as two framed transfers.
+        fn sendCommandArgs(self: *Self, command: Command, args: []const u8) !void {
+            try self.config.digitalWrite(Transport.DC_PIN, 0);
+            try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
 
-        const start_ms = self.config.monotonicMillis();
-
-        while (try self.config.digitalRead(Transport.BUSY_PIN) == 1) {
-            // Reported, not logged: the caller decides how loudly to complain,
-            // and the elapsed time is always just over the timeout anyway.
-            if (self.config.monotonicMillis() -| start_ms > busy_timeout_ms) {
-                return error.EpdBusyTimeout;
+            if (args.len > 0) {
+                try self.config.digitalWrite(Transport.DC_PIN, 1);
+                try self.config.spiWrite(args);
             }
-            self.config.delayMs(busy_poll_ms);
         }
 
-        log.debug("e-Paper busy release", .{});
-    }
+        /// Send single data byte
+        fn sendData(self: *Self, data: u8) !void {
+            try self.config.digitalWrite(Transport.DC_PIN, 1);
+            try self.config.spiWrite(&[_]u8{data});
+        }
 
-    /// Load LUT (first 153 bytes only) - from C reference
-    fn loadLut(self: *Self, lut: []const u8) !void {
-        try self.sendCommand(.WRITE_LUT_REGISTER);
-        try self.sendDataSlice(lut[0..153]);
-    }
+        /// Send multiple data bytes
+        fn sendDataSlice(self: *Self, data: []const u8) !void {
+            try self.config.digitalWrite(Transport.DC_PIN, 1);
+            try self.config.spiWrite(data);
+        }
 
-    /// Load LUT with voltage settings - from C reference
-    fn loadLutByHost(self: *Self, lut: []const u8) !void {
-        try self.loadLut(lut);
+        /// Longest a refresh may keep BUSY asserted before we give up on the panel.
+        pub const busy_timeout_ms: u64 = 5000;
+        /// Interval between BUSY samples while waiting.
+        const busy_poll_ms: u64 = 2;
 
-        try self.sendCommand(.WRITE_VCOM_REGISTER_OPT); // 0x3f
-        try self.sendData(lut[153]);
+        /// Wait until the BUSY line goes LOW.
+        /// V2: LOW (0) = IDLE, HIGH (1) = BUSY.
+        ///
+        /// Polled rather than waited on. The chardev ABI can deliver a falling-edge
+        /// event instead, replacing roughly a thousand ioctls per full refresh with
+        /// one poll; the obvious race (the edge passing between arming the event and
+        /// blocking on it) is avoidable by sampling the level once after arming.
+        /// It stays polled because at a 30-second cadence this averages a few dozen
+        /// ioctls per second, and switching would change the behaviour of working
+        /// hardware for no measurable gain.
+        fn readBusy(self: *Self) !void {
+            log.debug("e-Paper busy", .{});
 
-        try self.sendCommand(.GATE_DRIVING_VOLTAGE_CONTROL); // 0x03
-        try self.sendData(lut[154]);
+            const start_ms = self.config.monotonicMillis();
 
-        try self.sendCommand(.SOURCE_DRIVING_VOLTAGE_CONTROL); // 0x04
-        try self.sendData(lut[155]); // VSH
-        try self.sendData(lut[156]); // VSH2
-        try self.sendData(lut[157]); // VSL
+            while (try self.config.digitalRead(Transport.BUSY_PIN) == 1) {
+                // Reported, not logged: the caller decides how loudly to complain,
+                // and the elapsed time is always just over the timeout anyway.
+                if (self.config.monotonicMillis() -| start_ms > busy_timeout_ms) {
+                    return error.EpdBusyTimeout;
+                }
+                self.config.delayMs(busy_poll_ms);
+            }
 
-        try self.sendCommand(.WRITE_VCOM_REGISTER);
-        try self.sendData(lut[158]);
-    }
+            log.debug("e-Paper busy release", .{});
+        }
 
-    /// Setting the display window
-    fn setWindows(self: *Self, x_start: u16, y_start: u16, x_end: u16, y_end: u16) !void {
-        const data = [_]u8{
-            @intCast((x_start >> 3) & 0xFF),
-            @intCast((x_end >> 3) & 0xFF),
-        };
-        try self.sendCommandArgs(.SET_RAM_X_ADDRESS_START_END_POSITION, &data);
+        /// Load LUT (first 153 bytes only) - from C reference
+        fn loadLut(self: *Self, lut: []const u8) !void {
+            try self.sendCommand(.WRITE_LUT_REGISTER);
+            try self.sendDataSlice(lut[0..153]);
+        }
 
-        const data_y = [_]u8{
-            @intCast(y_start & 0xFF),
-            @intCast((y_start >> 8) & 0xFF),
-            @intCast(y_end & 0xFF),
-            @intCast((y_end >> 8) & 0xFF),
-        };
-        try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_START_END_POSITION, &data_y);
-    }
+        /// Load LUT with voltage settings - from C reference
+        fn loadLutByHost(self: *Self, lut: []const u8) !void {
+            try self.loadLut(lut);
 
-    /// Set Cursor
-    fn setCursor(self: *Self, x_start: u16, y_start: u16) !void {
-        try self.sendCommand(.SET_RAM_X_ADDRESS_COUNTER);
-        try self.sendData(@intCast((x_start >> 3) & 0xFF));
+            try self.sendCommand(.WRITE_VCOM_REGISTER_OPT); // 0x3f
+            try self.sendData(lut[153]);
 
-        const data_y = [_]u8{
-            @intCast(y_start & 0xFF),
-            @intCast((y_start >> 8) & 0xFF),
-        };
-        try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_COUNTER, &data_y);
-    }
+            try self.sendCommand(.GATE_DRIVING_VOLTAGE_CONTROL); // 0x03
+            try self.sendData(lut[154]);
 
-    /// Select what the next MASTER_ACTIVATION will do.
-    fn setDisplayUpdate(self: *Self, mode: DisplayUpdate) !void {
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@intFromEnum(mode)});
-    }
+            try self.sendCommand(.SOURCE_DRIVING_VOLTAGE_CONTROL); // 0x04
+            try self.sendData(lut[155]); // VSH
+            try self.sendData(lut[156]); // VSH2
+            try self.sendData(lut[157]); // VSL
 
-    /// Drive a full refresh: every pixel is repainted with the full waveform,
-    /// which is what makes it flash.
-    fn turnOnDisplay(self: *Self) !void {
-        try self.setDisplayUpdate(.full);
-        try self.sendCommand(.MASTER_ACTIVATION);
-        try self.readBusy();
-    }
+            try self.sendCommand(.WRITE_VCOM_REGISTER);
+            try self.sendData(lut[158]);
+        }
 
-    /// Drive a partial refresh: only pixels differing from the reference frame
-    /// are touched, with a waveform weak enough not to flash.
-    fn turnOnDisplayPartial(self: *Self) !void {
-        try self.setDisplayUpdate(.partial);
-        try self.sendCommand(.MASTER_ACTIVATION);
-        try self.readBusy();
-    }
+        /// Setting the display window
+        fn setWindows(self: *Self, x_start: u16, y_start: u16, x_end: u16, y_end: u16) !void {
+            const data = [_]u8{
+                @intCast((x_start >> 3) & 0xFF),
+                @intCast((x_end >> 3) & 0xFF),
+            };
+            try self.sendCommandArgs(.SET_RAM_X_ADDRESS_START_END_POSITION, &data);
 
-    /// Re-initialize the e-Paper register (without module init)
-    pub fn reInit(self: *Self) !void {
-        try self.reset();
-        self.config.delayMs(100);
+            const data_y = [_]u8{
+                @intCast(y_start & 0xFF),
+                @intCast((y_start >> 8) & 0xFF),
+                @intCast(y_end & 0xFF),
+                @intCast((y_end >> 8) & 0xFF),
+            };
+            try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_START_END_POSITION, &data_y);
+        }
 
-        try self.readBusy();
+        /// Set Cursor
+        fn setCursor(self: *Self, x_start: u16, y_start: u16) !void {
+            try self.sendCommand(.SET_RAM_X_ADDRESS_COUNTER);
+            try self.sendData(@intCast((x_start >> 3) & 0xFF));
 
-        try self.sendCommand(.SW_RESET);
-        try self.readBusy();
+            const data_y = [_]u8{
+                @intCast(y_start & 0xFF),
+                @intCast((y_start >> 8) & 0xFF),
+            };
+            try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_COUNTER, &data_y);
+        }
 
-        try self.sendCommandArgs(.DRIVER_OUTPUT_CONTROL, &panel.driverOutputControl());
-        try self.sendCommandArgs(.DATA_ENTRY_MODE, &[_]u8{0x03});
+        /// Select what the next MASTER_ACTIVATION will do.
+        fn setDisplayUpdate(self: *Self, mode: DisplayUpdate) !void {
+            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@intFromEnum(mode)});
+        }
 
-        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
+        /// Drive a full refresh: every pixel is repainted with the full waveform,
+        /// which is what makes it flash.
+        fn turnOnDisplay(self: *Self) !void {
+            try self.setDisplayUpdate(.full);
+            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.readBusy();
+        }
 
-        try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_1, &[_]u8{ 0x00, 0x80 });
+        /// Drive a partial refresh: only pixels differing from the reference frame
+        /// are touched, with a waveform weak enough not to flash.
+        fn turnOnDisplayPartial(self: *Self) !void {
+            try self.setDisplayUpdate(.partial);
+            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.readBusy();
+        }
 
-        try self.setCursor(0, 0);
-        try self.readBusy();
+        /// Re-initialize the e-Paper register (without module init)
+        pub fn reInit(self: *Self) !void {
+            try self.reset();
+            self.config.delayMs(100);
 
-        try self.loadLutByHost(panel.lut_full);
-    }
+            try self.readBusy();
 
-    /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
-    pub fn initDisplay(self: *Self) !void {
-        try self.config.moduleInit();
-        try self.reInit();
-    }
+            try self.sendCommand(.SW_RESET);
+            try self.readBusy();
 
-    /// Fill both RAM banks with `color` and refresh.
-    ///
-    /// Written in one go per bank: spiWrite already splits at the spidev
-    /// transfer limit, so the old 128-byte loop just multiplied the syscalls.
-    pub fn clear(self: *Self, color: u8) !void {
-        var frame: PanelFrame = undefined;
-        @memset(&frame, color);
+            try self.sendCommandArgs(.DRIVER_OUTPUT_CONTROL, &panel.driverOutputControl());
+            try self.sendCommandArgs(.DATA_ENTRY_MODE, &[_]u8{0x03});
 
-        try self.sendCommand(.WRITE_RAM);
-        try self.sendDataSlice(&frame);
+            try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
 
-        try self.sendCommand(.WRITE_RAM_BASE);
-        try self.sendDataSlice(&frame);
+            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_1, &[_]u8{ 0x00, 0x80 });
 
-        try self.turnOnDisplay();
-    }
+            try self.setCursor(0, 0);
+            try self.readBusy();
 
-    /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
-    pub fn display(self: *Self, image: *const PanelFrame) !void {
-        try self.sendCommand(.WRITE_RAM);
-        try self.sendDataSlice(image);
-        try self.turnOnDisplay();
-    }
+            try self.loadLutByHost(panel.lut_full);
+        }
 
-    /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
-    pub fn displayBase(self: *Self, image: *const PanelFrame) !void {
-        try self.sendCommand(.WRITE_RAM); // Write to black RAM
-        try self.sendDataSlice(image);
+        /// Initialize the e-Paper register - from C reference EPD_2IN9_V2_Init
+        pub fn initDisplay(self: *Self) !void {
+            try self.config.moduleInit();
+            try self.reInit();
+        }
 
-        try self.sendCommand(.WRITE_RAM_BASE); // Write to base RAM
-        try self.sendDataSlice(image);
+        /// Fill both RAM banks with `color` and refresh.
+        ///
+        /// Written in one go per bank: spiWrite already splits at the spidev
+        /// transfer limit, so the old 128-byte loop just multiplied the syscalls.
+        pub fn clear(self: *Self, color: u8) !void {
+            var frame: PanelFrame = undefined;
+            @memset(&frame, color);
 
-        try self.turnOnDisplay();
-    }
+            try self.sendCommand(.WRITE_RAM);
+            try self.sendDataSlice(&frame);
 
-    /// Soft-reset and arm the panel for a partial update: partial LUT, border
-    /// waveform and analog power-up. Drives nothing, so it cannot flicker.
-    ///
-    /// The RST pulse resets the registers but leaves both RAM banks intact —
-    /// which is why partial updates work at all, given this runs before each one.
-    fn beginPartial(self: *Self) !void {
-        // Reset (from C reference - only 1ms delays)
-        try self.config.digitalWrite(Transport.RST_PIN, 0);
-        self.config.delayMs(1);
-        try self.config.digitalWrite(Transport.RST_PIN, 1);
-        self.config.delayMs(2);
+            try self.sendCommand(.WRITE_RAM_BASE);
+            try self.sendDataSlice(&frame);
 
-        // Load partial LUT
-        try self.loadLut(panel.lut_partial);
+            try self.turnOnDisplay();
+        }
 
-        // WriteOtpSelection (0x37 in C, not 0x2F!)
-        try self.sendCommandArgs(.WRITE_OTP_SELECTION, &[_]u8{
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-        });
+        /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
+        pub fn display(self: *Self, image: *const PanelFrame) !void {
+            try self.sendCommand(.WRITE_RAM);
+            try self.sendDataSlice(image);
+            try self.turnOnDisplay();
+        }
 
-        // Border waveform control
-        try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
+        /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
+        pub fn displayBase(self: *Self, image: *const PanelFrame) !void {
+            try self.sendCommand(.WRITE_RAM); // Write to black RAM
+            try self.sendDataSlice(image);
 
-        // Display update control: clock and analog on, no display activation.
-        try self.setDisplayUpdate(.power_on);
-        try self.sendCommand(.MASTER_ACTIVATION);
-        try self.readBusy();
-    }
+            try self.sendCommand(.WRITE_RAM_BASE); // Write to base RAM
+            try self.sendDataSlice(image);
 
-    /// Overwrite the base RAM (0x26) with `image` without driving the panel.
-    ///
-    /// Partial updates render the difference between the new frame in 0x24 and
-    /// this reference. Deep sleep loses it, so it has to be restored from the
-    /// frame the caller knows is on the panel — otherwise the next partial
-    /// update tries to repaint everything with a waveform too weak for it, and
-    /// smears the old content instead.
-    ///
-    /// Must be called straight after `reInit`, before any partial update begins:
-    /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
-    /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
-    /// Verified on a 2.9" V2 panel — priming afterwards smears.
-    pub fn primeBase(self: *Self, image: *const PanelFrame) !void {
-        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
-        try self.setCursor(0, 0);
-        try self.sendCommand(.WRITE_RAM_BASE);
-        try self.sendDataSlice(image);
-    }
+            try self.turnOnDisplay();
+        }
 
-    /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
-    pub fn displayPartial(self: *Self, image: *const PanelFrame) !void {
-        try self.beginPartial();
+        /// Soft-reset and arm the panel for a partial update: partial LUT, border
+        /// waveform and analog power-up. Drives nothing, so it cannot flicker.
+        ///
+        /// The RST pulse resets the registers but leaves both RAM banks intact —
+        /// which is why partial updates work at all, given this runs before each one.
+        fn beginPartial(self: *Self) !void {
+            // Reset (from C reference - only 1ms delays)
+            try self.config.digitalWrite(Transport.RST_PIN, 0);
+            self.config.delayMs(1);
+            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            self.config.delayMs(2);
 
-        // Reset window to full frame
-        try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
-        try self.setCursor(0, 0);
+            // Load partial LUT
+            try self.loadLut(panel.lut_partial);
 
-        // Write to RAM (only 0x24, NOT 0x26!)
-        try self.sendCommand(.WRITE_RAM);
-        try self.sendDataSlice(image);
+            // WriteOtpSelection (0x37 in C, not 0x2F!)
+            try self.sendCommandArgs(.WRITE_OTP_SELECTION, &[_]u8{
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+            });
 
-        try self.turnOnDisplayPartial();
-    }
+            // Border waveform control
+            try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
 
-    /// Enter deep sleep - from C reference EPD_2IN9_V2_Sleep.
-    ///
-    /// Waveshare requires this before cutting power; leaving the panel driven at
-    /// high voltage shortens its life. Waking up afterwards needs a full
-    /// `initDisplay`, so this is a shutdown-only call.
-    pub fn sleep(self: *Self) !void {
-        try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{deep_sleep_mode_1});
-        self.config.delayMs(100);
-    }
+            // Display update control: clock and analog on, no display activation.
+            try self.setDisplayUpdate(.power_on);
+            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.readBusy();
+        }
+
+        /// Overwrite the base RAM (0x26) with `image` without driving the panel.
+        ///
+        /// Partial updates render the difference between the new frame in 0x24 and
+        /// this reference. Deep sleep loses it, so it has to be restored from the
+        /// frame the caller knows is on the panel — otherwise the next partial
+        /// update tries to repaint everything with a waveform too weak for it, and
+        /// smears the old content instead.
+        ///
+        /// Must be called straight after `reInit`, before any partial update begins:
+        /// once that sequence powers up the analog stage (0x22 = 0xC0 followed by
+        /// MASTER_ACTIVATION) the reference is latched and a later write is ignored.
+        /// Verified on a 2.9" V2 panel — priming afterwards smears.
+        pub fn primeBase(self: *Self, image: *const PanelFrame) !void {
+            try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
+            try self.setCursor(0, 0);
+            try self.sendCommand(.WRITE_RAM_BASE);
+            try self.sendDataSlice(image);
+        }
+
+        /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
+        pub fn displayPartial(self: *Self, image: *const PanelFrame) !void {
+            try self.beginPartial();
+
+            // Reset window to full frame
+            try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
+            try self.setCursor(0, 0);
+
+            // Write to RAM (only 0x24, NOT 0x26!)
+            try self.sendCommand(.WRITE_RAM);
+            try self.sendDataSlice(image);
+
+            try self.turnOnDisplayPartial();
+        }
+
+        /// Enter deep sleep - from C reference EPD_2IN9_V2_Sleep.
+        ///
+        /// Waveshare requires this before cutting power; leaving the panel driven at
+        /// high voltage shortens its life. Waking up afterwards needs a full
+        /// `initDisplay`, so this is a shutdown-only call.
+        pub fn sleep(self: *Self) !void {
+            try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{deep_sleep_mode_1});
+            self.config.delayMs(100);
+        }
     };
 }
 
@@ -471,9 +471,9 @@ const deep_sleep_mode_1 = 0x01;
 /// driver never touches it.
 fn verifyTransport(comptime T: type) void {
     const required = [_][]const u8{
-        "RST_PIN",     "DC_PIN",          "BUSY_PIN",
-        "delayMs",     "monotonicMillis", "moduleInit",
-        "digitalWrite", "digitalRead",    "spiWrite",
+        "RST_PIN",      "DC_PIN",          "BUSY_PIN",
+        "delayMs",      "monotonicMillis", "moduleInit",
+        "digitalWrite", "digitalRead",     "spiWrite",
     };
     for (required) |name| {
         if (!@hasDecl(T, name)) @compileError(

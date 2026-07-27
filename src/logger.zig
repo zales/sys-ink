@@ -99,8 +99,8 @@ pub fn logFn(
     nosuspend {
         if (use_color) {
             std.debug.print("{s}[{d:0>2}:{d:0>2}:{d:0>2}]{s} [{s}{s}{s}] " ++ scope_prefix, .{
-                gray,  clock.hours,     clock.minutes, clock.seconds,
-                reset, color,           @tagName(level), reset,
+                gray,  clock.hours, clock.minutes,   clock.seconds,
+                reset, color,       @tagName(level), reset,
             });
         } else {
             std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] [{s}] " ++ scope_prefix, .{

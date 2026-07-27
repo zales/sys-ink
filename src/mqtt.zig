@@ -75,7 +75,6 @@ pub const MqttClient = struct {
     /// timeout, around two minutes.
     const connect_timeout_ms = 5000;
 
-
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
 
