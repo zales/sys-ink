@@ -27,6 +27,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ioctl with no external tools, surfaced the same three ways, plus an SSD wear
   sensor. Requires root; unprivileged runs disable it silently.
 
+## [1.6.0] — 2026-07-27
+
+### Added
+- Under-voltage warning. The Pi's `rpi_volt` hwmon sensor is polled, and a
+  brown-out inverts the panel's status bar and raises a Home Assistant
+  `binary_sensor` with `device_class: problem`. On hardware without the sensor
+  the feature disables itself with a log line.
+- NVMe SMART critical warnings. The SMART/Health log page is read directly via
+  the admin-command ioctl — no `smartctl` dependency — and any critical warning
+  bit (spare capacity, temperature, reliability, read-only, volatile-memory
+  backup) raises the same panel and MQTT fault indications. SSD wear percentage
+  is published as its own sensor.
+- The fault overlay is part of the rendered frame, so the BMP export shows it
+  too.
+
+### Fixed
+- **Raw syscall failures were silently ignored.** Every raw syscall checked its
+  result with `std.posix.errno`, which under a libc-linked build reads libc's
+  `errno` variable — one that raw syscalls never set — and so reported success
+  unconditionally. Eight sites were affected: the GPIO ioctls, SPI configuration
+  and writes, the interrupted-sleep retry, the wake pipe, and the NVMe admin
+  command. The visible symptom: on a machine without an NVMe drive the daemon
+  decoded a SMART "critical warning" out of an uninitialised buffer and raised
+  a fault for a disk that does not exist. Error checks now apply the kernel's
+  return convention, with tests pinning the boundary.
+- The SMART page buffer is zeroed before the ioctl, so a partially completed
+  command cannot be read as drive health.
+
 ## [1.5.0] — 2026-07-25
 
 ### Added
@@ -183,6 +211,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.6.0]: https://github.com/zales/sys-ink/releases/tag/v1.6.0
 [1.5.0]: https://github.com/zales/sys-ink/releases/tag/v1.5.0
 [1.4.2]: https://github.com/zales/sys-ink/releases/tag/v1.4.2
 [1.4.1]: https://github.com/zales/sys-ink/releases/tag/v1.4.1
