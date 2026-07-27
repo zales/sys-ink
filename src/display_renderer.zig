@@ -212,6 +212,20 @@ pub fn Renderer(comptime Transport: type) type {
             if (self.warn_fault) self.invertStatusBar();
         }
 
+        /// The current frame packed to 1 bit, fault overlay included.
+        ///
+        /// For callers that want to show the frame rather than write it — the
+        /// simulators — so they do not have to turn the BMP export on and read the
+        /// file back just to get at the pixels. Borrowed: valid until the next
+        /// render.
+        pub fn packedFrame(self: *Self) []const u8 {
+            self.toggleFaultOverlay();
+            defer self.toggleFaultOverlay();
+
+            self.packBmpBuffer();
+            return self.bmp_buffer;
+        }
+
         /// Push the first frame and establish the reference for later partial updates.
         pub fn showInitialFrame(self: *Self) !void {
             self.toggleFaultOverlay();

@@ -86,6 +86,49 @@ pub fn rowStride(width: u32) u32 {
     return ((width + 31) / 32) * 4;
 }
 
+/// Bytes a serialised 1-bit BMP of these dimensions occupies.
+pub fn byteSize(width: u32, height: u32) usize {
+    return header_len + rowStride(width) * height;
+}
+
+/// One BMP row: `buffer` row `y`, inverted, padded out to the full stride.
+///
+/// The single place that knows the polarity and the padding; the streaming and
+/// in-memory writers below differ only in where the row goes.
+fn packRow(row: []u8, buffer: []const u8, y: usize, src_row_bytes: usize) void {
+    @memset(row, 0);
+
+    const src_offset = y * src_row_bytes;
+    if (src_offset + src_row_bytes <= buffer.len) {
+        // Our buffers use 1 = white; BMP palette index 0 is white, so invert.
+        for (row[0..src_row_bytes], buffer[src_offset..][0..src_row_bytes]) |*dst, src| {
+            dst.* = ~src;
+        }
+    }
+}
+
+/// Serialise a 1-bit buffer as a BMP into `dest`, returning the part written.
+///
+/// `buffer` is row-major, 8 pixels per byte, MSB first, 1 = white. Exists so a
+/// caller that wants the bytes — a preview handing them straight to a client —
+/// does not have to write a file and read it back.
+pub fn serialize(dest: []u8, buffer: []const u8, width: u32, height: u32) error{ ImageTooWide, NoSpaceLeft }![]u8 {
+    const stride = rowStride(width);
+    if (stride > max_stride) return error.ImageTooWide;
+
+    const total = byteSize(width, height);
+    if (dest.len < total) return error.NoSpaceLeft;
+
+    dest[0..header_len].* = buildHeader(width, height);
+
+    const src_row_bytes = (width + 7) / 8;
+    for (0..height) |y| {
+        packRow(dest[header_len + y * stride ..][0..stride], buffer, y, src_row_bytes);
+    }
+
+    return dest[0..total];
+}
+
 fn writeBmp(io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, height: u32) !void {
     const stride = rowStride(width);
     if (stride > max_stride) return error.ImageTooWide;
@@ -98,19 +141,10 @@ fn writeBmp(io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, heigh
 
     try out.writeAll(&buildHeader(width, height));
 
+    // Streamed a row at a time, so the file path needs no image-sized buffer.
     var row: [max_stride]u8 = undefined;
-    var y: u32 = 0;
-    while (y < height) : (y += 1) {
-        @memset(row[0..stride], 0);
-
-        const src_offset = y * src_row_bytes;
-        if (src_offset + src_row_bytes <= buffer.len) {
-            // Our buffers use 1 = white; BMP palette index 0 is white, so invert.
-            for (row[0..src_row_bytes], buffer[src_offset..][0..src_row_bytes]) |*dst, src| {
-                dst.* = ~src;
-            }
-        }
-
+    for (0..height) |y| {
+        packRow(row[0..stride], buffer, y, src_row_bytes);
         try out.writeAll(row[0..stride]);
     }
 
@@ -157,4 +191,49 @@ test "buildHeader palette maps index 0 to white and 1 to black" {
     const h = buildHeader(8, 8);
     try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 0 }, h[54..58]);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, h[58..62]);
+}
+
+test "serialize matches what the file writer produces" {
+    // Both go through packRow, and this is what pins them together: if either
+    // path grows its own idea of polarity or padding, the bytes diverge.
+    const width = 296;
+    const height = 128;
+    const src_row_bytes = (width + 7) / 8;
+
+    var frame: [src_row_bytes * height]u8 = undefined;
+    for (&frame, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
+
+    var buf: [byteSize(width, height)]u8 = undefined;
+    const bytes = try serialize(&buf, &frame, width, height);
+    try testing.expectEqual(byteSize(width, height), bytes.len);
+    try testing.expectEqualSlices(u8, &buildHeader(width, height), bytes[0..header_len]);
+
+    // Rebuild the same rows the streaming writer would emit.
+    const stride = rowStride(width);
+    var row: [max_stride]u8 = undefined;
+    for (0..height) |y| {
+        packRow(row[0..stride], &frame, y, src_row_bytes);
+        try testing.expectEqualSlices(u8, row[0..stride], bytes[header_len + y * stride ..][0..stride]);
+    }
+}
+
+test "serialize rejects a destination that is too small" {
+    var frame: [37 * 128]u8 = @splat(0xFF);
+    var small: [100]u8 = undefined;
+    try testing.expectError(error.NoSpaceLeft, serialize(&small, &frame, 296, 128));
+}
+
+test "the padding bytes of each row are zero" {
+    // 296 pixels need 37 bytes, padded to 40; the last three must not carry
+    // image data, or viewers show noise down the right edge.
+    const width = 296;
+    var frame: [37 * 4]u8 = @splat(0xAA);
+    var buf: [byteSize(width, 4)]u8 = undefined;
+    const bytes = try serialize(&buf, &frame, width, 4);
+
+    const stride = rowStride(width);
+    for (0..4) |y| {
+        const row = bytes[header_len + y * stride ..][0..stride];
+        try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0 }, row[37..40]);
+    }
 }

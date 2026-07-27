@@ -1,9 +1,13 @@
 //! A transport that records what the driver puts on the wire, instead of driving
 //! real hardware.
 //!
-//! Test-only, but it lives in a normal source file so both the driver's own
-//! tests and the renderer's can share it. Nothing outside a test block
-//! references it, so it is never analysed into the binary.
+//! Written for tests, but it lives in a normal source file so the driver's own
+//! tests, the renderer's, and the simulators can share it.
+//!
+//! The log is unbounded, and every SPI write is copied onto the heap — a frame
+//! is a few kilobytes, so anything that renders in a loop must call `resetLog`
+//! or grow without limit. Tests finish before that matters; the simulators found
+//! it the hard way.
 
 const std = @import("std");
 const testing = std.testing;

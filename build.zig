@@ -79,10 +79,13 @@ pub fn build(b: *std.Build) void {
     // Desktop simulator: the real renderer against the fake transport, showing
     // what the panel would show. A native window where there is one, and an
     // HTTP-served preview everywhere else.
+    // ReleaseSafe, not Debug: the debug allocator never returns pages, which
+    // makes a preview's memory look like it is leaking when it is not — a
+    // distinction that cost real time to establish once.
     const sim_web_module = b.createModule(.{
         .root_source_file = b.path("src/sim_web.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .ReleaseSafe,
         .link_libc = true,
     });
     const sim_web = b.addExecutable(.{ .name = "sys-ink-sim-web", .root_module = sim_web_module });
@@ -96,7 +99,7 @@ pub fn build(b: *std.Build) void {
         const sim_native_module = b.createModule(.{
             .root_source_file = b.path("src/sim_native.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .ReleaseSafe,
             .link_libc = true,
         });
         sim_native_module.linkFramework("Cocoa", .{});

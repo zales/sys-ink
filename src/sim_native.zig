@@ -18,7 +18,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const config = @import("config.zig");
 const sim_frame = @import("sim_frame.zig");
 const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
 
@@ -77,6 +76,10 @@ fn class(comptime name: [:0]const u8) Id {
     return objc_getClass(name) orelse @panic("Objective-C class not found: " ++ name);
 }
 
+fn newAutoreleasePool() Id {
+    return send(Msg.Ret, send(Msg.Ret, class("NSAutoreleasePool"), "alloc", .{}), "init", .{});
+}
+
 fn nsString(text: [:0]const u8) Id {
     return send(Msg.RetCString, class("NSString"), "stringWithUTF8String:", .{text.ptr});
 }
@@ -92,17 +95,18 @@ const style_closable = 1 << 1;
 const style_miniaturizable = 1 << 2;
 const backing_buffered = 2;
 const activation_policy_regular = 0;
-const image_scale_none = 3;
+const image_scale_none = 2;
 
 pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    // The renderer packs its 1-bit frame during the BMP export, inside the
-    // window where the fault overlay is applied, so reading `bmp_buffer`
-    // afterwards yields exactly what would reach the glass.
-    config.Config.export_bmp = true;
-    config.Config.bmp_export_path = "/tmp/sys-ink-sim.bmp";
+    // Cocoa hands back autoreleased objects — events, images, strings — which
+    // are only freed when a pool drains. Without one the loop grew by megabytes
+    // a second. This outer pool holds what setup creates and lives as long as
+    // the process; the loop drains its own pool every frame.
+    const setup_pool = newAutoreleasePool();
+    defer _ = send(Msg.Void, setup_pool, "drain", .{});
 
     var transport = FakeTransport.init(allocator);
     defer transport.deinit();
@@ -120,6 +124,8 @@ pub fn main(init: std.process.Init) !u8 {
     @memset(pixels, 255);
 
     // --- window ---------------------------------------------------------------
+
+    const colour_space = nsString("NSDeviceWhiteColorSpace");
 
     const app = send(Msg.Ret, class("NSApplication"), "sharedApplication", .{});
     _ = send(Msg.BoolInt, app, "setActivationPolicy:", .{@as(isize, activation_policy_regular)});
@@ -139,8 +145,18 @@ pub fn main(init: std.process.Init) !u8 {
     _ = send(Msg.Void, window, "center", .{});
 
     const image_view = send(Msg.RetRect, send(Msg.Ret, class("NSImageView"), "alloc", .{}), "initWithFrame:", .{frame});
+    // One image, built over `pixels` and kept: the representation borrows that
+    // memory rather than copying it, so each frame is a write into the buffer
+    // plus an invalidation. Rebuilding the image every frame instead leaked
+    // steadily, and there is no reason to allocate for content of a fixed size.
+    _ = send(Msg.VoidId, image_view, "setImage:", .{buildImage(colour_space, pixels.ptr, view_width, view_height)});
     // Show the frame at its true size; magnification already happened in `expand`.
     _ = send(Msg.VoidUint, image_view, "setImageScaling:", .{@as(usize, image_scale_none)});
+    // On a high-density display the view is backed by more physical pixels than
+    // the frame has, and the default filter would smooth the difference away —
+    // which is the one thing a panel preview must not do.
+    _ = send(Msg.VoidBool, image_view, "setWantsLayer:", .{@as(u8, 1)});
+    _ = send(Msg.VoidId, send(Msg.Ret, image_view, "layer", .{}), "setMagnificationFilter:", .{nsString("nearest")});
     _ = send(Msg.VoidId, window, "setContentView:", .{image_view});
     _ = send(Msg.VoidId, window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     _ = send(Msg.VoidBool, app, "activateIgnoringOtherApps:", .{@as(u8, 1)});
@@ -152,13 +168,22 @@ pub fn main(init: std.process.Init) !u8 {
     const run_loop_mode = nsString("kCFRunLoopDefaultMode");
 
     while (send(Msg.Bool, window, "isVisible", .{}) != 0) {
+        const frame_pool = newAutoreleasePool();
+        defer _ = send(Msg.Void, frame_pool, "drain", .{});
+
         const now = std.Io.Timestamp.now(io, .awake);
         const seconds = now.toSeconds();
         sim_frame.draw(&renderer, @floatFromInt(seconds), @intCast(seconds - started));
+        // The transport is a recorder with an unbounded log: without this it
+        // keeps a heap copy of every frame ever sent.
+        transport.resetLog();
         try renderer.updateDisplay(true);
 
-        sim_frame.expand(renderer.bmp_buffer, pixels, scale);
-        setImage(image_view, pixels.ptr, view_width, view_height);
+        sim_frame.expand(renderer.packedFrame(), pixels, scale);
+        // The image draws from a cache, which has to be dropped for the new
+        // contents of the borrowed buffer to be seen.
+        _ = send(Msg.Void, send(Msg.Ret, image_view, "image", .{}), "recache", .{});
+        _ = send(Msg.VoidBool, image_view, "setNeedsDisplay:", .{@as(u8, 1)});
 
         // Drain the queue so the window stays responsive without [NSApp run],
         // which would take over the thread and need a delegate to get it back.
@@ -180,11 +205,12 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-/// Wrap `pixels` in an NSImage and hand it to the view.
+/// An NSImage drawing straight from `pixels`.
 ///
 /// 8 bits per sample, one sample per pixel, no alpha: the greyscale buffer maps
-/// straight onto a device-white bitmap with no conversion.
-fn setImage(image_view: Id, pixels: [*]u8, w: usize, h: usize) void {
+/// onto a device-white bitmap with no conversion. The representation borrows the
+/// buffer, so it must outlive the image — here it lives as long as the process.
+fn buildImage(colour_space: Id, pixels: [*]u8, w: usize, h: usize) Id {
     var planes: [1][*]u8 = .{pixels};
 
     const rep = send(Msg.InitBitmap, send(Msg.Ret, class("NSBitmapImageRep"), "alloc", .{}), "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:", .{
@@ -195,17 +221,15 @@ fn setImage(image_view: Id, pixels: [*]u8, w: usize, h: usize) void {
         @as(isize, 1),
         @as(u8, 0),
         @as(u8, 0),
-        nsString("NSDeviceWhiteColorSpace"),
+        colour_space,
         @as(isize, @intCast(w)),
         @as(isize, 8),
     });
-    defer _ = send(Msg.Void, rep, "release", .{});
 
     const image = send(Msg.RetSize, send(Msg.Ret, class("NSImage"), "alloc", .{}), "initWithSize:", .{
         Size{ .width = @floatFromInt(w), .height = @floatFromInt(h) },
     });
-    defer _ = send(Msg.Void, image, "release", .{});
-
     _ = send(Msg.VoidId, image, "addRepresentation:", .{rep});
-    _ = send(Msg.VoidId, image_view, "setImage:", .{image});
+    _ = send(Msg.Void, rep, "release", .{});
+    return image;
 }
