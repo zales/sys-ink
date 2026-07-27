@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const logger = @import("logger.zig");
+const syscall = @import("syscall.zig");
 const network_ops = @import("network_ops.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
@@ -456,7 +457,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn installSignalHandlers() void {
     var fds: [2]i32 = undefined;
-    if (std.posix.errno(std.os.linux.pipe(&fds)) == .SUCCESS) {
+    if (syscall.ok(std.os.linux.pipe(&fds))) {
         wake_pipe = fds;
     } else {
         log.warn("Failed to create wake pipe; shutdown may lag by up to a second", .{});

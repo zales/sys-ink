@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const GpioNative = @import("../gpio_native.zig").GpioNative;
+const syscall = @import("../syscall.zig");
 
 const log = std.log.scoped(.epd_config);
 
@@ -84,7 +85,7 @@ pub const EpdConfig = struct {
 
     fn spiIoctl(self: *EpdConfig, request: u32, arg: usize, what: []const u8) !void {
         const rc = std.os.linux.ioctl(self.spi_fd, request, arg);
-        const err = std.posix.errno(rc);
+        const err = syscall.errno(rc);
         if (err != .SUCCESS) {
             log.err("Failed to set SPI {s}: errno={t}", .{ what, err });
             return error.SpiConfigFailed;
@@ -164,7 +165,7 @@ pub const EpdConfig = struct {
         };
         while (true) {
             const rc = std.os.linux.nanosleep(&ts, &ts);
-            if (std.posix.errno(rc) != .INTR) return;
+            if (syscall.errno(rc) != .INTR) return;
         }
     }
 
@@ -186,7 +187,7 @@ pub const EpdConfig = struct {
         while (offset < data.len) {
             const to_write = @min(data.len - offset, chunk_size);
             const rc = std.os.linux.write(self.spi_fd, data.ptr + offset, to_write);
-            const err = std.posix.errno(rc);
+            const err = syscall.errno(rc);
             switch (err) {
                 .SUCCESS => {
                     if (rc == 0) return error.SpiWriteFailed;

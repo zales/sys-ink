@@ -11,6 +11,7 @@
 
 test {
     _ = @import("parse.zig");
+    _ = @import("syscall.zig");
     _ = @import("scheduler.zig");
     _ = @import("config.zig");
     _ = @import("graphics.zig");

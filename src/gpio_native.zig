@@ -9,6 +9,7 @@
 //! commit.
 
 const std = @import("std");
+const syscall = @import("syscall.zig");
 
 pub const GpioNative = struct {
     pub const RequestType = enum { Input, Output };
@@ -25,14 +26,14 @@ pub const GpioNative = struct {
             var values = LineValues{ .bits = @intFromBool(value != 0), .mask = 1 };
 
             const rc = std.os.linux.ioctl(self.fd, LINE_SET_VALUES_IOCTL, @intFromPtr(&values));
-            if (std.posix.errno(rc) != .SUCCESS) return error.GpioSetFailed;
+            if (!syscall.ok(rc)) return error.GpioSetFailed;
         }
 
         pub fn getValue(self: Handle) !u8 {
             var values = LineValues{ .bits = 0, .mask = 1 };
 
             const rc = std.os.linux.ioctl(self.fd, LINE_GET_VALUES_IOCTL, @intFromPtr(&values));
-            if (std.posix.errno(rc) != .SUCCESS) return error.GpioGetFailed;
+            if (!syscall.ok(rc)) return error.GpioGetFailed;
 
             return @intFromBool(values.bits & 1 != 0);
         }
@@ -123,7 +124,7 @@ pub const GpioNative = struct {
         @memcpy(req.consumer[0..label.len], label);
 
         const rc = std.os.linux.ioctl(chip_fd, GET_LINE_IOCTL, @intFromPtr(&req));
-        if (std.posix.errno(rc) != .SUCCESS) return error.GpioRequestFailed;
+        if (!syscall.ok(rc)) return error.GpioRequestFailed;
 
         return .{ .fd = req.fd };
     }

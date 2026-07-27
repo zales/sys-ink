@@ -1,5 +1,6 @@
 const std = @import("std");
 const parse = @import("parse.zig");
+const syscall = @import("syscall.zig");
 
 // statfs comes from the target libc headers rather than a hand-rolled struct:
 // fsblkcnt_t is 64-bit even on 32-bit ARM, so an all-c_ulong layout reads
@@ -333,7 +334,9 @@ pub const SystemOps = struct {
         const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY }, 0) catch return null;
         defer _ = std.os.linux.close(fd);
 
-        var page: [512]u8 = undefined;
+        // Zeroed, not undefined: a partially completed command would otherwise
+        // leave stack garbage to be decoded as drive health.
+        var page = std.mem.zeroes([512]u8);
         var cmd = std.mem.zeroes(NvmePassthruCmd);
         cmd.opcode = nvme_admin_get_log_page;
         cmd.nsid = nvme_nsid_all;
@@ -343,7 +346,12 @@ pub const SystemOps = struct {
         cmd.cdw10 = ((page.len / 4 - 1) << 16) | nvme_log_smart;
 
         const rc = std.os.linux.ioctl(fd, NVME_IOCTL_ADMIN_CMD, @intFromPtr(&cmd));
-        if (std.posix.errno(rc) != .SUCCESS) return null;
+        if (!syscall.ok(rc)) {
+            // Node exists but is not a working controller: report nothing rather
+            // than a health struct decoded from a page the kernel never wrote.
+            log.debug("NVMe SMART command failed: {t}", .{syscall.errno(rc)});
+            return null;
+        }
 
         const health = parse.nvmeSmartLog(&page) catch return null;
         self.last_nvme_health = health;
