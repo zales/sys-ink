@@ -75,4 +75,20 @@ pub fn build(b: *std.Build) void {
     const run_golden = b.addRunArtifact(golden);
     const golden_step = b.step("golden", "Regenerate the golden reference frame");
     golden_step.dependOn(&run_golden.step);
+
+    // Desktop simulator: the real renderer against the fake transport, served
+    // as a live preview in a browser. Runs anywhere the tests run.
+    const sim = b.addExecutable(.{
+        .name = "sys-ink-sim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sim.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .link_libc = true,
+        }),
+    });
+
+    const run_sim = b.addRunArtifact(sim);
+    const sim_step = b.step("sim", "Serve a live panel preview at http://127.0.0.1:8390");
+    sim_step.dependOn(&run_sim.step);
 }

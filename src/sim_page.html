@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SysInk simulator</title>
+<style>
+  html, body {
+    margin: 0; height: 100%;
+    display: grid; place-items: center;
+    background: #23272e;
+    font-family: ui-monospace, monospace;
+  }
+  .device {
+    background: #e8e4dc;
+    padding: 26px 30px;
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5), inset 0 0 0 2px #d6d2c8;
+  }
+  .screen {
+    display: block;
+    width: 888px; height: 384px;   /* 296x128 at 3x */
+    image-rendering: pixelated;
+    background: #f5f3ee;
+    outline: 6px solid #1a1a1a;    /* panel border glass */
+  }
+  .label {
+    margin-top: 14px;
+    text-align: center;
+    color: #7a756a; font-size: 12px; letter-spacing: .08em;
+  }
+</style>
+</head>
+<body>
+  <div class="device">
+    <img class="screen" id="screen" alt="panel">
+    <div class="label">SYS-INK &middot; WAVESHARE 2.9&Prime; V2 SIMULATOR &middot; 296&times;128</div>
+  </div>
+  <script>
+    const screen = document.getElementById("screen");
+    function refresh() {
+      const next = new Image();
+      next.onload = () => { screen.src = next.src; };
+      next.src = "/frame.bmp?t=" + Date.now();
+    }
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>
