@@ -12,8 +12,34 @@ const std = @import("std");
 const net = std.Io.net;
 const bmp = @import("bmp.zig");
 
-/// The viewer, served at `/`.
-pub const page = @embedFile("sim_page.html");
+/// The viewer page, with `{{LABEL}}` still in it. Render it with `renderPage`.
+const page_template = @embedFile("viewer_page.html");
+
+const label_token = "{{LABEL}}";
+
+/// Longest label `renderPage` will take. Enough for the two in use, with room.
+pub const label_max = 48;
+
+/// Buffer size `renderPage` needs.
+pub const page_buffer_size = blk: {
+    // Counting occurrences at comptime walks the whole template.
+    @setEvalBranchQuota(page_template.len * 4);
+    break :blk page_template.len + label_max * std.mem.count(u8, page_template, label_token);
+};
+
+/// The viewer page with `label` substituted for every `{{LABEL}}`.
+///
+/// A template rather than two files: the daemon's preview and the simulator show
+/// the same panel through the same markup, and only the caption differs — one is
+/// the glass, the other is made up. Getting that label wrong makes a live reading
+/// look like a mock-up, which is worse than no caption at all.
+pub fn renderPage(dest: []u8, label: []const u8) []const u8 {
+    std.debug.assert(label.len <= label_max);
+    std.debug.assert(dest.len >= page_buffer_size);
+
+    _ = std.mem.replace(u8, page_template, label_token, label, dest);
+    return dest[0..std.mem.replacementSize(u8, page_template, label_token, label)];
+}
 
 pub const Request = enum {
     /// `GET /` — the page itself.
@@ -55,8 +81,9 @@ pub fn respond(
     w.flush() catch return;
 }
 
-pub fn respondPage(stream: net.Stream, io: std.Io) void {
-    respond(stream, io, "200 OK", "text/html; charset=utf-8", page);
+pub fn respondPage(stream: net.Stream, io: std.Io, label: []const u8) void {
+    var buf: [page_buffer_size]u8 = undefined;
+    respond(stream, io, "200 OK", "text/html; charset=utf-8", renderPage(&buf, label));
 }
 
 pub fn respondNotFound(stream: net.Stream, io: std.Io) void {
@@ -77,4 +104,31 @@ pub fn respondFrame(
         return;
     };
     respond(stream, io, "200 OK", "image/bmp", bytes);
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "renderPage substitutes every occurrence of the label" {
+    var buf: [page_buffer_size]u8 = undefined;
+    const rendered = renderPage(&buf, "Live panel");
+
+    // The token appears in the title and the caption; neither may survive, or a
+    // live reading is captioned as something it is not.
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, label_token));
+    try testing.expectEqual(
+        std.mem.count(u8, page_template, label_token),
+        std.mem.count(u8, rendered, "Live panel"),
+    );
+    try testing.expect(std.mem.indexOf(u8, rendered, "<title>") != null);
+}
+
+test "the buffer is large enough for the longest label" {
+    var buf: [page_buffer_size]u8 = undefined;
+    const label: [label_max]u8 = @splat('x');
+    const rendered = renderPage(&buf, &label);
+    try testing.expect(rendered.len <= buf.len);
 }

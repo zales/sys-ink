@@ -133,10 +133,10 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/syscall.zig`: Interpreting raw Linux syscall returns (see the module comment).
 - `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
 - `src/web_preview.zig`: optional HTTP view of the current frame, off by default.
-- `src/frame_server.zig`: the HTTP bits the preview and the simulator share.
+- `src/frame_server.zig`, `src/viewer_page.html`: the HTTP serving and the
+  viewer page, shared by the preview and the simulator.
 - `src/sim_frame.zig`: what the simulators draw; the front ends are
-  `src/sim_native.zig` (macOS window) and `src/sim_web.zig` with
-  `src/sim_page.html` (served preview).
+  `src/sim_native.zig` (macOS window) and `src/sim_web.zig` (served preview).
 
 ## Build Instructions
 

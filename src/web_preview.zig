@@ -136,7 +136,7 @@ pub const WebPreview = struct {
             if (!self.running.load(.acquire)) return;
 
             switch (frame_server.readRequest(stream, self.io, &request_buf) orelse continue) {
-                .index => frame_server.respondPage(stream, self.io),
+                .index => frame_server.respondPage(stream, self.io, "Live panel"),
                 .frame => {
                     // Copied out under the lock, so serialising and writing —
                     // which can block on a slow client — hold nothing.

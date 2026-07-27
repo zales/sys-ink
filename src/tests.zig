@@ -20,4 +20,5 @@ test {
     _ = @import("waveshare_epd/epd2in9.zig");
     _ = @import("display_renderer.zig");
     _ = @import("sim_frame.zig");
+    _ = @import("frame_server.zig");
 }

@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !u8 {
         defer stream.close(io);
 
         switch (frame_server.readRequest(stream, io, &request_buf) orelse continue) {
-            .index => frame_server.respondPage(stream, io),
+            .index => frame_server.respondPage(stream, io, "Simulator"),
             .frame => {
                 const now = std.Io.Timestamp.now(io, .awake).toSeconds();
                 sim_frame.draw(&renderer, @floatFromInt(now), @intCast(now - started));
