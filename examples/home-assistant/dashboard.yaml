@@ -1,0 +1,81 @@
+# SysInk dashboard for Home Assistant.
+#
+# Shows everything the daemon publishes over MQTT: the metrics from the e-ink
+# panel, the two health problem entities, and SSD wear.
+#
+# To use it: Settings → Dashboards → Add dashboard → New dashboard from
+# scratch, then open it, click the pencil, choose the three-dot menu →
+# "Raw configuration editor", and paste the contents of this file.
+#
+# Entity IDs below are what MQTT discovery produces on a fresh install. Home
+# Assistant derives them from the device and entity names at creation time, so
+# if you have renamed the SysInk device or assigned it to an area before the
+# entities were created, yours may carry a prefix (for example
+# `binary_sensor.office_sysink_under_voltage`). Check the actual IDs under
+# Settings → Devices & Services → MQTT → SysInk and adjust.
+
+views:
+  - title: E-Ink
+    path: default_view
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: SysInk status
+
+          - type: glance
+            columns: 3
+            entities:
+              - entity: sensor.sysink_cpu_load
+                name: CPU
+              - entity: sensor.sysink_memory_usage
+                name: RAM
+              - entity: sensor.sysink_disk_usage
+                name: Disk
+
+          - type: glance
+            columns: 3
+            entities:
+              - entity: sensor.sysink_cpu_temperature
+                name: CPU temp
+              - entity: sensor.sysink_disk_temperature
+                name: Disk temp
+              - entity: sensor.sysink_fan_speed
+                name: Fan
+
+          - type: entities
+            title: Health
+            show_header_toggle: false
+            entities:
+              - entity: binary_sensor.sysink_under_voltage
+                name: Under-voltage
+              - entity: binary_sensor.sysink_nvme_smart_fault
+                name: NVMe SMART
+              - entity: sensor.sysink_ssd_wear
+                name: SSD wear
+
+          - type: entities
+            title: Network
+            show_header_toggle: false
+            entities:
+              - entity: sensor.sysink_ip_address
+                name: IP address
+              - entity: sensor.sysink_wifi_signal
+                name: WiFi signal
+              - entity: binary_sensor.sysink_internet_connected
+                name: Internet
+
+          - type: entities
+            title: Traffic
+            show_header_toggle: false
+            entities:
+              - entity: sensor.sysink_download_speed
+                name: Download
+              - entity: sensor.sysink_upload_speed
+                name: Upload
+              - entity: sensor.sysink_uptime_days
+                name: Uptime (days)
+              - entity: sensor.sysink_apt_updates
+                name: Updates

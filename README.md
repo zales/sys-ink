@@ -325,6 +325,11 @@ problem entities (`Under-voltage`, `NVMe SMART Fault`) that Home Assistant can
 turn into notifications. SMART reading needs the daemon to run as root, which
 the packaged service does; unprivileged runs disable it silently.
 
+A ready-made dashboard showing all of it is provided in
+[`examples/home-assistant/dashboard.yaml`](examples/home-assistant/dashboard.yaml)
+— paste it into a new dashboard's raw configuration editor. The file explains
+how, and what to check if your entity IDs differ.
+
 ## Troubleshooting
 
 ### "Failed to initialize display"
