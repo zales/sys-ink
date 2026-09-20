@@ -161,26 +161,26 @@ pub const TrafficMonitor = struct {
         // negative interval and with it a nonsense rate.
         const now = std.Io.Timestamp.now(self.io, .awake).toSeconds();
 
-        defer {
-            self.last_rx_bytes = totals.rx_bytes;
-            self.last_tx_bytes = totals.tx_bytes;
-        }
-
         const last_rx = self.last_rx_bytes;
         const last_tx = self.last_tx_bytes;
         const last_time = self.last_time;
 
+        // The sample and the instant it was taken at move together or not at
+        // all. Advancing the byte counters while leaving `last_time` behind
+        // would charge the next interval for traffic this one already consumed,
+        // and report a rate that is quietly too low.
         if (last_rx == null or last_tx == null or last_time == null) {
-            self.last_time = now;
+            self.takeSample(totals, now);
             return self.currentResult();
         }
 
         const interval = now - last_time.?;
         // Sampled twice within the same second: keep the previous rate rather
-        // than reporting a spurious zero.
+        // than reporting a spurious zero, and leave the baseline untouched so
+        // the next real interval still measures against a matching timestamp.
         if (interval < 1) return self.currentResult();
 
-        self.last_time = now;
+        self.takeSample(totals, now);
 
         // Saturating: counters reset on reboot and on interface teardown.
         const rx_diff = totals.rx_bytes -| last_rx.?;
@@ -191,6 +191,13 @@ pub const TrafficMonitor = struct {
         self.last_tx_speed = @as(f64, @floatFromInt(tx_diff)) / interval_f;
 
         return self.currentResult();
+    }
+
+    /// Record the counters and the instant they were read at, as one step.
+    fn takeSample(self: *TrafficMonitor, totals: parse.NetTotals, now: i64) void {
+        self.last_rx_bytes = totals.rx_bytes;
+        self.last_tx_bytes = totals.tx_bytes;
+        self.last_time = now;
     }
 
     fn currentResult(self: *TrafficMonitor) TrafficResult {
