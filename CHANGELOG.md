@@ -20,12 +20,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-20
+
 ### Added
-- Under-voltage warning: read from the `rpi_volt` hwmon alarm, shown as an
-  inverted status bar and published as an MQTT problem entity.
-- NVMe SMART monitoring: the drive's critical-warning bits, read via the admin
-  ioctl with no external tools, surfaced the same three ways, plus an SSD wear
-  sensor. Requires root; unprivileged runs disable it silently.
+- Desktop panel simulator. The real renderer runs against a recorder instead of
+  hardware, so what it shows is what the panel would show — same fonts, same
+  layout constants, same fault overlay. `zig build sim` opens a native window on
+  macOS; everywhere else it serves the frame over HTTP, as does `zig build
+  sim-web`.
+- Optional web preview of the live panel, behind `WEB_PREVIEW=true`. It serves
+  the frame the daemon actually drew rather than a re-render, so it cannot
+  disagree with the glass. Binds loopback by default: the frame carries the
+  host's addresses and load figures, and there is no authentication. See the
+  README before setting `WEB_PREVIEW_ADDR`.
+
+### Fixed
+- **A stalled peer panicked the daemon instead of timing out.** The read
+  deadline added in 1.6.0 was implemented with `SO_RCVTIMEO`, which makes a
+  timed-out read report `EAGAIN` — and `Io.Threaded` treats `EAGAIN` on a
+  blocking socket as a programmer bug, panicking in a Debug build and returning
+  `error.Unexpected` in a release one. The preview hang was therefore replaced
+  by a crash, invisible only because the shipped binary is ReleaseSmall. MQTT
+  carried the same trap on the broker socket, where a broker that accepts the
+  connection and then goes quiet would take a Debug daemon down. Both paths now
+  take their deadline from the runtime via `Socket.receiveTimeout`.
+- The traffic sample and the instant it was measured at could move
+  independently, because the byte counters were advanced from a `defer` that
+  also ran on the early return taken for two samples inside one second. The next
+  interval then reported a rate quietly below the truth. Not reachable through
+  the scheduler, which clamps intervals to a second, but the two are written
+  together now.
+- The test transport's command recorder wrote into a caller-supplied buffer
+  without bounds. A wake plus a partial update logs 31 commands against the 64
+  it was given.
+- The live panel preview was captioned "Simulator", inviting a real reading to
+  be dismissed as a mock-up.
+- The macOS simulator window sat on its first frame, and both simulators grew
+  without bound by keeping a heap copy of every frame ever sent.
+
+### Changed
+- Release builds are link-time optimised: 401152 to 362000 bytes on
+  `aarch64-linux-musl` with `ReleaseSmall`, for no change in behaviour.
+- `zig build` on a non-Linux host now says the daemon is Linux-only and gives
+  the cross-compile command, instead of failing with a signal-handler enum
+  mismatch four pages long.
+- MQTT publishes the readings the display tasks already took, rather than
+  re-reading `/proc/uptime`, `/proc/net/wireless` and the whole interface list
+  for values that were guaranteed to match. The interface list is also walked
+  once rather than up to three times, and hardware with no NVMe temperature
+  sensor is no longer rescanned every cycle.
+
+### Security
+- `/etc/default/sys-ink` ships as mode 0640. It contains `MQTT_PASSWORD` and the
+  service runs as root, so no other account needs to read it. Upgrading tightens
+  the mode; anything reading that file as a non-root user will need adjusting.
 
 ## [1.6.0] — 2026-07-27
 
@@ -211,6 +259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.7.0]: https://github.com/zales/sys-ink/releases/tag/v1.7.0
 [1.6.0]: https://github.com/zales/sys-ink/releases/tag/v1.6.0
 [1.5.0]: https://github.com/zales/sys-ink/releases/tag/v1.5.0
 [1.4.2]: https://github.com/zales/sys-ink/releases/tag/v1.4.2
