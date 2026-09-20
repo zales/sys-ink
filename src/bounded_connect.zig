@@ -14,7 +14,6 @@
 const std = @import("std");
 const net = std.Io.net;
 const linux = std.os.linux;
-const socket_timeout = @import("socket_timeout.zig");
 
 pub const Error = error{
     SocketFailed,
@@ -59,17 +58,16 @@ pub fn connect(address: [4]u8, port: u16, timeout_ms: i32) Error!std.posix.fd_t 
 
 /// As `connect`, but returns a stream ready for the std reader and writer.
 ///
-/// The socket is switched back to blocking, because `Stream.Reader` expects that
-/// — a non-blocking read returns EAGAIN, which surfaces as a read failure rather
-/// than a wait. Send and receive deadlines are installed in its place, so a peer
-/// that accepts the connection and then goes quiet cannot hang the render loop
-/// either.
+/// The socket is switched back to blocking, because everything in `std.Io.net`
+/// expects that: `EAGAIN` on a socket it believes is blocking is classified as a
+/// programmer bug and panics a Debug build. For the same reason no `SO_RCVTIMEO`
+/// is installed here — a deadline belongs on the individual receive, via
+/// `Socket.receiveTimeout`, which is what the caller uses.
 pub fn connectStream(address: [4]u8, port: u16, timeout_ms: i32) Error!net.Stream {
     const fd = try connect(address, port, timeout_ms);
     errdefer closeFd(fd);
 
     try clearNonBlocking(fd);
-    socket_timeout.set(fd, @intCast(timeout_ms)) catch return error.ConnectFailed;
 
     return .{ .socket = .{
         .handle = fd,

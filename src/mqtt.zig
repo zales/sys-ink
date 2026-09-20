@@ -285,16 +285,32 @@ pub const MqttClient = struct {
     fn receiveConnack(self: *Self) !void {
         const stream = self.stream orelse return error.NotConnected;
 
-        // TCP can split the 4-byte CONNACK, so read through a buffered reader
-        // rather than assuming one datagram-sized receive.
-        var read_buf: [16]u8 = undefined;
-        var reader = net.Stream.Reader.init(stream, self.io, &read_buf);
+        // One deadline for the whole handshake, converted up front so a broker
+        // that sends the CONNACK a byte at a time cannot renew it per read.
+        //
+        // `receiveTimeout` rather than a `Stream.Reader`: the reader has no
+        // deadline, and `SO_RCVTIMEO` cannot supply one, because `Io.Threaded`
+        // treats the resulting `EAGAIN` as a programmer bug and panics on it in
+        // a Debug build. A broker that accepts the connection and then goes
+        // quiet is exactly the case this has to survive.
+        const deadline = (std.Io.Timeout{
+            .duration = .{ .raw = .fromMilliseconds(connect_timeout_ms), .clock = .awake },
+        }).toDeadline(self.io);
 
+        // TCP can split the 4-byte CONNACK, so keep receiving until it is whole.
         var connack: [4]u8 = undefined;
-        reader.interface.readSliceAll(&connack) catch |err| {
-            log.err("Failed to read CONNACK: {t}", .{err});
-            return error.InvalidConnack;
-        };
+        var have: usize = 0;
+        while (have < connack.len) {
+            const message = stream.socket.receiveTimeout(self.io, connack[have..], deadline) catch |err| {
+                log.err("Failed to read CONNACK: {t}", .{err});
+                return error.InvalidConnack;
+            };
+            if (message.data.len == 0) {
+                log.err("Broker closed the connection before sending CONNACK", .{});
+                return error.InvalidConnack;
+            }
+            have += message.data.len;
+        }
 
         return interpretConnack(connack) catch |err| {
             log.err("MQTT handshake rejected: {t} (packet type {d}, return code {d})", .{

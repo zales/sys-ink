@@ -11,11 +11,10 @@
 const std = @import("std");
 const net = std.Io.net;
 const bmp = @import("bmp.zig");
-const socket_timeout = @import("socket_timeout.zig");
 
 const log = std.log.scoped(.preview);
 
-/// How long a client gets to send its request, or to take a response.
+/// How long a client gets to send its request.
 ///
 /// Short on purpose. A stalled peer costs at most this much, and the page asks
 /// for a frame once a second, so nothing legitimate comes near it.
@@ -27,27 +26,21 @@ pub const io_timeout_ms = 2000;
 /// — turns the loop into a busy spin competing with the render loop for the CPU.
 pub const accept_backoff_ms = 250;
 
-/// Accept a connection with deadlines already installed.
+/// Accept a connection.
 ///
 /// Returns null when nothing usable arrived, having already waited out the
 /// backoff; the caller should simply go round again. `running` is checked by the
 /// caller, not here.
+///
+/// The deadline that keeps a stalled peer from taking the loop down lives in
+/// `readRequest`, not here — see the note there for why it cannot be a socket
+/// option.
 pub fn accept(server: *net.Server, io: std.Io) ?net.Stream {
-    const stream = server.accept(io) catch |err| {
+    return server.accept(io) catch |err| {
         log.debug("Preview accept failed: {t}", .{err});
         std.Io.sleep(io, .fromMilliseconds(accept_backoff_ms), .awake) catch {};
         return null;
     };
-
-    socket_timeout.set(stream.socket.handle, io_timeout_ms) catch |err| {
-        // Without a deadline this connection could block the loop for as long as
-        // the peer likes, which is the whole thing being prevented.
-        log.warn("Cannot set preview socket deadline: {t}; dropping connection", .{err});
-        stream.close(io);
-        return null;
-    };
-
-    return stream;
 }
 
 /// The viewer page, with `{{LABEL}}` still in it. Render it with `renderPage`.
@@ -88,10 +81,28 @@ pub const Request = enum {
 };
 
 /// Read the request line, ignoring headers.
+///
+/// Through `receiveTimeout` rather than a `Stream.Reader`, because the reader
+/// has no deadline and the obvious way to give it one is a trap: `SO_RCVTIMEO`
+/// makes a stalled read report `EAGAIN`, and `Io.Threaded` classifies `EAGAIN`
+/// on a blocking socket as a programmer bug — `std.debug.panic` in a Debug
+/// build, `error.Unexpected` in a release one. A deadline that crashes the
+/// daemon is worse than the hang it replaces, so the runtime supplies it here
+/// instead.
+///
+/// One receive, not a loop: the request line arrives in the first segment of
+/// any real client. A peer that dribbles its line one byte at a time gets a
+/// short read and a 404 rather than being waited on, which is the right answer
+/// for a preview server that owes nobody anything.
 pub fn readRequest(stream: net.Stream, io: std.Io, buf: []u8) ?Request {
-    var reader = stream.reader(io, buf);
-    const line = reader.interface.takeDelimiterExclusive('\n') catch return null;
+    const message = stream.socket.receiveTimeout(io, buf, .{
+        .duration = .{ .raw = .fromMilliseconds(io_timeout_ms), .clock = .awake },
+    }) catch |err| {
+        log.debug("Preview request read failed: {t}", .{err});
+        return null;
+    };
 
+    const line = message.data;
     if (std.mem.startsWith(u8, line, "GET /frame.bmp")) return .frame;
     if (std.mem.startsWith(u8, line, "GET / ")) return .index;
     return .other;
