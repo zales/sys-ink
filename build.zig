@@ -15,7 +15,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.installArtifact(exe);
+    // Link-time optimisation for release builds: about 10% of the binary on
+    // aarch64-musl, for no change in behaviour and no runtime cost. Left off in
+    // Debug, where the extra link time buys nothing.
+    if (optimize != .Debug) exe.lto = .full;
+
+    // The daemon is Linux-only: it talks to GPIO chardev, spidev, /proc and
+    // /sys directly. Building it for another host does not fail with anything
+    // resembling that — on macOS it is four pages about a signal-handler enum
+    // mismatch — so say it plainly instead, and leave `test`, `check` and the
+    // simulators, which all work anywhere, as the useful things to run here.
+    const host_is_linux = target.result.os.tag == .linux;
+    if (host_is_linux) {
+        b.installArtifact(exe);
+    } else {
+        const explain = b.addFail(
+            "sys-ink targets Linux; this host cannot build the daemon.\n" ++
+                "       Cross-compile it:  zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall\n" ++
+                "       Or run locally:    zig build sim | zig build test | zig build check",
+        );
+        b.getInstallStep().dependOn(&explain.step);
+    }
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
