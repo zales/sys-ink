@@ -122,6 +122,10 @@ cat > "$PKG_DIR/DEBIAN/conffiles" <<EOF
 /etc/default/$APP_NAME
 EOF
 
+# 5.7 The file holds MQTT_PASSWORD and the service runs as root, so there is no
+# reason for anyone else on the machine to read it. dpkg preserves this mode.
+chmod 640 "$PKG_DIR/etc/default/$APP_NAME"
+
 # 6. Create postinst script
 cat > "$PKG_DIR/DEBIAN/postinst" <<EOF
 #!/bin/sh
