@@ -84,9 +84,15 @@ pub const FakeTransport = struct {
     }
 
     /// Command bytes (DC low, single byte) in the order they were sent.
+    ///
+    /// Stops at the end of `buf` rather than running past it. A wake followed by
+    /// a partial update already logs 31 commands against the 64 below, so the
+    /// headroom is one waveform change away from gone — and in a release build
+    /// the overrun would be silent.
     pub fn commands(self: *FakeTransport, buf: []u8) []const u8 {
         var n: usize = 0;
         for (self.events.items) |event| {
+            if (n == buf.len) break;
             if (event == .spi and event.spi.dc == 0 and event.spi.bytes.len == 1) {
                 buf[n] = event.spi.bytes[0];
                 n += 1;
@@ -96,7 +102,7 @@ pub const FakeTransport = struct {
     }
 
     pub fn sentCommand(self: *FakeTransport, cmd: u8) bool {
-        var buf: [64]u8 = undefined;
+        var buf: [128]u8 = undefined;
         return std.mem.indexOfScalar(u8, self.commands(&buf), cmd) != null;
     }
 
