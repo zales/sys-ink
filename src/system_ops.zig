@@ -31,6 +31,8 @@ pub const SystemOps = struct {
     /// Set once the hwmon scan has run, so hardware without the sensor is not
     /// rescanned on every cycle.
     undervoltage_probed: bool = false,
+    /// Same latch for the NVMe temperature sensor.
+    disk_temp_probed: bool = false,
     /// Controller device path, e.g. "/dev/nvme0"; owned heap copy.
     cached_nvme_dev: ?[]const u8 = null,
     /// Set once the controller scan has run, so hardware without NVMe — or a
@@ -57,6 +59,7 @@ pub const SystemOps = struct {
     last_fan_speed: u32 = 0,
     last_undervoltage: bool = false,
     last_nvme_health: ?parse.NvmeHealth = null,
+    last_uptime: ?parse.Uptime = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) SystemOps {
         return .{
@@ -230,11 +233,23 @@ pub const SystemOps = struct {
     }
 
     /// Get disk temperature in Celsius
+    ///
+    /// Scanned once. Hardware without an NVMe hwmon device used to re-read all
+    /// ten `/sys/class/hwmon/hwmonN/name` files on every cycle to reach the same
+    /// answer, where `getUndervoltage` and `getNvmeHealth` already latch a
+    /// missing sensor after the first look. A drive that appears later is not a
+    /// case worth rescanning forever for: on this hardware it is soldered down.
     pub fn getDiskTemp(self: *SystemOps) !u32 {
         if (self.cached_disk_temp_path) |path| {
             self.last_disk_temp = try self.readTempFromFile(path);
             return self.last_disk_temp;
         }
+
+        if (self.disk_temp_probed) {
+            self.last_disk_temp = 0;
+            return 0;
+        }
+        self.disk_temp_probed = true;
 
         var temp_path_buf: [64]u8 = undefined;
         if (self.findHwmonFile(&temp_path_buf, "nvme", "temp1_input")) |temp_path| {
@@ -245,6 +260,7 @@ pub const SystemOps = struct {
             } else |_| {}
         }
 
+        log.debug("No NVMe hwmon sensor; disk temperature reporting disabled", .{});
         self.last_disk_temp = 0;
         return 0; // No disk sensor found
     }
@@ -383,7 +399,13 @@ pub const SystemOps = struct {
     /// Get system uptime in days, hours, and minutes
     pub fn getUptime(self: *SystemOps) !parse.Uptime {
         var buf: [64]u8 = undefined;
-        return parse.uptime(try self.readFile("/proc/uptime", &buf));
+        self.last_uptime = try parse.uptime(try self.readFile("/proc/uptime", &buf));
+        return self.last_uptime.?;
+    }
+
+    /// The most recent successful `getUptime`, or null before the first one.
+    pub fn lastUptime(self: *const SystemOps) ?parse.Uptime {
+        return self.last_uptime;
     }
 
     // ------------------------------------------------------------------------

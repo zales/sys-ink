@@ -314,21 +314,23 @@ const App = struct {
         // "0 updates" on the basis of no data.
         if (self.sys.updatesCount()) |count| publishFmt(client, "apt_updates", "{d}", .{count});
 
-        if (self.sys.getUptime()) |uptime| {
+        // The readings below are the ones the display tasks already took this
+        // cycle, not fresh ones. The scheduler runs this task after them, so
+        // re-reading /proc/uptime, /proc/net/wireless and the whole interface
+        // list — which is what this did — could only ever produce the same
+        // numbers at twice the cost, and risked the panel and Home Assistant
+        // disagreeing over which sample was "now".
+        if (self.sys.lastUptime()) |uptime| {
             publishFmt(client, "uptime_days", "{d}", .{uptime.days});
-        } else |_| {}
+        }
 
-        if (self.net.getSignalStrength("wlan0")) |signal| {
+        if (self.net.lastSignalStrength()) |signal| {
             publishFmt(client, "signal_strength", "{d}", .{signal});
         }
 
-        // Cached, so this does not add another blocking probe.
         client.publish("internet", if (self.net.checkInternetConnection()) "ON" else "OFF", false) catch {};
 
-        var ip_buf: [network_ops.max_ip_len]u8 = undefined;
-        if (self.net.getAnyIpAddress(&ip_buf)) |maybe_ip| {
-            if (maybe_ip) |ip| client.publish("ip_address", ip, false) catch {};
-        } else |_| {}
+        if (self.net.lastIpAddress()) |ip| client.publish("ip_address", ip, false) catch {};
 
         // kB/s, decimal, matching both the entity's declared unit and what the
         // panel shows. This divided by 1024 while calling the result kB/s, which
