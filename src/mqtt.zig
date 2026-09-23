@@ -212,8 +212,16 @@ pub const MqttClient = struct {
     }
 
     /// Publish to an exact topic, bypassing the prefix.
+    ///
+    /// Never connects. Reconnecting is `connect`'s job alone, which the caller
+    /// invokes once per cycle behind the backoff. This used to reconnect on its
+    /// own whenever the connection had dropped, and `connect` publishes
+    /// discovery through this very function — so a broker that dropped the
+    /// client after CONNACK (an ACL that disconnects on a denied publish does)
+    /// recursed connect → discovery → publish → connect without bound, a fresh
+    /// TCP connection per level, until the stack ran out.
     fn publishRaw(self: *Self, topic: []const u8, payload: []const u8, retain: bool) !void {
-        if (!self.connected) try self.connect();
+        if (!self.connected) return error.NotConnected;
         const stream = self.stream orelse return error.NotConnected;
 
         var packet_buf: [max_packet_len]u8 = undefined;
@@ -221,9 +229,12 @@ pub const MqttClient = struct {
 
         stream.socket.send(self.io, &stream.socket.address, packet) catch |err| {
             log.warn("MQTT publish failed (topic={s}): {t}", .{ topic, err });
-            // Force a reconnect on the next publish.
             self.connected = false;
             self.closeStream();
+            // Counted like a failed connect, so a broker that accepts the
+            // connection and then drops it is retried behind the backoff rather
+            // than immediately.
+            self.recordFailure();
             return err;
         };
     }
@@ -236,6 +247,8 @@ pub const MqttClient = struct {
         for (sensors) |sensor| {
             self.publishSensorDiscovery(sensor) catch |err| {
                 log.warn("Discovery publish failed for {s}: {t}", .{ sensor.id, err });
+                // The rest would only fail the same way, one warning each.
+                if (!self.connected) break;
                 continue;
             };
             published += 1;
@@ -577,6 +590,16 @@ test "interpretConnack accepts success and maps refusals" {
 test "interpretConnack rejects a non-CONNACK packet" {
     // PUBLISH where CONNACK was expected.
     try testing.expectError(error.UnexpectedPacket, interpretConnack(.{ 0x30, 0x02, 0x00, 0x00 }));
+}
+
+test "publishing on a dropped connection does not reconnect behind the caller" {
+    // `io` is left undefined on purpose: any attempt to resolve, connect or read
+    // the clock would trip over it. Reconnecting is `connect`'s job only.
+    var client = MqttClient.init(testing.allocator, undefined, .{});
+    defer client.deinit();
+
+    try testing.expectError(error.NotConnected, client.publish("cpu_load", "1", false));
+    try testing.expectEqual(@as(u32, 0), client.consecutive_failures);
 }
 
 test "sensor ids are unique" {
