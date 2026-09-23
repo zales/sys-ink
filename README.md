@@ -27,7 +27,8 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 - **Raspberry Pi**: Tested on Pi 5; uses the modern Linux GPIO character device
   API (`/dev/gpiochip*`), including the Pi 5's RP1 chip. Older models may work —
-  `armhf` builds are published — but are untested.
+  `armhf` builds are published and target ARMv6, so they also run on the Pi
+  Zero, Zero W and Pi 1 — but are untested.
 - **Display**: [Waveshare 2.9inch e-Paper Module (B/W) V2](https://www.waveshare.com/wiki/2.9inch_e-Paper_Module).
   - *Note: This project is specifically tuned for the V2 version of the display.*
 - **Connections**: SPI interface and GPIO pins (RST, DC, BUSY, PWR).
@@ -154,6 +155,14 @@ zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall
 ```
 
 The resulting binary will be located at `zig-out/bin/sys-ink`.
+
+For 32-bit Raspberry Pi OS, name the CPU as well. Zig's default for this
+target is ARMv7, which the Pi Zero, Zero W and Pi 1 cannot run; the ARM1176
+build below runs on every 32-bit Pi:
+
+```bash
+zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=ReleaseSmall
+```
 
 ## Installation
 

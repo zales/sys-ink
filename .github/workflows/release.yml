@@ -37,9 +37,16 @@ jobs:
       matrix:
         include:
           - target: aarch64-linux-musl
+            cpu: baseline
             deb_arch: arm64
             asset_name: sys-ink-aarch64
+          # Zig's baseline for this target is ARMv7-A, which dies with SIGILL
+          # on the ARMv6 Pi Zero, Zero W and Pi 1 — while dpkg installs it
+          # there happily, since Debian calls both armhf. The ARM1176 in those
+          # boards is the oldest core Raspberry Pi OS armhf supports, and code
+          # built for it runs unchanged on every later 32-bit Pi.
           - target: arm-linux-musleabihf
+            cpu: arm1176jzf_s
             deb_arch: armhf
             asset_name: sys-ink-armhf
 
@@ -52,7 +59,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Build for ${{ matrix.target }}
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
+        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=ReleaseSmall
 
       - name: Package Debian (.deb)
         env:
