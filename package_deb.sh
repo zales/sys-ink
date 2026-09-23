@@ -23,6 +23,7 @@ mkdir -p "$PKG_DIR/DEBIAN"
 mkdir -p "$PKG_DIR/usr/bin"
 mkdir -p "$PKG_DIR/lib/systemd/system"
 mkdir -p "$PKG_DIR/etc/default"
+mkdir -p "$PKG_DIR/etc/logrotate.d"
 
 # 3. Copy binary
 if [ ! -f "$BINARY_PATH" ]; then
@@ -117,9 +118,26 @@ BMP_EXPORT_PATH=/tmp/sys-ink.bmp
 #MQTT_DISCOVERY=true
 EOF
 
+# 5.5.1 Rotate the log file, which only exists with LOG_TO_FILE=true.
+# copytruncate because the daemon keeps the file open; it writes in append mode,
+# so after the truncate it carries on at the new end rather than the old offset.
+cat > "$PKG_DIR/etc/logrotate.d/$APP_NAME" <<EOF
+/var/log/$APP_NAME.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+chmod 644 "$PKG_DIR/etc/logrotate.d/$APP_NAME"
+
 # 5.6 Create conffiles to prevent overwriting config
 cat > "$PKG_DIR/DEBIAN/conffiles" <<EOF
 /etc/default/$APP_NAME
+/etc/logrotate.d/$APP_NAME
 EOF
 
 # 5.7 The file holds MQTT_PASSWORD and the service runs as root, so there is no

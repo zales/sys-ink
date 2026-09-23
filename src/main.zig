@@ -368,7 +368,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     config.Config.load(init);
 
-    try logger.init(io);
+    logger.init(io);
     defer logger.deinit();
 
     // Runs unprivileged as long as the user is in the gpio and spi groups.

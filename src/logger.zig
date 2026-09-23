@@ -17,7 +17,10 @@ var file_writer: ?std.Io.File.Writer = null;
 /// stored verbatim in the journal.
 var use_color: bool = false;
 
-pub fn init(io: std.Io) !void {
+/// Set up logging. Never fails: a log file that cannot be opened is reported on
+/// stderr and logging carries on there, rather than keeping the daemon — and
+/// with it the panel — from starting over a logging option.
+pub fn init(io: std.Io) void {
     app_io = io;
 
     use_color = std.Io.File.stderr().isTty(io) catch false;
@@ -25,19 +28,30 @@ pub fn init(io: std.Io) !void {
     if (!config.Config.log_to_file) return;
 
     const path = config.Config.log_file_path;
-    const file = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = false, .read = false }) catch |err| {
-        std.debug.print("Failed to open log file '{s}': {t}\n", .{ path, err });
-        return err;
+    const file = openAppend(path) catch |err| {
+        std.debug.print("Failed to open log file '{s}': {t}; logging to stderr only\n", .{ path, err });
+        return;
     };
 
-    // Seek to the end once and keep the writer around; re-statting and
-    // re-seeking on every line costs three syscalls per log record.
-    var writer = file.writer(io, &file_write_buf);
-    const end_pos = file.length(io) catch 0;
-    writer.seekToUnbuffered(end_pos) catch {};
-
     log_file = file;
-    file_writer = writer;
+    file_writer = file.writerStreaming(io, &file_write_buf);
+}
+
+/// Open `path` for appending, creating it if needed.
+///
+/// O_APPEND, not a seek to the end: every write then lands at whatever the end
+/// is at that moment, so `logrotate` can truncate the file under a running
+/// daemon (`copytruncate`) and logging simply continues from the start. A
+/// writer that tracks its own position would carry on at the old offset and
+/// leave the file a hole of that size. 0640, as log files under /var/log are.
+fn openAppend(path: []const u8) !std.Io.File {
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .APPEND = true,
+        .CLOEXEC = true,
+    }, 0o640);
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 pub fn deinit() void {
@@ -55,15 +69,30 @@ pub fn deinit() void {
     }
 }
 
+/// Wall-clock time, UTC.
 const Clock = struct {
+    year: u16,
+    month: u8,
+    day: u8,
     hours: u64,
     minutes: u64,
     seconds: u64,
 
     fn now(io: std.Io) Clock {
-        const epoch_seconds: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
+        return at(@intCast(std.Io.Timestamp.now(io, .real).toSeconds()));
+    }
+
+    fn at(epoch_seconds: u64) Clock {
         const day_seconds = epoch_seconds % 86400;
+
+        const epoch: std.time.epoch.EpochSeconds = .{ .secs = epoch_seconds };
+        const year_day = epoch.getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+
         return .{
+            .year = year_day.year,
+            .month = month_day.month.numeric(),
+            .day = @as(u8, month_day.day_index) + 1,
             .hours = day_seconds / 3600,
             .minutes = (day_seconds % 3600) / 60,
             .seconds = day_seconds % 60,
@@ -112,7 +141,13 @@ pub fn logFn(
 
     if (file_writer) |*w| {
         nosuspend {
-            w.interface.print("[{d:0>2}:{d:0>2}:{d:0>2}] [{s}] " ++ scope_prefix ++ format ++ "\n", .{
+            // The file gets the date as well: unlike the journal, which stamps
+            // stderr lines itself, it has nothing else to say which day a line
+            // is from. UTC, marked as such.
+            w.interface.print("[{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}Z] [{s}] " ++ scope_prefix ++ format ++ "\n", .{
+                clock.year,
+                clock.month,
+                clock.day,
                 clock.hours,
                 clock.minutes,
                 clock.seconds,
@@ -122,4 +157,28 @@ pub fn logFn(
             w.flush() catch {};
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "the clock splits an instant into its UTC date and time" {
+    // 2026-09-23 18:53:01 UTC.
+    const c = Clock.at(1790189581);
+    try testing.expectEqual(@as(u16, 2026), c.year);
+    try testing.expectEqual(@as(u8, 9), c.month);
+    try testing.expectEqual(@as(u8, 23), c.day);
+    try testing.expectEqual(@as(u64, 18), c.hours);
+    try testing.expectEqual(@as(u64, 53), c.minutes);
+    try testing.expectEqual(@as(u64, 1), c.seconds);
+}
+
+test "the first day of a month is day 1, not day 0" {
+    // 2024-03-01 00:00:00 UTC, the day after a leap day.
+    const c = Clock.at(1709251200);
+    try testing.expectEqual(@as(u8, 3), c.month);
+    try testing.expectEqual(@as(u8, 1), c.day);
 }

@@ -347,7 +347,7 @@ expose.
 |----------|---------|-------------|
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` (or `WARNING`) or `ERROR` |
 | `LOG_TO_FILE` | `false` | Also write log records to a file |
-| `LOG_FILE_PATH` | `/var/log/sys-ink.log` | Log file path, appended to |
+| `LOG_FILE_PATH` | `/var/log/sys-ink.log` | Log file path, appended to. Lines carry a UTC date and time. The `.deb` rotates the default path weekly through logrotate. If the file cannot be opened, logging continues on stderr |
 | `EXPORT_BMP` | `false` | Enable BMP export for web debugging |
 | `BMP_EXPORT_PATH` | `/tmp/sys-ink.bmp` | Path for exported BMP |
 
