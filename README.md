@@ -239,6 +239,15 @@ Restart=always
 RestartSec=5
 User=root
 EnvironmentFile=-/etc/default/sys-ink
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -249,6 +258,12 @@ Enable and start the service:
 ```bash
 sudo systemctl enable --now sys-ink
 ```
+
+The hardening lines are the ones the `.deb` unit uses. They leave the devices,
+`/var` and `/tmp` reachable, which the panel, the APT check and the BMP export
+need, and close off home directories and the kernel's tunables. With
+`ProtectHome`, `BMP_EXPORT_PATH` and `LOG_FILE_PATH` cannot point into `/home`
+or `/root`. `systemd-analyze security sys-ink` shows what is left open.
 
 ## Configuration
 

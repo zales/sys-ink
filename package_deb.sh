@@ -63,6 +63,20 @@ RestartSec=5
 User=root
 Group=root
 EnvironmentFile=-/etc/default/$APP_NAME
+# Hardening. Deliberately short of what systemd offers: the daemon needs
+# /dev/spidev*, /dev/gpiochip* and /dev/nvme* (so no PrivateDevices), and its
+# APT check runs apt update, which writes under /var and drops to the _apt
+# user (so no ProtectSystem=strict, no user or syscall filtering). /tmp stays
+# shared because the BMP export is read from there by other processes.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target
