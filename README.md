@@ -460,8 +460,8 @@ how, and what to check if your entity IDs differ.
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently the switch to decimal network units in 1.5.0 and the MQTT
-`internet` entity becoming a `binary_sensor` in 1.4.0.
+top — most recently, in 1.8.0, the Home Assistant discovery identity following
+`MQTT_CLIENT_ID`, which matters only if you changed it from the default.
 
 ## License
 

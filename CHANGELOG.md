@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
-| Unreleased | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
-| Unreleased | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
+| 1.8.0 | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
+| 1.8.0 | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
 | 1.5.0 | Network rates became decimal: `kB` now means 1000 bytes, matching the label. Earlier releases divided by 1024. | Displayed and MQTT-published rates read 2.4% higher for the same throughput. Nothing to do unless you have alerts on absolute values. |
 | 1.5.0 | The APT repository is signed. | Replace `[trusted=yes]` with `signed-by=`; see the README. The old line keeps working but authenticates nothing. |
 | 1.4.0 | The MQTT `internet` entity became a `binary_sensor` with `device_class: connectivity`. | Home Assistant creates a new entity. Clear the retained config at `homeassistant/sensor/sysink/internet/config` to drop the stale `sensor.*` one. |
@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+## [1.8.0] — 2026-09-23
 
 ### Fixed
 - **The internet indicator said "connected" with no network at all.** A
@@ -322,6 +324,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.8.0]: https://github.com/zales/sys-ink/releases/tag/v1.8.0
 [1.7.0]: https://github.com/zales/sys-ink/releases/tag/v1.7.0
 [1.6.0]: https://github.com/zales/sys-ink/releases/tag/v1.6.0
 [1.5.0]: https://github.com/zales/sys-ink/releases/tag/v1.5.0
