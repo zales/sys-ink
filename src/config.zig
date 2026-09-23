@@ -245,7 +245,7 @@ pub const Config = struct {
         var i: u8 = 0;
         while (i < 32) : (i += 1) {
             const path = std.fmt.bufPrintZ(&path_buf, "/dev/gpiochip{d}", .{i}) catch continue;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             defer _ = std.os.linux.close(fd);
 
             var info: GpiochipInfo = undefined;

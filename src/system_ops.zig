@@ -360,7 +360,7 @@ pub const SystemOps = struct {
     pub fn getNvmeHealth(self: *SystemOps) ?parse.NvmeHealth {
         const dev = self.nvmeDevPath() orelse return null;
 
-        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return null;
         defer _ = std.os.linux.close(fd);
 
         // Zeroed, not undefined: a partially completed command would otherwise
@@ -398,7 +398,7 @@ pub const SystemOps = struct {
         // directory iteration and matches the hwmon approach.
         for (0..4) |i| {
             const path = std.fmt.bufPrint(&path_buf, "/dev/nvme{d}", .{i}) catch continue;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             _ = std.os.linux.close(fd);
 
             self.cached_nvme_dev = self.allocator.dupe(u8, path) catch return null;

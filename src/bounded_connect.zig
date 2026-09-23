@@ -28,7 +28,9 @@ pub const Error = error{
 /// `address` is the four octets in dotted-quad order, which is also their
 /// network order, so no byte swapping is involved.
 pub fn connect(address: [4]u8, port: u16, timeout_ms: i32) Error!std.posix.fd_t {
-    const sock_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 6); // 6 = TCP
+    // CLOEXEC: `apt` runs while a connection may be open, and a child holding a
+    // copy of the socket keeps it alive after this process has closed it.
+    const sock_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 6); // 6 = TCP
     if (@as(isize, @bitCast(sock_rc)) < 0) return error.SocketFailed;
     const fd: std.posix.fd_t = @intCast(sock_rc);
 

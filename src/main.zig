@@ -499,7 +499,10 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn installSignalHandlers() void {
     var fds: [2]i32 = undefined;
-    if (syscall.ok(std.os.linux.pipe(&fds))) {
+    // Close-on-exec, or every command the daemon runs inherits both ends.
+    // Non-blocking so the handler's write can never stall, not even on a pipe
+    // that nobody drains.
+    if (syscall.ok(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true }))) {
         wake_pipe = fds;
     } else {
         log.warn("Failed to create wake pipe; shutdown may lag by up to a second", .{});
