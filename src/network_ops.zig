@@ -45,7 +45,13 @@ pub const NetworkOps = struct {
         return self.last_signal;
     }
 
-    /// The most recent address found, or null before the first successful look.
+    /// The result of the most recent reachability probe, or null before the
+    /// first. Takes no measurement, unlike `checkInternetConnection`.
+    pub fn lastInternet(self: *const NetworkOps) ?bool {
+        return self.cached_internet;
+    }
+
+    /// The address the most recent look found, or null if it found none.
     pub fn lastIpAddress(self: *const NetworkOps) ?[]const u8 {
         if (self.last_ip_len == 0) return null;
         return self.last_ip[0..self.last_ip_len];
@@ -98,6 +104,11 @@ pub const NetworkOps = struct {
     /// once for anything — and each call builds and frees the entire list, which
     /// already held every answer the next call went back for.
     pub fn getAnyIpAddress(self: *NetworkOps, buf: []u8) !?[]const u8 {
+        // Forgotten before looking, so every way out below that finds nothing
+        // leaves nothing behind. It used to survive losing the address, and
+        // MQTT went on publishing it while the panel said "No IP".
+        self.last_ip_len = 0;
+
         var ifap: ?*c.ifaddrs = null;
         if (c.getifaddrs(&ifap) != 0) return error.GetifaddrsFailed;
         defer c.freeifaddrs(ifap);

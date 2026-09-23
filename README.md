@@ -267,8 +267,8 @@ them before running.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INTERVAL_FAST` | `30` | Seconds between CPU/memory/disk/fan/traffic/uptime updates and display refreshes |
-| `INTERVAL_SLOW` | `10800` | Seconds between IP, APT and internet-reachability checks (3 hours) |
+| `INTERVAL_FAST` | `30` | Seconds between CPU/memory/disk/fan/traffic/uptime/IP updates and display refreshes |
+| `INTERVAL_SLOW` | `10800` | Seconds between APT and internet-reachability checks (3 hours). With MQTT enabled the reachability probe also runs for Home Assistant, at most once a minute, and the panel shows the newest result |
 | `INTERVAL_FULL_REFRESH` | `600` | Seconds between full panel refreshes, which clear the ghosting left by partial updates. A full refresh flashes the panel by design; raise this if that bothers you, at the cost of more accumulated ghosting |
 
 Network rates use decimal units: `kB` is 1000 bytes, matching the SI prefix and

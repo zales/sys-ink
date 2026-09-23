@@ -183,6 +183,17 @@ const App = struct {
         self.renderer.renderInternetStatus(connected);
     }
 
+    /// Repaint the reachability icon from the latest probe, whoever took it.
+    ///
+    /// The probe itself runs on the slow interval, and also for MQTT, up to
+    /// once a minute. The panel only ever drew the slow one, so with MQTT
+    /// enabled it could show "connected" for hours while Home Assistant had
+    /// long since been told otherwise.
+    fn renderInternet(self: *App) void {
+        const connected = self.net.lastInternet() orelse return;
+        self.renderer.renderInternetStatus(connected);
+    }
+
     /// Read the firmware's under-voltage flag and surface it.
     ///
     /// Sustained under-voltage on a Pi with an NVMe drive risks corrupting
@@ -436,8 +447,11 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
     try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
     try scheduler.every(fast, "nvme_health", &app, App.updateNvmeHealth);
+    // One getifaddrs walk, cheap enough for the fast tick; on the slow one a
+    // DHCP change stayed off the panel for up to three hours.
+    try scheduler.every(fast, "ip", &app, App.updateIp);
+    try scheduler.every(fast, "internet_render", &app, App.renderInternet);
 
-    try scheduler.every(slow, "ip", &app, App.updateIp);
     try scheduler.every(slow, "apt", &app, App.updateApt);
     try scheduler.every(slow, "internet", &app, App.updateInternet);
 

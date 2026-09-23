@@ -78,9 +78,9 @@ cat > "$PKG_DIR/etc/default/$APP_NAME" <<EOF
 #SPI_DEVICE=/dev/spidev0.0
 
 # --- Update intervals (seconds) -----------------------------------------
-# Fast: CPU, memory, disk, fan, traffic, signal, uptime, display.
+# Fast: CPU, memory, disk, fan, traffic, signal, uptime, IP, display.
 INTERVAL_FAST=30
-# Slow: IP address, APT updates, internet reachability.
+# Slow: APT updates, internet reachability.
 INTERVAL_SLOW=10800
 # How often to force a full refresh to clear e-paper ghosting.
 INTERVAL_FULL_REFRESH=600
