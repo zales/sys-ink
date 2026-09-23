@@ -1,0 +1,34 @@
+Package: sys-ink
+Version: 1.8.0
+Architecture: arm64
+Maintainer: Zales <zales@users.noreply.github.com>
+Filename: ./sys-ink_1.8.0_arm64.deb
+Size: 162162
+MD5sum: a7ed308b00ed69c4075e12d2379ae17a
+SHA1: 13b5d433dbf41892a488349e239b1c9186cf7662
+SHA256: f52b413785eac18afa1f4b7bed8232ad5044b45dc1ebfac75b0ba6ad9baa31b4
+Section: utils
+Priority: optional
+Homepage: https://github.com/zales/sys-ink
+Description: System monitor for Waveshare e-Paper displays
+ SysInk renders CPU, memory, disk, fan, network and APT status onto a
+ Waveshare 2.9" e-Paper display attached to a Raspberry Pi, and can
+ optionally publish the same metrics to MQTT for Home Assistant.
+
+Package: sys-ink
+Version: 1.8.0
+Architecture: armhf
+Maintainer: Zales <zales@users.noreply.github.com>
+Filename: ./sys-ink_1.8.0_armhf.deb
+Size: 154294
+MD5sum: 8f54f56e870e2424f2fc6c7a229ddb17
+SHA1: 9cd6c7e1e3d0fa86df03b1de587c0d7b4085005d
+SHA256: 4be92f2356d70f00eaebc5dfbfd7c98506e5a3b50ce0407e356d285e9e055808
+Section: utils
+Priority: optional
+Homepage: https://github.com/zales/sys-ink
+Description: System monitor for Waveshare e-Paper displays
+ SysInk renders CPU, memory, disk, fan, network and APT status onto a
+ Waveshare 2.9" e-Paper display attached to a Raspberry Pi, and can
+ optionally publish the same metrics to MQTT for Home Assistant.
+

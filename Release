@@ -1,0 +1,14 @@
+Origin: SysInk
+Label: SysInk Repo
+Suite: stable
+Codename: stable
+Architectures: arm64 armhf
+Components: main
+Description: SysInk Debian Repository
+Date: Wed, 23 Sep 2026 17:41:12 +0000
+MD5Sum:
+ 5849f96a8432a37eca435eba01e29715 1306 Packages
+ a526211fa2e2de58b00f6aa3d3cb1550 598 Packages.gz
+SHA256:
+ 5ce6f49d833af3e15bd4dda2ad3cdbc3ac040e4433cbbc25ad2aec03ed9d39dd 1306 Packages
+ a114a3ec8ced1a69e901443ee458d90b3b5580063b60117e064a42baa2d3ee8a 598 Packages.gz
