@@ -80,6 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directories, no writes to kernel tunables or cgroups, no module loading, no new
   privileges. Devices, `/var` and `/tmp` stay reachable.
 - The IP address is read every `INTERVAL_FAST` instead of every `INTERVAL_SLOW`.
+- Log prefixes are formatted once rather than compiled into every log call
+  site: 362000 to 348120 bytes on `aarch64-linux-musl` with `ReleaseSmall`.
 
 ## [1.7.0] — 2026-09-20
 

@@ -117,46 +117,58 @@ pub fn logFn(
         .info => "\x1b[32m", // Green
         .debug => "\x1b[34m", // Blue
     };
-    const reset = "\x1b[0m";
-    const gray = "\x1b[90m";
 
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
 
     const clock = Clock.now(io);
 
+    // The prefixes go through the non-generic helpers below. This function is
+    // instantiated once per call site, and a prefix printed inline is compiled
+    // into every one of them — the date on file lines cost 10 KB of binary that
+    // way, where formatting it once costs a few hundred bytes.
     nosuspend {
-        if (use_color) {
-            std.debug.print("{s}[{d:0>2}:{d:0>2}:{d:0>2}]{s} [{s}{s}{s}] " ++ scope_prefix, .{
-                gray,  clock.hours, clock.minutes,   clock.seconds,
-                reset, color,       @tagName(level), reset,
-            });
-        } else {
-            std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] [{s}] " ++ scope_prefix, .{
-                clock.hours, clock.minutes, clock.seconds, @tagName(level),
-            });
-        }
+        stderrPrefix(clock, @tagName(level), if (use_color) color else null, scope_prefix);
         std.debug.print(format ++ "\n", args);
     }
 
     if (file_writer) |*w| {
         nosuspend {
-            // The file gets the date as well: unlike the journal, which stamps
-            // stderr lines itself, it has nothing else to say which day a line
-            // is from. UTC, marked as such.
-            w.interface.print("[{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}Z] [{s}] " ++ scope_prefix ++ format ++ "\n", .{
-                clock.year,
-                clock.month,
-                clock.day,
-                clock.hours,
-                clock.minutes,
-                clock.seconds,
-                @tagName(level),
-            } ++ args) catch {};
+            filePrefix(&w.interface, clock, @tagName(level), scope_prefix);
+            w.interface.print(format ++ "\n", args) catch {};
             // Flush per record so a crash does not lose the tail of the log.
             w.flush() catch {};
         }
     }
+}
+
+/// `[hh:mm:ss] [level] (scope) ` on stderr, coloured on a terminal. The
+/// journal adds its own date, so this carries only the time of day.
+fn stderrPrefix(clock: Clock, level: []const u8, color: ?[]const u8, scope_prefix: []const u8) void {
+    const reset = "\x1b[0m";
+    const gray = "\x1b[90m";
+
+    if (color) |c| {
+        std.debug.print("{s}[{d:0>2}:{d:0>2}:{d:0>2}]{s} [{s}{s}{s}] {s}", .{
+            gray,         clock.hours, clock.minutes, clock.seconds,
+            reset,        c,           level,         reset,
+            scope_prefix,
+        });
+    } else {
+        std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] [{s}] {s}", .{
+            clock.hours, clock.minutes, clock.seconds, level, scope_prefix,
+        });
+    }
+}
+
+/// `[yyyy-mm-dd hh:mm:ssZ] [level] (scope) ` in the log file. The file gets the
+/// date as well: unlike the journal, which stamps stderr lines itself, it has
+/// nothing else to say which day a line is from. UTC, marked as such.
+fn filePrefix(w: *std.Io.Writer, clock: Clock, level: []const u8, scope_prefix: []const u8) void {
+    w.print("[{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}Z] [{s}] {s}", .{
+        clock.year,    clock.month,   clock.day, clock.hours,
+        clock.minutes, clock.seconds, level,     scope_prefix,
+    }) catch {};
 }
 
 // ----------------------------------------------------------------------------
