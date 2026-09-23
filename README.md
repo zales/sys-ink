@@ -123,9 +123,9 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/font_data.zig`: Generated static glyph tables.
 - `src/system_ops.zig`: System metrics collection (CPU, RAM, disk, SMART, under-voltage).
 - `src/gpio_native.zig`: GPIO character device access (v2 ABI).
-- `src/socket_timeout.zig`: send and receive deadlines on a socket.
-- `src/bounded_connect.zig`: TCP connect with a deadline, shared by MQTT and the
-  reachability probe until `std` implements `ConnectOptions.timeout`.
+- `src/bounded_connect.zig`: TCP connect and send-buffer wait with a deadline,
+  shared by MQTT and the reachability probe until `std` implements
+  `ConnectOptions.timeout`.
 - `src/network_ops.zig`: Network status and traffic monitoring.
 - `src/mqtt.zig`: MQTT 3.1.1 client and Home Assistant discovery.
 - `src/bmp.zig`: BMP export for headless preview.
@@ -291,6 +291,12 @@ the convention for throughput. Releases before 1.5.0 divided by 1024 while
 labelling the result `kB`, so displayed and published rates were 2.4% lower than
 the unit claimed.
 
+Only interfaces backed by hardware — Ethernet, Wi-Fi, USB adapters — are
+counted. Bridges, veth pairs and VPN tunnels carry the same bytes a second
+time, so on a host running Docker every container's traffic used to be
+counted two or three times over. Where no interface has a device, as inside
+a container, all of them are summed as before.
+
 ### Panel power
 
 | Variable | Default | Description |
@@ -346,9 +352,12 @@ the glass including the fault overlay.
 > `WEB_PREVIEW_ADDR=0.0.0.0` puts it on the network for anyone who can reach the
 > port. Set that only on a network where that is acceptable.
 
-Reads and writes carry a two-second deadline, so a client that connects and then
-says nothing costs one pause rather than taking the preview down — which is what
-used to happen. Failed accepts back off instead of spinning.
+Reading the request carries a two-second deadline, so a client that connects and
+then says nothing costs one pause rather than taking the preview down — which is
+what used to happen. Writes have no deadline of their own and need none: a
+response is a few kilobytes and fits the socket's send buffer whole, so it never
+waits on a client that has stopped reading. Failed accepts back off instead of
+spinning.
 
 One connection is served at a time, which is ample for a page fetching one image
 a second but does mean many simultaneous stalled connections slow it down, each
@@ -379,12 +388,25 @@ SysInk can publish metrics to an MQTT broker for Home Assistant integration with
 | `MQTT_PORT` | `1883` | MQTT broker port |
 | `MQTT_USERNAME` | (none) | MQTT username (optional) |
 | `MQTT_PASSWORD` | (none) | MQTT password (optional) |
-| `MQTT_CLIENT_ID` | `sysink` | MQTT client identifier |
-| `MQTT_TOPIC_PREFIX` | `sysink` | Topic prefix for all messages |
+| `MQTT_CLIENT_ID` | `sysink` | MQTT client identifier, and the device's identity in Home Assistant |
+| `MQTT_TOPIC_PREFIX` | same as `MQTT_CLIENT_ID` | Topic prefix for all messages |
 | `MQTT_DISCOVERY` | `true` | Enable Home Assistant auto-discovery |
 
 Discovery configs are republished on every successful connection, so the device
 appears in Home Assistant even when the broker was unreachable at boot.
+
+**More than one panel:** give each its own `MQTT_CLIENT_ID`. The discovery topics,
+the entities' unique IDs and the device all derive from it, and the topic prefix
+follows it unless set, so that one variable is enough. The default `sysink`
+derives exactly what earlier releases published, so a single existing panel
+keeps its entities.
+
+Entities go unavailable in Home Assistant after three `INTERVAL_FAST` periods
+without an update, so a panel that is switched off does not keep showing its last
+readings as current. The same applies to readings the daemon withholds on
+purpose: an IP address that is gone, a disk temperature or fan the hardware does
+not have. Numeric sensors carry `state_class: measurement`, so Home Assistant
+keeps long-term statistics for them.
 
 **Storing the password:** avoid `Environment=MQTT_PASSWORD=...` in a unit file —
 it is readable by any local user via `systemctl show sys-ink`. Prefer a

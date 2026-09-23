@@ -104,10 +104,10 @@ pub const Config = struct {
     /// SPI device path
     pub var spi_device: []const u8 = "/dev/spidev0.0";
 
-    /// Scheduler interval for fast updates (CPU, RAM, etc.) in seconds
+    /// Scheduler interval for fast updates (CPU, RAM, IP, etc.) in seconds
     pub var interval_fast: u32 = 30;
 
-    /// Scheduler interval for slow updates (IP, APT, Internet) in seconds
+    /// Scheduler interval for slow updates (APT, Internet) in seconds
     pub var interval_slow: u32 = 10800; // 3 hours
 
     /// How often to force a full (non-partial) refresh, in seconds. Full
