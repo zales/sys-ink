@@ -492,22 +492,24 @@ pub fn Renderer(comptime Transport: type) type {
             self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
-        /// Render disk temperature
-        pub fn renderDiskTemp(self: *Self, temp: u32) void {
-            const is_critical = temp >= config.Config.threshold_temp_critical;
+        /// Render disk temperature. Null means the hardware has no sensor, shown
+        /// as a dash: "0°C" claimed a reading nobody took.
+        pub fn renderDiskTemp(self: *Self, temp: ?u32) void {
+            const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}°C", .{temp}) catch "?";
+            const text = if (temp) |t| std.fmt.bufPrint(&buf, "{d}°C", .{t}) catch "?" else "-";
             self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
-        /// Render fan speed
-        pub fn renderFanSpeed(self: *Self, rpm: u32) void {
+        /// Render fan speed. Null means there is no fan, shown as a dash; a fan
+        /// that is present and stopped still reads 0.
+        pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
             const ascent = self.bitmap.getFontAscent(.Ubuntu24);
             self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch "?";
+            const text = if (rpm) |r| std.fmt.bufPrint(&buf, "{d}", .{r}) catch "?" else "-";
             self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
         }
 
@@ -861,6 +863,35 @@ test "a shrinking APT count leaves nothing behind outside its slot" {
     h.renderer.renderAptUpdates(35);
 
     try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+}
+
+test "a missing sensor is drawn as a dash, not as zero" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.renderer.renderDiskTemp(0);
+    h.renderer.renderFanSpeed(0);
+    const zero = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(zero);
+
+    h.renderer.renderDiskTemp(null);
+    h.renderer.renderFanSpeed(null);
+    try testing.expect(!std.mem.eql(u8, zero, h.renderer.bitmap.data));
+
+    // And the dash is exactly what it says, drawn where the reading would be.
+    var expected = try Harness.init();
+    expected.wire();
+    defer expected.deinit();
+    expected.renderer.renderDiskTemp(0);
+    expected.renderer.renderFanSpeed(0);
+    const r = &expected.renderer;
+    r.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
+    r.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
+    const fan_ascent = r.bitmap.getFontAscent(.Ubuntu24);
+    r.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+    r.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    try testing.expectEqualSlices(u8, r.bitmap.data, h.renderer.bitmap.data);
 }
 
 // --- under-voltage warning ---------------------------------------------------

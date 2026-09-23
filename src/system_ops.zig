@@ -59,8 +59,10 @@ pub const SystemOps = struct {
     last_cpu_temp: u32 = 0,
     last_memory: u8 = 0,
     last_disk_usage: u8 = 0,
-    last_disk_temp: u32 = 0,
-    last_fan_speed: u32 = 0,
+    /// Null when the hardware has no such sensor, which is published as nothing
+    /// rather than as a reading of zero.
+    last_disk_temp: ?u32 = null,
+    last_fan_speed: ?u32 = null,
     last_undervoltage: bool = false,
     last_nvme_health: ?parse.NvmeHealth = null,
     last_uptime: ?parse.Uptime = null,
@@ -152,8 +154,12 @@ pub const SystemOps = struct {
         return self.last_cpu_load;
     }
 
-    /// Get fan speed in RPM
-    pub fn getFanSpeed(self: *SystemOps) !u32 {
+    /// Fan speed in RPM, or null when no hwmon device has a fan input at all.
+    ///
+    /// A fan that is present but stopped reads 0, which the Pi 5's cooler does
+    /// whenever it is cool enough; a machine with no fan is a different answer
+    /// and gets null, so the panel shows a dash instead of claiming 0 RPM.
+    pub fn getFanSpeed(self: *SystemOps) !?u32 {
         if (self.cached_fan_path) |path| {
             if (self.readIntFromFile(path)) |rpm| {
                 self.last_fan_speed = rpm;
@@ -166,12 +172,14 @@ pub const SystemOps = struct {
         }
 
         var path_buf: [64]u8 = undefined;
+        var any_fan = false;
         for (0..max_hwmon_devices) |i| {
             const path = std.fmt.bufPrint(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
 
             // A reading of 0 is ambiguous (stopped fan vs. wrong device), so
             // only latch onto a sensor that is actually spinning.
             const rpm = self.readIntFromFile(path) catch continue;
+            any_fan = true;
             if (rpm == 0) continue;
 
             self.cached_fan_path = try self.allocator.dupe(u8, path);
@@ -179,8 +187,8 @@ pub const SystemOps = struct {
             return rpm;
         }
 
-        self.last_fan_speed = 0;
-        return 0; // No fan found
+        self.last_fan_speed = if (any_fan) 0 else null;
+        return self.last_fan_speed;
     }
 
     /// Get memory usage percentage
@@ -237,22 +245,22 @@ pub const SystemOps = struct {
         return null;
     }
 
-    /// Get disk temperature in Celsius
+    /// Disk temperature in Celsius, or null on hardware without an NVMe sensor.
     ///
     /// Scanned once. Hardware without an NVMe hwmon device used to re-read all
     /// ten `/sys/class/hwmon/hwmonN/name` files on every cycle to reach the same
     /// answer, where `getUndervoltage` and `getNvmeHealth` already latch a
     /// missing sensor after the first look. A drive that appears later is not a
     /// case worth rescanning forever for: on this hardware it is soldered down.
-    pub fn getDiskTemp(self: *SystemOps) !u32 {
+    pub fn getDiskTemp(self: *SystemOps) !?u32 {
         if (self.cached_disk_temp_path) |path| {
             self.last_disk_temp = try self.readTempFromFile(path);
             return self.last_disk_temp;
         }
 
         if (self.disk_temp_probed) {
-            self.last_disk_temp = 0;
-            return 0;
+            self.last_disk_temp = null;
+            return null;
         }
         self.disk_temp_probed = true;
 
@@ -266,8 +274,8 @@ pub const SystemOps = struct {
         }
 
         log.debug("No NVMe hwmon sensor; disk temperature reporting disabled", .{});
-        self.last_disk_temp = 0;
-        return 0; // No disk sensor found
+        self.last_disk_temp = null;
+        return null;
     }
 
     /// Whether the firmware currently reports a low input voltage.

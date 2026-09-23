@@ -103,7 +103,7 @@ const App = struct {
 
         if (self.sys.getDiskTemp()) |temp| {
             self.renderer.renderDiskTemp(temp);
-            log.debug("Disk temperature: {d}°C", .{temp});
+            log.debug("Disk temperature: {?d}°C", .{temp});
         } else |err| log.warn("getDiskTemp failed: {t}", .{err});
     }
 
@@ -113,7 +113,7 @@ const App = struct {
             return;
         };
         self.renderer.renderFanSpeed(rpm);
-        log.debug("Fan: {d} RPM", .{rpm});
+        log.debug("Fan: {?d} RPM", .{rpm});
     }
 
     fn updateSignal(self: *App) void {
@@ -298,8 +298,9 @@ const App = struct {
         publishFmt(client, "cpu_temp", "{d}", .{self.sys.last_cpu_temp});
         publishFmt(client, "memory", "{d}", .{self.sys.last_memory});
         publishFmt(client, "disk_usage", "{d}", .{self.sys.last_disk_usage});
-        publishFmt(client, "disk_temp", "{d}", .{self.sys.last_disk_temp});
-        publishFmt(client, "fan_speed", "{d}", .{self.sys.last_fan_speed});
+        // Absent sensors publish nothing rather than a reading of zero.
+        if (self.sys.last_disk_temp) |temp| publishFmt(client, "disk_temp", "{d}", .{temp});
+        if (self.sys.last_fan_speed) |rpm| publishFmt(client, "fan_speed", "{d}", .{rpm});
         if (self.last_undervoltage) |active| {
             client.publish("undervoltage", if (active) "ON" else "OFF", false) catch {};
         }

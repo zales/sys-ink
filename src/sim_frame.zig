@@ -40,7 +40,7 @@ pub fn draw(renderer: *SimRenderer, t: f64, uptime_s: u64) void {
     renderer.renderMemory(@intFromFloat(35.0 + 25.0 * wave(t, 83.0)));
     renderer.renderDiskUsage(29);
     renderer.renderDiskTemp(36);
-    renderer.renderFanSpeed(@intFromFloat(400.0 + 900.0 * wave(t, 53.0)));
+    renderer.renderFanSpeed(@as(u32, @intFromFloat(400.0 + 900.0 * wave(t, 53.0))));
     renderer.renderIpAddress("192.168.1.231");
     renderer.renderSignalStrength(@intFromFloat(-40.0 - 55.0 * wave(t, 71.0)));
 
