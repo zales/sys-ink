@@ -620,9 +620,32 @@ pub fn Renderer(comptime Transport: type) type {
                 self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
             } else {
                 var buf: [16]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "{d}", .{known}) catch "?";
-                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, text, .Ubuntu24, .Black);
+                const label = self.aptLabel(&buf, known);
+                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, label.text, label.font, .Black);
             }
+        }
+
+        /// Fonts the APT count steps down through, largest first.
+        ///
+        /// Three digits are 42px at the size one and two use, against a 35px
+        /// slot, and a freshly flashed image is routinely hundreds of packages
+        /// behind. The overflow crossed the divider at x=249 and, lying outside
+        /// the area this slot clears, stayed on the panel after the count shrank.
+        const apt_fonts = [_]FontType{ .Ubuntu24, .Ubuntu20, .Ubuntu14 };
+
+        const AptLabel = struct { text: []const u8, font: FontType };
+
+        /// The count in the largest font it fits, or a capped "999+" once no
+        /// font holds it. Same baseline in every font, so smaller ones sit on
+        /// the same line.
+        fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
+            const width = display_config.TEXT_AREA_APT.width;
+            const text = std.fmt.bufPrint(buf, "{d}", .{count}) catch "?";
+
+            for (apt_fonts) |font| {
+                if (self.bitmap.measureText(text, font) <= width) return .{ .text = text, .font = font };
+            }
+            return .{ .text = "999+", .font = .Ubuntu14 };
         }
 
         /// Render internet connection status
@@ -785,6 +808,44 @@ test "rendering is deterministic" {
     b.renderer.convertTo1Bit(b.renderer.epd_buffer);
 
     try testing.expectEqualSlices(u8, a.renderer.epd_buffer, b.renderer.epd_buffer);
+}
+
+test "the APT count fits its slot however large it gets" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    const width = display_config.TEXT_AREA_APT.width;
+    var count: u32 = 1;
+    while (count < 200_000) : (count = count * 3 / 2 + 1) {
+        var buf: [16]u8 = undefined;
+        const label = h.renderer.aptLabel(&buf, count);
+        try testing.expect(h.renderer.bitmap.measureText(label.text, label.font) <= width);
+    }
+
+    // Two digits keep the size they always had, which is what the golden frame
+    // pins; three step down rather than crossing the divider.
+    var buf: [16]u8 = undefined;
+    try testing.expectEqual(FontType.Ubuntu24, h.renderer.aptLabel(&buf, 99).font);
+    try testing.expect(h.renderer.aptLabel(&buf, 150).font != .Ubuntu24);
+    try testing.expectEqualStrings("150", h.renderer.aptLabel(&buf, 150).text);
+}
+
+test "a shrinking APT count leaves nothing behind outside its slot" {
+    // The visible form of the overflow: pixels right of the slot that the
+    // three-digit count drew and the two-digit one never cleared.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(before);
+
+    h.renderer.renderAptUpdates(888);
+    h.renderer.renderAptUpdates(35);
+
+    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
 }
 
 // --- under-voltage warning ---------------------------------------------------
