@@ -71,18 +71,19 @@ const App = struct {
     // Display tasks
     // ------------------------------------------------------------------------
 
-    fn updateCpu(self: *App) void {
-        const load = self.sys.getCpuLoad() catch |err| {
-            log.warn("getCpuLoad failed: {t}", .{err});
-            return;
-        };
-        const temp = self.sys.getCpuTemperature() catch |err| {
-            log.warn("getCpuTemperature failed: {t}", .{err});
-            return;
-        };
+    // Paired readings are taken and drawn independently, so one failing leaves
+    // only its own slot stale instead of taking its neighbour down with it.
 
-        self.renderer.renderCpuLoad(load, temp);
-        log.debug("CPU: {d}% / {d}°C", .{ load, temp });
+    fn updateCpu(self: *App) void {
+        if (self.sys.getCpuLoad()) |load| {
+            self.renderer.renderCpuLoad(load);
+            log.debug("CPU load: {d}%", .{load});
+        } else |err| log.warn("getCpuLoad failed: {t}", .{err});
+
+        if (self.sys.getCpuTemperature()) |temp| {
+            self.renderer.renderCpuTemp(temp);
+            log.debug("CPU temperature: {d}°C", .{temp});
+        } else |err| log.warn("getCpuTemperature failed: {t}", .{err});
     }
 
     fn updateMemory(self: *App) void {
@@ -95,17 +96,15 @@ const App = struct {
     }
 
     fn updateDisk(self: *App) void {
-        const usage = self.sys.getDiskUsage() catch |err| {
-            log.warn("getDiskUsage failed: {t}", .{err});
-            return;
-        };
-        const temp = self.sys.getDiskTemp() catch |err| {
-            log.warn("getDiskTemp failed: {t}", .{err});
-            return;
-        };
+        if (self.sys.getDiskUsage()) |usage| {
+            self.renderer.renderDiskUsage(usage);
+            log.debug("Disk usage: {d}%", .{usage});
+        } else |err| log.warn("getDiskUsage failed: {t}", .{err});
 
-        self.renderer.renderDiskStats(usage, temp);
-        log.debug("Disk: {d}% / {d}°C", .{ usage, temp });
+        if (self.sys.getDiskTemp()) |temp| {
+            self.renderer.renderDiskTemp(temp);
+            log.debug("Disk temperature: {d}°C", .{temp});
+        } else |err| log.warn("getDiskTemp failed: {t}", .{err});
     }
 
     fn updateFan(self: *App) void {

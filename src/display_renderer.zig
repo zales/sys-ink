@@ -451,18 +451,27 @@ pub fn Renderer(comptime Transport: type) type {
             }
         }
 
-        /// Render CPU load and temperature
-        pub fn renderCpuLoad(self: *Self, load: u8, temp: u32) void {
-            const is_load_critical = load >= config.Config.threshold_cpu_critical;
-            const is_temp_critical = temp >= config.Config.threshold_temp_critical;
+        // Each reading has a slot of its own, drawn by its own call, so a sensor
+        // that fails leaves only its own slot stale. Load and temperature used to
+        // be drawn together, and a machine without a thermal zone never showed its
+        // load at all.
 
-            var buf1: [16]u8 = undefined;
-            const load_text = std.fmt.bufPrint(&buf1, "{d}%", .{load}) catch "?";
-            self.drawTextInArea(load_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
+        /// Render CPU load
+        pub fn renderCpuLoad(self: *Self, load: u8) void {
+            const is_critical = load >= config.Config.threshold_cpu_critical;
 
-            var buf2: [16]u8 = undefined;
-            const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
-            self.drawTextInArea(temp_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}%", .{load}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+        }
+
+        /// Render CPU temperature
+        pub fn renderCpuTemp(self: *Self, temp: u32) void {
+            const is_critical = temp >= config.Config.threshold_temp_critical;
+
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}°C", .{temp}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
         }
 
         /// Render memory usage
@@ -474,18 +483,22 @@ pub fn Renderer(comptime Transport: type) type {
             self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
         }
 
-        /// Render disk stats
-        pub fn renderDiskStats(self: *Self, usage: u8, temp: u32) void {
-            const is_usage_critical = usage >= config.Config.threshold_disk_critical;
-            const is_temp_critical = temp >= config.Config.threshold_temp_critical;
+        /// Render root filesystem usage
+        pub fn renderDiskUsage(self: *Self, usage: u8) void {
+            const is_critical = usage >= config.Config.threshold_disk_critical;
 
-            var buf1: [16]u8 = undefined;
-            const usage_text = std.fmt.bufPrint(&buf1, "{d}%", .{usage}) catch "?";
-            self.drawTextInArea(usage_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_usage_critical);
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+        }
 
-            var buf2: [16]u8 = undefined;
-            const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
-            self.drawTextInArea(temp_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_temp_critical);
+        /// Render disk temperature
+        pub fn renderDiskTemp(self: *Self, temp: u32) void {
+            const is_critical = temp >= config.Config.threshold_temp_critical;
+
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}°C", .{temp}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
         /// Render fan speed
@@ -662,9 +675,11 @@ pub fn Renderer(comptime Transport: type) type {
         /// the test that checks against its output cannot drift apart.
         pub fn drawReferenceScreen(self: *Self) void {
             self.renderGrid();
-            self.renderCpuLoad(42, 51);
+            self.renderCpuLoad(42);
+            self.renderCpuTemp(51);
             self.renderMemory(28);
-            self.renderDiskStats(84, 33);
+            self.renderDiskUsage(84);
+            self.renderDiskTemp(33);
             self.renderFanSpeed(543);
             self.renderTraffic(999.99, "kB", 3.01, "B");
             self.renderAptUpdates(35);
@@ -1002,7 +1017,7 @@ test "a changed frame wakes the panel, restores the reference and parks it again
     try h.renderer.showInitialFrame();
 
     h.transport.resetLog();
-    h.renderer.renderCpuLoad(99, 60); // change the frame
+    h.renderer.renderCpuLoad(99); // change the frame
     try h.renderer.updateDisplay(true);
 
     // Reference frame restored before the partial update, or it would smear.
@@ -1041,7 +1056,7 @@ test "a full refresh rewrites the reference bank" {
     try h.renderer.showInitialFrame();
 
     h.transport.resetLog();
-    h.renderer.renderCpuLoad(1, 2);
+    h.renderer.renderCpuLoad(1);
     try h.renderer.updateDisplay(false);
 
     // displayBase, not display: leaving the reference stale would make the
@@ -1066,7 +1081,7 @@ test "a failed update forces the next one to be a full refresh" {
     // Panel stops releasing BUSY, so the update dies partway through and the
     // glass no longer matches the reference frame.
     h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50, 50);
+    h.renderer.renderCpuLoad(50);
     try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
     try testing.expect(h.renderer.panel_state_unknown);
 
@@ -1091,7 +1106,7 @@ test "a failed wake leaves the panel marked asleep and the glass trusted" {
 
     // reInit fails, so the wake never completes.
     h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50, 50);
+    h.renderer.renderCpuLoad(50);
     try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
 
     // reInit drives nothing, so the glass still matches the reference and the
