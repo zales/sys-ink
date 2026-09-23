@@ -200,7 +200,11 @@ pub const TrafficMonitor = struct {
 
         var buf: [8192]u8 = undefined;
         const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
-        const totals = parse.netDevTotals(buf[0..bytes_read]);
+        const content = buf[0..bytes_read];
+        // Where nothing has a device — a container, say — count what there is
+        // rather than report no traffic at all.
+        const totals = parse.netDevTotalsWhere(content, Physical{ .io = self.io }) orelse
+            parse.netDevTotals(content);
 
         // Monotonic: a wall-clock step would otherwise fabricate a huge or
         // negative interval and with it a nonsense rate.
@@ -237,6 +241,22 @@ pub const TrafficMonitor = struct {
 
         return self.currentResult();
     }
+
+    /// Accepts interfaces backed by hardware, which have a `device` link in
+    /// sysfs. Bridges, veth pairs and tunnels have none, and each of them
+    /// carries bytes a physical interface also counts: container traffic
+    /// crosses a veth, the Docker bridge and eth0, and summing all three
+    /// reported it three times over.
+    const Physical = struct {
+        io: std.Io,
+
+        pub fn counts(self: Physical, name: []const u8) bool {
+            var path_buf: [64]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
+            std.Io.Dir.accessAbsolute(self.io, path, .{}) catch return false;
+            return true;
+        }
+    };
 
     /// Record the counters and the instant they were read at, as one step.
     fn takeSample(self: *TrafficMonitor, totals: parse.NetTotals, now: i64) void {

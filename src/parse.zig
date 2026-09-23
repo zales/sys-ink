@@ -137,30 +137,70 @@ pub fn wirelessSignal(content: []const u8, interface: []const u8) ?i32 {
 
 pub const NetTotals = struct { rx_bytes: u64, tx_bytes: u64 };
 
+/// One interface line of /proc/net/dev.
+pub const NetDevEntry = struct { name: []const u8, rx_bytes: u64, tx_bytes: u64 };
+
+/// Walks the interface lines of /proc/net/dev, loopback included.
+pub const NetDevIterator = struct {
+    lines: std.mem.SplitIterator(u8, .scalar),
+
+    pub fn next(self: *NetDevIterator) ?NetDevEntry {
+        while (self.lines.next()) |line| {
+            const colon = std.mem.find(u8, line, ":") orelse continue; // header lines
+            const name = std.mem.trim(u8, line[0..colon], &std.ascii.whitespace);
+
+            var parts = std.mem.tokenizeAny(u8, line[colon + 1 ..], " ");
+            const rx = parts.next() orelse continue;
+            // Skip packets, errs, drop, fifo, frame, compressed, multicast.
+            for (0..7) |_| _ = parts.next();
+            // A line cut short, by a read that filled its buffer, has no
+            // transmit column and is skipped whole rather than half counted.
+            const tx = parts.next() orelse continue;
+
+            return .{
+                .name = name,
+                .rx_bytes = std.fmt.parseInt(u64, rx, 10) catch 0,
+                .tx_bytes = std.fmt.parseInt(u64, tx, 10) catch 0,
+            };
+        }
+        return null;
+    }
+};
+
+pub fn netDev(content: []const u8) NetDevIterator {
+    return .{ .lines = std.mem.splitScalar(u8, content, '\n') };
+}
+
 /// Sum rx/tx byte counters across all non-loopback interfaces in /proc/net/dev.
 pub fn netDevTotals(content: []const u8) NetTotals {
+    const everything = struct {
+        fn counts(_: @This(), _: []const u8) bool {
+            return true;
+        }
+    }{};
+    return netDevTotalsWhere(content, everything) orelse .{ .rx_bytes = 0, .tx_bytes = 0 };
+}
+
+/// Sum the non-loopback interfaces for which `filter.counts(name)` holds, or
+/// null when it holds for none of them.
+///
+/// Null rather than zero so the caller can tell "no traffic" from "nothing
+/// matched" and fall back to something broader.
+pub fn netDevTotalsWhere(content: []const u8, filter: anytype) ?NetTotals {
     var totals = NetTotals{ .rx_bytes = 0, .tx_bytes = 0 };
+    var matched = false;
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        const colon = std.mem.find(u8, line, ":") orelse continue; // header lines
+    var it = netDev(content);
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.name, "lo")) continue;
+        if (!filter.counts(entry.name)) continue;
 
-        const name = std.mem.trim(u8, line[0..colon], &std.ascii.whitespace);
-        if (std.mem.eql(u8, name, "lo")) continue;
-
-        var parts = std.mem.tokenizeAny(u8, line[colon + 1 ..], " ");
-
-        const rx = parts.next() orelse continue;
-        totals.rx_bytes += std.fmt.parseInt(u64, rx, 10) catch 0;
-
-        // Skip packets, errs, drop, fifo, frame, compressed, multicast.
-        for (0..7) |_| _ = parts.next();
-
-        const tx = parts.next() orelse continue;
-        totals.tx_bytes += std.fmt.parseInt(u64, tx, 10) catch 0;
+        matched = true;
+        totals.rx_bytes += entry.rx_bytes;
+        totals.tx_bytes += entry.tx_bytes;
     }
 
-    return totals;
+    return if (matched) totals else null;
 }
 
 /// Count upgradable packages in `apt list --upgradable` output.
@@ -413,6 +453,52 @@ test "netDevTotals sums interfaces and skips loopback" {
     const totals = netDevTotals(content);
     try testing.expectEqual(@as(u64, 400), totals.rx_bytes);
     try testing.expectEqual(@as(u64, 600), totals.tx_bytes);
+}
+
+test "netDevTotalsWhere counts only what the filter accepts" {
+    // A Docker host: container traffic crosses a veth, the bridge and eth0,
+    // and summing every line counted the same bytes three times over.
+    const content =
+        \\Inter-|   Receive                                                |  Transmit
+        \\ face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop
+        \\    lo: 999 1 0 0 0 0 0 0 999 1 0 0
+        \\  eth0: 100 1 0 0 0 0 0 0 200 1 0 0
+        \\docker0: 100 1 0 0 0 0 0 0 200 1 0 0
+        \\vethab12: 100 1 0 0 0 0 0 0 200 1 0 0
+        \\ wlan0: 300 1 0 0 0 0 0 0 400 1 0 0
+    ;
+    const physical = struct {
+        fn counts(_: @This(), name: []const u8) bool {
+            return std.mem.eql(u8, name, "eth0") or std.mem.eql(u8, name, "wlan0");
+        }
+    }{};
+
+    const totals = netDevTotalsWhere(content, physical).?;
+    try testing.expectEqual(@as(u64, 400), totals.rx_bytes);
+    try testing.expectEqual(@as(u64, 600), totals.tx_bytes);
+
+    // Loopback stays out even when the filter would let it in.
+    try testing.expectEqual(@as(u64, 600), netDevTotals(content).rx_bytes);
+}
+
+test "netDevTotalsWhere reports when nothing matched" {
+    const content = "  eth0: 100 1 0 0 0 0 0 0 200 1 0 0";
+    const nothing = struct {
+        fn counts(_: @This(), _: []const u8) bool {
+            return false;
+        }
+    }{};
+    try testing.expectEqual(@as(?NetTotals, null), netDevTotalsWhere(content, nothing));
+}
+
+test "a line cut short is skipped, not half counted" {
+    const content =
+        \\  eth0: 100 1 0 0 0 0 0 0 200 1 0 0
+        \\ wlan0: 300 1 0
+    ;
+    const totals = netDevTotals(content);
+    try testing.expectEqual(@as(u64, 100), totals.rx_bytes);
+    try testing.expectEqual(@as(u64, 200), totals.tx_bytes);
 }
 
 test "netDevTotals tolerates a missing space after the colon" {
