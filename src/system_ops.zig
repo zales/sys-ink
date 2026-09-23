@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const parse = @import("parse.zig");
 const syscall = @import("syscall.zig");
 
@@ -19,6 +20,9 @@ const max_hwmon_devices = 10;
 pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// The daemon's environment, which the APT check derives its own from.
+    /// Only ever read, so the background task may do so.
+    parent_env: ?*const std.process.Environ.Map,
     last_cpu_times: ?parse.CpuTimes = null,
     // All three are owned heap copies, freed in deinit. Uniform on purpose: two
     // of them used to be duped while this one aliased a static string, with the
@@ -61,10 +65,11 @@ pub const SystemOps = struct {
     last_nvme_health: ?parse.NvmeHealth = null,
     last_uptime: ?parse.Uptime = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) SystemOps {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, parent_env: ?*const std.process.Environ.Map) SystemOps {
         return .{
             .allocator = allocator,
             .io = io,
+            .parent_env = parent_env,
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
             .apt_count_known = std.atomic.Value(bool).init(false),
@@ -456,9 +461,16 @@ pub const SystemOps = struct {
     fn aptCheck(self: *SystemOps, run_update: bool) void {
         defer self.apt_check_running.store(false, .release);
 
+        var env = config.childEnvironment(self.allocator, self.parent_env) catch |err| {
+            log.warn("Cannot prepare the APT check's environment: {t}", .{err});
+            return;
+        };
+        defer env.deinit();
+
         if (run_update) {
             if (std.process.run(self.allocator, self.io, .{
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
+                .environ_map = &env,
             })) |update_result| {
                 self.allocator.free(update_result.stdout);
                 self.allocator.free(update_result.stderr);
@@ -470,6 +482,7 @@ pub const SystemOps = struct {
 
         const result = std.process.run(self.allocator, self.io, .{
             .argv = &[_][]const u8{ "/usr/bin/timeout", "10", "/usr/bin/apt", "list", "--upgradable" },
+            .environ_map = &env,
         }) catch |err| {
             log.warn("Failed to check APT updates: {t}", .{err});
             return;

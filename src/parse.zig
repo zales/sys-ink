@@ -164,13 +164,19 @@ pub fn netDevTotals(content: []const u8) NetTotals {
 }
 
 /// Count upgradable packages in `apt list --upgradable` output.
+///
+/// A package line starts with `name/suite`, and that part is never translated.
+/// Everything else apt prints here may be: the "Listing... Done" header is
+/// translated under a non-English locale, and matching on the English word
+/// used to count it as a package, so the tick for "up to date" never showed. The daemon also runs apt in the C locale, but the count should not
+/// depend on that.
 pub fn aptUpgradableCount(stdout: []const u8) u32 {
     var count: u32 = 0;
     var lines = std.mem.splitScalar(u8, stdout, '\n');
     while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-        if (trimmed.len == 0) continue;
-        if (std.mem.startsWith(u8, trimmed, "Listing")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, &std.ascii.whitespace);
+        const first = fields.next() orelse continue;
+        if (std.mem.findScalar(u8, first, '/') == null) continue;
         count += 1;
     }
     return count;
@@ -426,6 +432,20 @@ test "aptUpgradableCount ignores the header and blank lines" {
     try testing.expectEqual(@as(u32, 2), aptUpgradableCount(content));
     try testing.expectEqual(@as(u32, 0), aptUpgradableCount("Listing... Done\n"));
     try testing.expectEqual(@as(u32, 0), aptUpgradableCount(""));
+}
+
+test "aptUpgradableCount does not depend on the locale" {
+    // apt translates the header, which used to be counted as a package. The
+    // exact wording varies by apt version; any header without a '/' will do.
+    const czech =
+        \\Vypisuje se… Hotovo
+        \\vim/stable 2:9.0 amd64 [aktualizovatelný z: 2:8.2]
+        \\
+    ;
+    try testing.expectEqual(@as(u32, 1), aptUpgradableCount(czech));
+    try testing.expectEqual(@as(u32, 0), aptUpgradableCount("Vypisuje se… Hotovo\n"));
+    // Nor is a stray warning line a package.
+    try testing.expectEqual(@as(u32, 0), aptUpgradableCount("WARNING: apt does not have a stable CLI interface.\n"));
 }
 
 test "scaleBytes picks the right unit" {

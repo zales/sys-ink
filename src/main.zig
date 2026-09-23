@@ -365,7 +365,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     log.info("SysInk starting", .{});
 
-    var sys_ops = SystemOps.init(allocator, io);
+    var sys_ops = SystemOps.init(allocator, io, init.environ_map);
     defer sys_ops.deinit();
     var net_ops = NetworkOps.init(io);
     var traffic_mon = TrafficMonitor.init(io);
