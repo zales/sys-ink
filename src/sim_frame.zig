@@ -35,13 +35,12 @@ fn wave(t: f64, period: f64) f64 {
 /// Leaves the renderer ready for `updateDisplay`, which is what applies the
 /// fault overlay and packs the frame.
 pub fn draw(renderer: *SimRenderer, t: f64, uptime_s: u64) void {
-    renderer.renderCpuLoad(
-        @intFromFloat(15.0 + 70.0 * wave(t, 47.0)),
-        @intFromFloat(42.0 + 12.0 * wave(t, 61.0)),
-    );
+    renderer.renderCpuLoad(@intFromFloat(15.0 + 70.0 * wave(t, 47.0)));
+    renderer.renderCpuTemp(@intFromFloat(42.0 + 12.0 * wave(t, 61.0)));
     renderer.renderMemory(@intFromFloat(35.0 + 25.0 * wave(t, 83.0)));
-    renderer.renderDiskStats(29, 36);
-    renderer.renderFanSpeed(@intFromFloat(400.0 + 900.0 * wave(t, 53.0)));
+    renderer.renderDiskUsage(29);
+    renderer.renderDiskTemp(36);
+    renderer.renderFanSpeed(@as(u32, @intFromFloat(400.0 + 900.0 * wave(t, 53.0))));
     renderer.renderIpAddress("192.168.1.231");
     renderer.renderSignalStrength(@intFromFloat(-40.0 - 55.0 * wave(t, 71.0)));
 

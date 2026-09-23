@@ -451,18 +451,27 @@ pub fn Renderer(comptime Transport: type) type {
             }
         }
 
-        /// Render CPU load and temperature
-        pub fn renderCpuLoad(self: *Self, load: u8, temp: u32) void {
-            const is_load_critical = load >= config.Config.threshold_cpu_critical;
-            const is_temp_critical = temp >= config.Config.threshold_temp_critical;
+        // Each reading has a slot of its own, drawn by its own call, so a sensor
+        // that fails leaves only its own slot stale. Load and temperature used to
+        // be drawn together, and a machine without a thermal zone never showed its
+        // load at all.
 
-            var buf1: [16]u8 = undefined;
-            const load_text = std.fmt.bufPrint(&buf1, "{d}%", .{load}) catch "?";
-            self.drawTextInArea(load_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_load_critical);
+        /// Render CPU load
+        pub fn renderCpuLoad(self: *Self, load: u8) void {
+            const is_critical = load >= config.Config.threshold_cpu_critical;
 
-            var buf2: [16]u8 = undefined;
-            const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
-            self.drawTextInArea(temp_text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_temp_critical);
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}%", .{load}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+        }
+
+        /// Render CPU temperature
+        pub fn renderCpuTemp(self: *Self, temp: u32) void {
+            const is_critical = temp >= config.Config.threshold_temp_critical;
+
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}°C", .{temp}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
         }
 
         /// Render memory usage
@@ -474,27 +483,33 @@ pub fn Renderer(comptime Transport: type) type {
             self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
         }
 
-        /// Render disk stats
-        pub fn renderDiskStats(self: *Self, usage: u8, temp: u32) void {
-            const is_usage_critical = usage >= config.Config.threshold_disk_critical;
-            const is_temp_critical = temp >= config.Config.threshold_temp_critical;
+        /// Render root filesystem usage
+        pub fn renderDiskUsage(self: *Self, usage: u8) void {
+            const is_critical = usage >= config.Config.threshold_disk_critical;
 
-            var buf1: [16]u8 = undefined;
-            const usage_text = std.fmt.bufPrint(&buf1, "{d}%", .{usage}) catch "?";
-            self.drawTextInArea(usage_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_usage_critical);
-
-            var buf2: [16]u8 = undefined;
-            const temp_text = std.fmt.bufPrint(&buf2, "{d}°C", .{temp}) catch "?";
-            self.drawTextInArea(temp_text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_temp_critical);
+            var buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
+            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
-        /// Render fan speed
-        pub fn renderFanSpeed(self: *Self, rpm: u32) void {
+        /// Render disk temperature. Null means the hardware has no sensor, shown
+        /// as a dash: "0°C" claimed a reading nobody took.
+        pub fn renderDiskTemp(self: *Self, temp: ?u32) void {
+            const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
+
+            var buf: [16]u8 = undefined;
+            const text = if (temp) |t| std.fmt.bufPrint(&buf, "{d}°C", .{t}) catch "?" else "-";
+            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+        }
+
+        /// Render fan speed. Null means there is no fan, shown as a dash; a fan
+        /// that is present and stopped still reads 0.
+        pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
             const ascent = self.bitmap.getFontAscent(.Ubuntu24);
             self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}", .{rpm}) catch "?";
+            const text = if (rpm) |r| std.fmt.bufPrint(&buf, "{d}", .{r}) catch "?" else "-";
             self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
         }
 
@@ -620,9 +635,32 @@ pub fn Renderer(comptime Transport: type) type {
                 self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
             } else {
                 var buf: [16]u8 = undefined;
-                const text = std.fmt.bufPrint(&buf, "{d}", .{known}) catch "?";
-                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, text, .Ubuntu24, .Black);
+                const label = self.aptLabel(&buf, known);
+                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, label.text, label.font, .Black);
             }
+        }
+
+        /// Fonts the APT count steps down through, largest first.
+        ///
+        /// Three digits are 42px at the size one and two use, against a 35px
+        /// slot, and a freshly flashed image is routinely hundreds of packages
+        /// behind. The overflow crossed the divider at x=249 and, lying outside
+        /// the area this slot clears, stayed on the panel after the count shrank.
+        const apt_fonts = [_]FontType{ .Ubuntu24, .Ubuntu20, .Ubuntu14 };
+
+        const AptLabel = struct { text: []const u8, font: FontType };
+
+        /// The count in the largest font it fits, or a capped "999+" once no
+        /// font holds it. Same baseline in every font, so smaller ones sit on
+        /// the same line.
+        fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
+            const width = display_config.TEXT_AREA_APT.width;
+            const text = std.fmt.bufPrint(buf, "{d}", .{count}) catch "?";
+
+            for (apt_fonts) |font| {
+                if (self.bitmap.measureText(text, font) <= width) return .{ .text = text, .font = font };
+            }
+            return .{ .text = "999+", .font = .Ubuntu14 };
         }
 
         /// Render internet connection status
@@ -639,9 +677,11 @@ pub fn Renderer(comptime Transport: type) type {
         /// the test that checks against its output cannot drift apart.
         pub fn drawReferenceScreen(self: *Self) void {
             self.renderGrid();
-            self.renderCpuLoad(42, 51);
+            self.renderCpuLoad(42);
+            self.renderCpuTemp(51);
             self.renderMemory(28);
-            self.renderDiskStats(84, 33);
+            self.renderDiskUsage(84);
+            self.renderDiskTemp(33);
             self.renderFanSpeed(543);
             self.renderTraffic(999.99, "kB", 3.01, "B");
             self.renderAptUpdates(35);
@@ -785,6 +825,73 @@ test "rendering is deterministic" {
     b.renderer.convertTo1Bit(b.renderer.epd_buffer);
 
     try testing.expectEqualSlices(u8, a.renderer.epd_buffer, b.renderer.epd_buffer);
+}
+
+test "the APT count fits its slot however large it gets" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    const width = display_config.TEXT_AREA_APT.width;
+    var count: u32 = 1;
+    while (count < 200_000) : (count = count * 3 / 2 + 1) {
+        var buf: [16]u8 = undefined;
+        const label = h.renderer.aptLabel(&buf, count);
+        try testing.expect(h.renderer.bitmap.measureText(label.text, label.font) <= width);
+    }
+
+    // Two digits keep the size they always had, which is what the golden frame
+    // pins; three step down rather than crossing the divider.
+    var buf: [16]u8 = undefined;
+    try testing.expectEqual(FontType.Ubuntu24, h.renderer.aptLabel(&buf, 99).font);
+    try testing.expect(h.renderer.aptLabel(&buf, 150).font != .Ubuntu24);
+    try testing.expectEqualStrings("150", h.renderer.aptLabel(&buf, 150).text);
+}
+
+test "a shrinking APT count leaves nothing behind outside its slot" {
+    // The visible form of the overflow: pixels right of the slot that the
+    // three-digit count drew and the two-digit one never cleared.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(before);
+
+    h.renderer.renderAptUpdates(888);
+    h.renderer.renderAptUpdates(35);
+
+    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+}
+
+test "a missing sensor is drawn as a dash, not as zero" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.renderer.renderDiskTemp(0);
+    h.renderer.renderFanSpeed(0);
+    const zero = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(zero);
+
+    h.renderer.renderDiskTemp(null);
+    h.renderer.renderFanSpeed(null);
+    try testing.expect(!std.mem.eql(u8, zero, h.renderer.bitmap.data));
+
+    // And the dash is exactly what it says, drawn where the reading would be.
+    var expected = try Harness.init();
+    expected.wire();
+    defer expected.deinit();
+    expected.renderer.renderDiskTemp(0);
+    expected.renderer.renderFanSpeed(0);
+    const r = &expected.renderer;
+    r.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
+    r.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
+    const fan_ascent = r.bitmap.getFontAscent(.Ubuntu24);
+    r.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+    r.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    try testing.expectEqualSlices(u8, r.bitmap.data, h.renderer.bitmap.data);
 }
 
 // --- under-voltage warning ---------------------------------------------------
@@ -941,7 +1048,7 @@ test "a changed frame wakes the panel, restores the reference and parks it again
     try h.renderer.showInitialFrame();
 
     h.transport.resetLog();
-    h.renderer.renderCpuLoad(99, 60); // change the frame
+    h.renderer.renderCpuLoad(99); // change the frame
     try h.renderer.updateDisplay(true);
 
     // Reference frame restored before the partial update, or it would smear.
@@ -980,7 +1087,7 @@ test "a full refresh rewrites the reference bank" {
     try h.renderer.showInitialFrame();
 
     h.transport.resetLog();
-    h.renderer.renderCpuLoad(1, 2);
+    h.renderer.renderCpuLoad(1);
     try h.renderer.updateDisplay(false);
 
     // displayBase, not display: leaving the reference stale would make the
@@ -1005,7 +1112,7 @@ test "a failed update forces the next one to be a full refresh" {
     // Panel stops releasing BUSY, so the update dies partway through and the
     // glass no longer matches the reference frame.
     h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50, 50);
+    h.renderer.renderCpuLoad(50);
     try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
     try testing.expect(h.renderer.panel_state_unknown);
 
@@ -1030,7 +1137,7 @@ test "a failed wake leaves the panel marked asleep and the glass trusted" {
 
     // reInit fails, so the wake never completes.
     h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50, 50);
+    h.renderer.renderCpuLoad(50);
     try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
 
     // reInit drives nothing, so the glass still matches the reference and the

@@ -45,7 +45,13 @@ pub const NetworkOps = struct {
         return self.last_signal;
     }
 
-    /// The most recent address found, or null before the first successful look.
+    /// The result of the most recent reachability probe, or null before the
+    /// first. Takes no measurement, unlike `checkInternetConnection`.
+    pub fn lastInternet(self: *const NetworkOps) ?bool {
+        return self.cached_internet;
+    }
+
+    /// The address the most recent look found, or null if it found none.
     pub fn lastIpAddress(self: *const NetworkOps) ?[]const u8 {
         if (self.last_ip_len == 0) return null;
         return self.last_ip[0..self.last_ip_len];
@@ -98,6 +104,11 @@ pub const NetworkOps = struct {
     /// once for anything — and each call builds and frees the entire list, which
     /// already held every answer the next call went back for.
     pub fn getAnyIpAddress(self: *NetworkOps, buf: []u8) !?[]const u8 {
+        // Forgotten before looking, so every way out below that finds nothing
+        // leaves nothing behind. It used to survive losing the address, and
+        // MQTT went on publishing it while the panel said "No IP".
+        self.last_ip_len = 0;
+
         var ifap: ?*c.ifaddrs = null;
         if (c.getifaddrs(&ifap) != 0) return error.GetifaddrsFailed;
         defer c.freeifaddrs(ifap);
@@ -189,7 +200,11 @@ pub const TrafficMonitor = struct {
 
         var buf: [8192]u8 = undefined;
         const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
-        const totals = parse.netDevTotals(buf[0..bytes_read]);
+        const content = buf[0..bytes_read];
+        // Where nothing has a device — a container, say — count what there is
+        // rather than report no traffic at all.
+        const totals = parse.netDevTotalsWhere(content, Physical{ .io = self.io }) orelse
+            parse.netDevTotals(content);
 
         // Monotonic: a wall-clock step would otherwise fabricate a huge or
         // negative interval and with it a nonsense rate.
@@ -226,6 +241,22 @@ pub const TrafficMonitor = struct {
 
         return self.currentResult();
     }
+
+    /// Accepts interfaces backed by hardware, which have a `device` link in
+    /// sysfs. Bridges, veth pairs and tunnels have none, and each of them
+    /// carries bytes a physical interface also counts: container traffic
+    /// crosses a veth, the Docker bridge and eth0, and summing all three
+    /// reported it three times over.
+    const Physical = struct {
+        io: std.Io,
+
+        pub fn counts(self: Physical, name: []const u8) bool {
+            var path_buf: [64]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
+            std.Io.Dir.accessAbsolute(self.io, path, .{}) catch return false;
+            return true;
+        }
+    };
 
     /// Record the counters and the instant they were read at, as one step.
     fn takeSample(self: *TrafficMonitor, totals: parse.NetTotals, now: i64) void {

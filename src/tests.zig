@@ -12,8 +12,10 @@
 test {
     _ = @import("parse.zig");
     _ = @import("syscall.zig");
+    _ = @import("bounded_connect.zig");
     _ = @import("scheduler.zig");
     _ = @import("config.zig");
+    _ = @import("logger.zig");
     _ = @import("graphics.zig");
     _ = @import("bmp.zig");
     _ = @import("mqtt.zig");

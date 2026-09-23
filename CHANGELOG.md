@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
+| Unreleased | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
+| Unreleased | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
 | 1.5.0 | Network rates became decimal: `kB` now means 1000 bytes, matching the label. Earlier releases divided by 1024. | Displayed and MQTT-published rates read 2.4% higher for the same throughput. Nothing to do unless you have alerts on absolute values. |
 | 1.5.0 | The APT repository is signed. | Replace `[trusted=yes]` with `signed-by=`; see the README. The old line keeps working but authenticates nothing. |
 | 1.4.0 | The MQTT `internet` entity became a `binary_sensor` with `device_class: connectivity`. | Home Assistant creates a new entity. Clear the retained config at `homeassistant/sensor/sysink/internet/config` to drop the stale `sensor.*` one. |
@@ -19,6 +21,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+### Fixed
+- **The internet indicator said "connected" with no network at all.** A
+  non-blocking connect that fails on the spot — `ENETUNREACH` when the Wi-Fi or
+  the DHCP lease is gone — leaves the socket closed with no pending error, and
+  the kernel reports a closed socket as writable. The probe ignored the connect
+  return and took that for success, on the panel and in Home Assistant.
+- **MQTT could recurse without bound.** Publishing reconnected on its own, and
+  connecting publishes discovery, so a broker that dropped the client after
+  CONNACK drove connect → discovery → publish → connect until the stack ran
+  out. A failed send also never counted towards the reconnect backoff.
+- **An MQTT send could freeze the panel.** With a broker that vanished without a
+  reset, the send buffer filled after about ten minutes and the next blocking
+  send stalled the main loop until TCP gave up. Sends wait at most five seconds
+  for room now.
+- **Three-digit APT counts overflowed their slot** and left pixels on the panel
+  that stayed after the count shrank. The count steps down to smaller fonts,
+  and shows `999+` past what fits.
+- **The APT count was one too high under a non-English locale**, because apt
+  translates the header the parser skipped by name. The parser counts
+  `name/suite` lines only, and apt runs in the C locale.
+- **armhf releases crashed on the Pi Zero, Zero W and Pi 1.** They were built
+  for ARMv7, and those boards are ARMv6. They are built for the ARM1176 now,
+  which runs on every 32-bit Pi. Cross-compiled, not yet run on an ARMv6 board.
+- **Network traffic was counted two or three times over on hosts running
+  Docker**, once per veth, bridge and physical interface it crossed. Only
+  hardware-backed interfaces are counted now.
+- A missing sensor was reported as a reading of zero: "0°C" for the disk on
+  every Pi without NVMe, "0" RPM with no fan, and the same values published to
+  Home Assistant. The panel shows a dash and MQTT publishes nothing.
+- A failed temperature reading hid the CPU load beside it, and the disk
+  temperature the usage. Each slot is read and drawn on its own.
+- The panel's reachability icon was redrawn only every `INTERVAL_SLOW`, while
+  MQTT probed up to once a minute, so the two could disagree for hours. The IP
+  address was on the slow tick too, and after the address was lost MQTT kept
+  publishing the old one.
+- Two panels on one broker overwrote each other's Home Assistant entities: the
+  discovery identity was hard-coded. See the breaking-changes table.
+- Descriptors were inherited by `apt` and its hooks: the SPI device, the wake
+  pipe and the MQTT socket among them. `MQTT_PASSWORD` was passed to them in the
+  environment as well.
+- A log file that could not be opened stopped the daemon from starting. Logging
+  falls back to stderr.
+
+### Added
+- Home Assistant entities expire after three `INTERVAL_FAST` periods without an
+  update, so a panel that is switched off does not keep showing its last
+  readings as current.
+- Numeric sensors carry `state_class: measurement`, which gives them long-term
+  statistics in Home Assistant.
+- The `.deb` ships a logrotate entry for the default log path. The log file is
+  written in append mode so rotation works under a running daemon, and its lines
+  carry a UTC date.
+
+### Changed
+- The service unit is sandboxed where that costs nothing: no access to home
+  directories, no writes to kernel tunables or cgroups, no module loading, no new
+  privileges. Devices, `/var` and `/tmp` stay reachable.
+- The IP address is read every `INTERVAL_FAST` instead of every `INTERVAL_SLOW`.
+- Log prefixes are formatted once rather than compiled into every log call
+  site: 362000 to 348120 bytes on `aarch64-linux-musl` with `ReleaseSmall`.
 
 ## [1.7.0] — 2026-09-20
 

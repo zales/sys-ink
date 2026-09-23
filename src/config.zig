@@ -13,6 +13,30 @@ pub fn parseBool(val: []const u8) bool {
     return false;
 }
 
+/// Variables withheld from child processes. The daemon has no use for passing
+/// them on, and `apt update` runs every configured hook with the environment it
+/// is given.
+const secret_variables = [_][]const u8{"MQTT_PASSWORD"};
+
+/// The environment for commands whose output is parsed: the daemon's own, in
+/// the C locale, without the secrets.
+///
+/// C locale because the parsers match on the output's words, and a service
+/// inherits the system LANG. The environment is otherwise kept whole rather
+/// than rebuilt from scratch, so settings such as `http_proxy` still reach apt.
+/// Caller owns the result.
+pub fn childEnvironment(
+    gpa: std.mem.Allocator,
+    parent: ?*const std.process.Environ.Map,
+) !std.process.Environ.Map {
+    var env: std.process.Environ.Map = if (parent) |p| try p.clone(gpa) else .init(gpa);
+    errdefer env.deinit();
+
+    try env.put("LC_ALL", "C");
+    for (secret_variables) |name| _ = env.swapRemove(name);
+    return env;
+}
+
 /// Application configuration loaded from environment variables
 pub const Config = struct {
     /// CPU load critical threshold (%) - values above this are highlighted
@@ -80,10 +104,10 @@ pub const Config = struct {
     /// SPI device path
     pub var spi_device: []const u8 = "/dev/spidev0.0";
 
-    /// Scheduler interval for fast updates (CPU, RAM, etc.) in seconds
+    /// Scheduler interval for fast updates (CPU, RAM, IP, etc.) in seconds
     pub var interval_fast: u32 = 30;
 
-    /// Scheduler interval for slow updates (IP, APT, Internet) in seconds
+    /// Scheduler interval for slow updates (APT, Internet) in seconds
     pub var interval_slow: u32 = 10800; // 3 hours
 
     /// How often to force a full (non-partial) refresh, in seconds. Full
@@ -221,7 +245,7 @@ pub const Config = struct {
         var i: u8 = 0;
         while (i < 32) : (i += 1) {
             const path = std.fmt.bufPrintZ(&path_buf, "/dev/gpiochip{d}", .{i}) catch continue;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             defer _ = std.os.linux.close(fd);
 
             var info: GpiochipInfo = undefined;
@@ -250,6 +274,32 @@ test "parseBool accepts the usual truthy spellings" {
     for ([_][]const u8{ "0", "false", "no", "off", "", "2", "maybe" }) |val| {
         try testing.expect(!parseBool(val));
     }
+}
+
+test "childEnvironment forces the C locale and drops the broker password" {
+    var parent: std.process.Environ.Map = .init(testing.allocator);
+    defer parent.deinit();
+    try parent.put("LANG", "cs_CZ.UTF-8");
+    try parent.put("LC_ALL", "cs_CZ.UTF-8");
+    try parent.put("MQTT_PASSWORD", "secret");
+    try parent.put("http_proxy", "http://proxy:3128");
+
+    var child = try childEnvironment(testing.allocator, &parent);
+    defer child.deinit();
+
+    try testing.expectEqualStrings("C", child.get("LC_ALL").?);
+    try testing.expect(child.get("MQTT_PASSWORD") == null);
+    // Everything else passes through, proxies included.
+    try testing.expectEqualStrings("http://proxy:3128", child.get("http_proxy").?);
+    // And the daemon's own environment is left as it was.
+    try testing.expectEqualStrings("secret", parent.get("MQTT_PASSWORD").?);
+}
+
+test "childEnvironment works without a parent environment" {
+    var child = try childEnvironment(testing.allocator, null);
+    defer child.deinit();
+    try testing.expectEqualStrings("C", child.get("LC_ALL").?);
+    try testing.expectEqual(@as(usize, 1), child.count());
 }
 
 test "LogLevel.parse accepts both WARN and WARNING" {

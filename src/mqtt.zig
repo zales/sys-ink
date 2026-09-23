@@ -21,32 +21,61 @@ pub const Sensor = struct {
     component: enum { sensor, binary_sensor } = .sensor,
     unit: ?[]const u8 = null,
     device_class: ?[]const u8 = null,
+    /// "measurement" makes Home Assistant keep long-term statistics, which is
+    /// what its history graphs past ten days and its min/max cards read from.
+    state_class: ?[]const u8 = null,
     icon: ?[]const u8 = null,
 };
 
 /// Every entity published under the SysInk device.
 pub const sensors = [_]Sensor{
-    .{ .id = "cpu_load", .name = "CPU Load", .unit = "%", .icon = "mdi:cpu-64-bit" },
-    .{ .id = "cpu_temp", .name = "CPU Temperature", .unit = "°C", .device_class = "temperature", .icon = "mdi:thermometer" },
-    .{ .id = "memory", .name = "Memory Usage", .unit = "%", .icon = "mdi:memory" },
-    .{ .id = "disk_usage", .name = "Disk Usage", .unit = "%", .icon = "mdi:harddisk" },
-    .{ .id = "disk_temp", .name = "Disk Temperature", .unit = "°C", .device_class = "temperature", .icon = "mdi:thermometer" },
-    .{ .id = "fan_speed", .name = "Fan Speed", .unit = "RPM", .icon = "mdi:fan" },
-    .{ .id = "signal_strength", .name = "WiFi Signal", .unit = "dBm", .device_class = "signal_strength", .icon = "mdi:wifi" },
+    .{ .id = "cpu_load", .name = "CPU Load", .unit = "%", .state_class = measurement, .icon = "mdi:cpu-64-bit" },
+    .{ .id = "cpu_temp", .name = "CPU Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
+    .{ .id = "memory", .name = "Memory Usage", .unit = "%", .state_class = measurement, .icon = "mdi:memory" },
+    .{ .id = "disk_usage", .name = "Disk Usage", .unit = "%", .state_class = measurement, .icon = "mdi:harddisk" },
+    .{ .id = "disk_temp", .name = "Disk Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
+    .{ .id = "fan_speed", .name = "Fan Speed", .unit = "RPM", .state_class = measurement, .icon = "mdi:fan" },
+    .{ .id = "signal_strength", .name = "WiFi Signal", .unit = "dBm", .device_class = "signal_strength", .state_class = measurement, .icon = "mdi:wifi" },
     .{ .id = "ip_address", .name = "IP Address", .icon = "mdi:ip-network" },
     .{ .id = "internet", .name = "Internet Connected", .component = .binary_sensor, .device_class = "connectivity", .icon = "mdi:web" },
-    .{ .id = "traffic_down", .name = "Download Speed", .unit = "kB/s", .device_class = "data_rate", .icon = "mdi:download" },
-    .{ .id = "traffic_up", .name = "Upload Speed", .unit = "kB/s", .device_class = "data_rate", .icon = "mdi:upload" },
-    .{ .id = "uptime_days", .name = "Uptime Days", .unit = "d", .icon = "mdi:clock-outline" },
-    .{ .id = "apt_updates", .name = "APT Updates", .icon = "mdi:package-up" },
+    .{ .id = "traffic_down", .name = "Download Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:download" },
+    .{ .id = "traffic_up", .name = "Upload Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:upload" },
+    .{ .id = "uptime_days", .name = "Uptime Days", .unit = "d", .state_class = measurement, .icon = "mdi:clock-outline" },
+    .{ .id = "apt_updates", .name = "APT Updates", .state_class = measurement, .icon = "mdi:package-up" },
     // device_class problem makes Home Assistant treat ON as a fault, so it shows
     // up in the "problems" view and can drive a notification without a template.
     .{ .id = "undervoltage", .name = "Under-voltage", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:flash-alert" },
     .{ .id = "nvme_fault", .name = "NVMe SMART Fault", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:harddisk-remove" },
     // Vendor's life-used estimate from the same SMART page; the long-term trend
     // is the early warning the fault bit only gives at the end.
-    .{ .id = "ssd_wear", .name = "SSD Wear", .unit = "%", .icon = "mdi:chart-donut" },
+    .{ .id = "ssd_wear", .name = "SSD Wear", .unit = "%", .state_class = measurement, .icon = "mdi:chart-donut" },
 };
+
+const measurement = "measurement";
+
+/// Node id, unique_id stem and device identifier for the default client id —
+/// and what every release before this one used unconditionally. Deriving the
+/// others from the client id while keeping this one for the default leaves an
+/// existing single-device setup exactly as Home Assistant already knows it.
+const default_node_id = "sysink";
+
+/// Longest node id derived from a client id; longer ids are cut.
+const max_node_id_len = 64;
+
+/// The discovery node id for `client_id`, written into `buf`.
+///
+/// Home Assistant only recognises `[a-zA-Z0-9_-]` in that position of a
+/// discovery topic and silently ignores a config published anywhere else, so
+/// every other character becomes `_`.
+pub fn nodeId(buf: *[max_node_id_len]u8, client_id: []const u8) []const u8 {
+    if (client_id.len == 0) return default_node_id;
+
+    const len = @min(client_id.len, buf.len);
+    for (buf[0..len], client_id[0..len]) |*out, ch| {
+        out.* = if (std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-') ch else '_';
+    }
+    return buf[0..len];
+}
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration
 pub const MqttClient = struct {
@@ -60,6 +89,9 @@ pub const MqttClient = struct {
     password: ?[]const u8,
     topic_prefix: []const u8,
     discovery_enabled: bool,
+    /// Storage for `nodeId`'s result; read through `node()`.
+    node_id_buf: [max_node_id_len]u8 = undefined,
+    node_id_len: usize = 0,
     connected: bool = false,
     // Reconnect backoff state
     last_failed_attempt: i64 = 0,
@@ -74,6 +106,13 @@ pub const MqttClient = struct {
     /// than refusing them would block the render loop for the kernel's SYN
     /// timeout, around two minutes.
     const connect_timeout_ms = 5000;
+
+    /// Cap on waiting for room in the send buffer. The socket is blocking, and
+    /// with keepalive off nothing notices a broker that has silently vanished
+    /// until TCP gives up retransmitting, around fifteen minutes. Well before
+    /// that the send buffer fills, and an unbounded send would then freeze the
+    /// render loop for the minutes that remain.
+    const send_timeout_ms = 5000;
 
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
@@ -96,7 +135,7 @@ pub const MqttClient = struct {
         io: std.Io,
         cfg: MqttConfig,
     ) Self {
-        return .{
+        var self: Self = .{
             .allocator = allocator,
             .io = io,
             .host = cfg.host,
@@ -107,6 +146,16 @@ pub const MqttClient = struct {
             .topic_prefix = cfg.topic_prefix,
             .discovery_enabled = cfg.discovery_enabled,
         };
+        var buf: [max_node_id_len]u8 = undefined;
+        const id = nodeId(&buf, cfg.client_id);
+        @memcpy(self.node_id_buf[0..id.len], id);
+        self.node_id_len = id.len;
+        return self;
+    }
+
+    /// This device's discovery node id. See `nodeId`.
+    fn node(self: *const Self) []const u8 {
+        return self.node_id_buf[0..self.node_id_len];
     }
 
     pub fn deinit(self: *Self) void {
@@ -189,13 +238,11 @@ pub const MqttClient = struct {
             return;
         }
 
-        if (self.stream) |stream| {
-            // Best-effort; the broker reaps us on socket close anyway.
-            const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT, 0 remaining length
-            stream.socket.send(self.io, &stream.socket.address, &disconnect_packet) catch |err| {
-                log.debug("DISCONNECT send failed: {t}", .{err});
-            };
-        }
+        // Best-effort; the broker reaps us on socket close anyway.
+        const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT, 0 remaining length
+        self.sendPacket(&disconnect_packet) catch |err| {
+            log.debug("DISCONNECT send failed: {t}", .{err});
+        };
 
         self.closeStream();
         self.connected = false;
@@ -212,18 +259,28 @@ pub const MqttClient = struct {
     }
 
     /// Publish to an exact topic, bypassing the prefix.
+    ///
+    /// Never connects. Reconnecting is `connect`'s job alone, which the caller
+    /// invokes once per cycle behind the backoff. This used to reconnect on its
+    /// own whenever the connection had dropped, and `connect` publishes
+    /// discovery through this very function — so a broker that dropped the
+    /// client after CONNACK (an ACL that disconnects on a denied publish does)
+    /// recursed connect → discovery → publish → connect without bound, a fresh
+    /// TCP connection per level, until the stack ran out.
     fn publishRaw(self: *Self, topic: []const u8, payload: []const u8, retain: bool) !void {
-        if (!self.connected) try self.connect();
-        const stream = self.stream orelse return error.NotConnected;
+        if (!self.connected) return error.NotConnected;
 
         var packet_buf: [max_packet_len]u8 = undefined;
         const packet = try buildPublish(&packet_buf, topic, payload, retain);
 
-        stream.socket.send(self.io, &stream.socket.address, packet) catch |err| {
+        self.sendPacket(packet) catch |err| {
             log.warn("MQTT publish failed (topic={s}): {t}", .{ topic, err });
-            // Force a reconnect on the next publish.
             self.connected = false;
             self.closeStream();
+            // Counted like a failed connect, so a broker that accepts the
+            // connection and then drops it is retried behind the backoff rather
+            // than immediately.
+            self.recordFailure();
             return err;
         };
     }
@@ -236,6 +293,8 @@ pub const MqttClient = struct {
         for (sensors) |sensor| {
             self.publishSensorDiscovery(sensor) catch |err| {
                 log.warn("Discovery publish failed for {s}: {t}", .{ sensor.id, err });
+                // The rest would only fail the same way, one warning each.
+                if (!self.connected) break;
                 continue;
             };
             published += 1;
@@ -246,39 +305,29 @@ pub const MqttClient = struct {
 
     fn publishSensorDiscovery(self: *Self, sensor: Sensor) !void {
         var topic_buf: [160]u8 = undefined;
-        const topic = try std.fmt.bufPrint(
-            &topic_buf,
-            "homeassistant/{t}/sysink/{s}/config",
-            .{ sensor.component, sensor.id },
-        );
+        const topic = try discoveryTopic(&topic_buf, sensor, self.node());
 
-        var payload_buf: [640]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&payload_buf);
+        var payload_buf: [discovery_payload_max]u8 = undefined;
+        const payload = try discoveryPayload(&payload_buf, sensor, .{
+            .node_id = self.node(),
+            .topic_prefix = self.topic_prefix,
+            .expire_after = expireAfterSeconds(),
+        });
 
-        try writer.print("{{\"name\":\"{s}\"", .{sensor.name});
-        try writer.print(",\"state_topic\":\"{s}/{s}\"", .{ self.topic_prefix, sensor.id });
-        try writer.print(",\"unique_id\":\"sysink_{s}\"", .{sensor.id});
-
-        if (sensor.unit) |unit| try writer.print(",\"unit_of_measurement\":\"{s}\"", .{unit});
-        if (sensor.device_class) |dc| try writer.print(",\"device_class\":\"{s}\"", .{dc});
-        if (sensor.icon) |icon| try writer.print(",\"icon\":\"{s}\"", .{icon});
-
-        try writer.writeAll(
-            \\,"device":{"identifiers":["sysink"],"name":"SysInk",
-        );
-        try writer.writeAll(
-            \\"manufacturer":"SysInk","model":"E-Paper Monitor"}}
-        );
-
-        try self.publishRaw(topic, writer.buffered(), true);
+        try self.publishRaw(topic, payload, true);
     }
 
     fn sendConnect(self: *Self) !void {
-        const stream = self.stream orelse return error.NotConnected;
-
         var packet_buf: [max_packet_len]u8 = undefined;
         const packet = try buildConnect(&packet_buf, self.client_id, self.username, self.password);
 
+        try self.sendPacket(packet);
+    }
+
+    /// Send one whole packet, waiting at most `send_timeout_ms` for room.
+    fn sendPacket(self: *Self, packet: []const u8) !void {
+        const stream = self.stream orelse return error.NotConnected;
+        try bounded_connect.waitWritable(stream.socket.handle, send_timeout_ms);
         try stream.socket.send(self.io, &stream.socket.address, packet);
     }
 
@@ -322,6 +371,65 @@ pub const MqttClient = struct {
         };
     }
 };
+
+/// Where Home Assistant looks for `sensor`'s discovery config.
+fn discoveryTopic(buf: []u8, sensor: Sensor, node_id: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "homeassistant/{t}/{s}/{s}/config", .{ sensor.component, node_id, sensor.id });
+}
+
+/// Room for the largest discovery payload, with space for a long prefix.
+const discovery_payload_max = 768;
+
+const DiscoveryOptions = struct {
+    node_id: []const u8,
+    topic_prefix: []const u8,
+    /// Seconds without a state update before Home Assistant shows the entity
+    /// as unavailable.
+    expire_after: u64,
+};
+
+/// How long a reading stays valid in Home Assistant: three publish intervals.
+///
+/// Without an expiry a Pi that is switched off, or a daemon that has stopped,
+/// leaves every entity showing its last value indefinitely, which reads as a
+/// healthy machine. Three intervals ride out a missed cycle or two.
+fn expireAfterSeconds() u64 {
+    return 3 * @as(u64, config.Config.interval_fast);
+}
+
+/// Build `sensor`'s discovery config as JSON.
+///
+/// The topic prefix comes from the environment and is escaped; every other
+/// string is either a constant here or a node id, which `nodeId` restricts to
+/// characters JSON leaves alone.
+fn discoveryPayload(buf: []u8, sensor: Sensor, opts: DiscoveryOptions) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buf);
+    const w = &writer;
+
+    var state_topic_buf: [320]u8 = undefined;
+    const state_topic = try std.fmt.bufPrint(&state_topic_buf, "{s}/{s}", .{ opts.topic_prefix, sensor.id });
+
+    try w.print("{{\"name\":\"{s}\"", .{sensor.name});
+    try w.writeAll(",\"state_topic\":");
+    try std.json.Stringify.encodeJsonString(state_topic, .{}, w);
+    try w.print(",\"unique_id\":\"{s}_{s}\"", .{ opts.node_id, sensor.id });
+
+    if (sensor.unit) |unit| try w.print(",\"unit_of_measurement\":\"{s}\"", .{unit});
+    if (sensor.device_class) |dc| try w.print(",\"device_class\":\"{s}\"", .{dc});
+    if (sensor.state_class) |sc| try w.print(",\"state_class\":\"{s}\"", .{sc});
+    if (sensor.icon) |icon| try w.print(",\"icon\":\"{s}\"", .{icon});
+    try w.print(",\"expire_after\":{d}", .{opts.expire_after});
+
+    // The default device keeps the name it always had; any other gets its node
+    // id appended, so two panels do not both appear as "SysInk".
+    try w.print(",\"device\":{{\"identifiers\":[\"{s}\"],\"name\":\"SysInk", .{opts.node_id});
+    if (!std.mem.eql(u8, opts.node_id, default_node_id)) try w.print(" {s}", .{opts.node_id});
+    try w.writeAll(
+        \\","manufacturer":"SysInk","model":"E-Paper Monitor"}}
+    );
+
+    return writer.buffered();
+}
 
 /// Validate a CONNACK packet and map its return code to an error.
 fn interpretConnack(packet: [4]u8) !void {
@@ -465,7 +573,10 @@ pub const MqttConfig = struct {
     discovery_enabled: bool = true,
 
     pub fn load(init: std.process.Init) MqttConfig {
-        const env = init.environ_map;
+        return fromEnv(init.environ_map);
+    }
+
+    pub fn fromEnv(env: *const std.process.Environ.Map) MqttConfig {
         var cfg = MqttConfig{};
 
         if (env.get("MQTT_ENABLED")) |val| cfg.enabled = config.parseBool(val);
@@ -474,7 +585,10 @@ pub const MqttConfig = struct {
         if (env.get("MQTT_USERNAME")) |val| cfg.username = val;
         if (env.get("MQTT_PASSWORD")) |val| cfg.password = val;
         if (env.get("MQTT_CLIENT_ID")) |val| cfg.client_id = val;
-        if (env.get("MQTT_TOPIC_PREFIX")) |val| cfg.topic_prefix = val;
+        // Follows the client id unless set, so a second panel on the same broker
+        // needs one variable changed rather than two. The defaults are equal, so
+        // an existing setup keeps its topics.
+        cfg.topic_prefix = env.get("MQTT_TOPIC_PREFIX") orelse cfg.client_id;
         if (env.get("MQTT_DISCOVERY")) |val| cfg.discovery_enabled = config.parseBool(val);
 
         return cfg;
@@ -577,6 +691,125 @@ test "interpretConnack accepts success and maps refusals" {
 test "interpretConnack rejects a non-CONNACK packet" {
     // PUBLISH where CONNACK was expected.
     try testing.expectError(error.UnexpectedPacket, interpretConnack(.{ 0x30, 0x02, 0x00, 0x00 }));
+}
+
+test "publishing on a dropped connection does not reconnect behind the caller" {
+    // `io` is left undefined on purpose: any attempt to resolve, connect or read
+    // the clock would trip over it. Reconnecting is `connect`'s job only.
+    var client = MqttClient.init(testing.allocator, undefined, .{});
+    defer client.deinit();
+
+    try testing.expectError(error.NotConnected, client.publish("cpu_load", "1", false));
+    try testing.expectEqual(@as(u32, 0), client.consecutive_failures);
+}
+
+fn sensorById(id: []const u8) Sensor {
+    for (sensors) |s| if (std.mem.eql(u8, s.id, id)) return s;
+    unreachable;
+}
+
+test "the default client id keeps the discovery identity every release used" {
+    // An existing installation must not see its entities duplicated.
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "sysink");
+
+    var topic_buf: [160]u8 = undefined;
+    try testing.expectEqualStrings(
+        "homeassistant/sensor/sysink/cpu_load/config",
+        try discoveryTopic(&topic_buf, sensorById("cpu_load"), node_id),
+    );
+
+    var payload_buf: [discovery_payload_max]u8 = undefined;
+    const payload = try discoveryPayload(&payload_buf, sensorById("cpu_load"), .{
+        .node_id = node_id,
+        .topic_prefix = "sysink",
+        .expire_after = 90,
+    });
+    try testing.expect(std.mem.indexOf(u8, payload, "\"unique_id\":\"sysink_cpu_load\"") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "\"identifiers\":[\"sysink\"],\"name\":\"SysInk\"") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "\"state_topic\":\"sysink/cpu_load\"") != null);
+}
+
+test "a second device gets its own identity from its client id" {
+    // Two panels on one broker used to publish the same discovery topics and
+    // unique ids, so the second overwrote the first in Home Assistant.
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "office.pi");
+    try testing.expectEqualStrings("office_pi", node_id);
+
+    var topic_buf: [160]u8 = undefined;
+    try testing.expectEqualStrings(
+        "homeassistant/binary_sensor/office_pi/internet/config",
+        try discoveryTopic(&topic_buf, sensorById("internet"), node_id),
+    );
+
+    var payload_buf: [discovery_payload_max]u8 = undefined;
+    const payload = try discoveryPayload(&payload_buf, sensorById("internet"), .{
+        .node_id = node_id,
+        .topic_prefix = "office.pi",
+        .expire_after = 90,
+    });
+    try testing.expect(std.mem.indexOf(u8, payload, "\"unique_id\":\"office_pi_internet\"") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"SysInk office_pi\"") != null);
+}
+
+test "nodeId keeps only what a discovery topic accepts" {
+    var buf: [max_node_id_len]u8 = undefined;
+    try testing.expectEqualStrings("a-b_c", nodeId(&buf, "a-b_c"));
+    try testing.expectEqualStrings("pi_4_home_", nodeId(&buf, "pi/4 home#"));
+    try testing.expectEqualStrings(default_node_id, nodeId(&buf, ""));
+    try testing.expectEqual(@as(usize, max_node_id_len), nodeId(&buf, "x" ** 100).len);
+}
+
+test "every discovery payload is valid JSON carrying expiry and state class" {
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "sysink");
+
+    for (sensors) |sensor| {
+        var payload_buf: [discovery_payload_max]u8 = undefined;
+        // A prefix with characters JSON must escape.
+        const payload = try discoveryPayload(&payload_buf, sensor, .{
+            .node_id = node_id,
+            .topic_prefix = "odd\"prefix\\",
+            .expire_after = 90,
+        });
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, payload, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+
+        try testing.expectEqual(@as(i64, 90), obj.get("expire_after").?.integer);
+        var expected_buf: [64]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(&expected_buf, "odd\"prefix\\/{s}", .{sensor.id}),
+            obj.get("state_topic").?.string,
+        );
+        if (sensor.state_class) |sc| {
+            try testing.expectEqualStrings(sc, obj.get("state_class").?.string);
+        } else {
+            try testing.expect(obj.get("state_class") == null);
+        }
+    }
+}
+
+test "numeric sensors keep statistics and the rest do not" {
+    for (sensors) |sensor| {
+        const numeric = sensor.component == .sensor and !std.mem.eql(u8, sensor.id, "ip_address");
+        try testing.expectEqual(numeric, sensor.state_class != null);
+    }
+}
+
+test "the topic prefix follows the client id unless set" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+
+    try testing.expectEqualStrings("sysink", MqttConfig.fromEnv(&env).topic_prefix);
+
+    try env.put("MQTT_CLIENT_ID", "office");
+    try testing.expectEqualStrings("office", MqttConfig.fromEnv(&env).topic_prefix);
+
+    try env.put("MQTT_TOPIC_PREFIX", "custom");
+    try testing.expectEqualStrings("custom", MqttConfig.fromEnv(&env).topic_prefix);
 }
 
 test "sensor ids are unique" {

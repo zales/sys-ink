@@ -109,7 +109,7 @@ pub const GpioNative = struct {
     const LINE_SET_VALUES_IOCTL = iowr(0xB4, 0x0F, LineValues);
 
     pub fn requestLine(chip_path: []const u8, pin: u32, direction: RequestType) !Handle {
-        const chip_fd = try std.posix.openat(std.posix.AT.FDCWD, chip_path, .{ .ACCMODE = .RDWR }, 0);
+        const chip_fd = try std.posix.openat(std.posix.AT.FDCWD, chip_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
         defer _ = std.os.linux.close(chip_fd);
 
         var req = std.mem.zeroes(LineRequest);

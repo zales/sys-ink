@@ -61,7 +61,7 @@ pub const EpdConfig = struct {
 
         const spi_path = @import("../config.zig").Config.spi_device;
         log.info("Opening SPI device {s}", .{spi_path});
-        self.spi_fd = std.posix.openat(std.posix.AT.FDCWD, spi_path, .{ .ACCMODE = .RDWR }, 0) catch |err| {
+        self.spi_fd = std.posix.openat(std.posix.AT.FDCWD, spi_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch |err| {
             log.err("Failed to open SPI device {s}: {t}", .{ spi_path, err });
             log.err("Is SPI enabled, and is this user in the 'spi' group?", .{});
             return error.SpiOpenFailed;

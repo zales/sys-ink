@@ -453,8 +453,10 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// Enter deep sleep - from C reference EPD_2IN9_V2_Sleep.
         ///
         /// Waveshare requires this before cutting power; leaving the panel driven at
-        /// high voltage shortens its life. Waking up afterwards needs a full
-        /// `initDisplay`, so this is a shutdown-only call.
+        /// high voltage shortens its life. With PANEL_SLEEP on it also runs after
+        /// every visible update. Waking takes `reInit`, not a full `initDisplay`,
+        /// and the partial-update reference must then be restored with
+        /// `primeBase` before anything else; see there.
         pub fn sleep(self: *Self) !void {
             try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{deep_sleep_mode_1});
             self.config.delayMs(100);

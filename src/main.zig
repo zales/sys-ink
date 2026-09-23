@@ -71,18 +71,19 @@ const App = struct {
     // Display tasks
     // ------------------------------------------------------------------------
 
-    fn updateCpu(self: *App) void {
-        const load = self.sys.getCpuLoad() catch |err| {
-            log.warn("getCpuLoad failed: {t}", .{err});
-            return;
-        };
-        const temp = self.sys.getCpuTemperature() catch |err| {
-            log.warn("getCpuTemperature failed: {t}", .{err});
-            return;
-        };
+    // Paired readings are taken and drawn independently, so one failing leaves
+    // only its own slot stale instead of taking its neighbour down with it.
 
-        self.renderer.renderCpuLoad(load, temp);
-        log.debug("CPU: {d}% / {d}°C", .{ load, temp });
+    fn updateCpu(self: *App) void {
+        if (self.sys.getCpuLoad()) |load| {
+            self.renderer.renderCpuLoad(load);
+            log.debug("CPU load: {d}%", .{load});
+        } else |err| log.warn("getCpuLoad failed: {t}", .{err});
+
+        if (self.sys.getCpuTemperature()) |temp| {
+            self.renderer.renderCpuTemp(temp);
+            log.debug("CPU temperature: {d}°C", .{temp});
+        } else |err| log.warn("getCpuTemperature failed: {t}", .{err});
     }
 
     fn updateMemory(self: *App) void {
@@ -95,17 +96,15 @@ const App = struct {
     }
 
     fn updateDisk(self: *App) void {
-        const usage = self.sys.getDiskUsage() catch |err| {
-            log.warn("getDiskUsage failed: {t}", .{err});
-            return;
-        };
-        const temp = self.sys.getDiskTemp() catch |err| {
-            log.warn("getDiskTemp failed: {t}", .{err});
-            return;
-        };
+        if (self.sys.getDiskUsage()) |usage| {
+            self.renderer.renderDiskUsage(usage);
+            log.debug("Disk usage: {d}%", .{usage});
+        } else |err| log.warn("getDiskUsage failed: {t}", .{err});
 
-        self.renderer.renderDiskStats(usage, temp);
-        log.debug("Disk: {d}% / {d}°C", .{ usage, temp });
+        if (self.sys.getDiskTemp()) |temp| {
+            self.renderer.renderDiskTemp(temp);
+            log.debug("Disk temperature: {?d}°C", .{temp});
+        } else |err| log.warn("getDiskTemp failed: {t}", .{err});
     }
 
     fn updateFan(self: *App) void {
@@ -114,7 +113,7 @@ const App = struct {
             return;
         };
         self.renderer.renderFanSpeed(rpm);
-        log.debug("Fan: {d} RPM", .{rpm});
+        log.debug("Fan: {?d} RPM", .{rpm});
     }
 
     fn updateSignal(self: *App) void {
@@ -181,6 +180,17 @@ const App = struct {
     fn updateInternet(self: *App) void {
         const connected = self.net.checkInternetConnection();
         log.debug("Internet: {}", .{connected});
+        self.renderer.renderInternetStatus(connected);
+    }
+
+    /// Repaint the reachability icon from the latest probe, whoever took it.
+    ///
+    /// The probe itself runs on the slow interval, and also for MQTT, up to
+    /// once a minute. The panel only ever drew the slow one, so with MQTT
+    /// enabled it could show "connected" for hours while Home Assistant had
+    /// long since been told otherwise.
+    fn renderInternet(self: *App) void {
+        const connected = self.net.lastInternet() orelse return;
         self.renderer.renderInternetStatus(connected);
     }
 
@@ -299,8 +309,9 @@ const App = struct {
         publishFmt(client, "cpu_temp", "{d}", .{self.sys.last_cpu_temp});
         publishFmt(client, "memory", "{d}", .{self.sys.last_memory});
         publishFmt(client, "disk_usage", "{d}", .{self.sys.last_disk_usage});
-        publishFmt(client, "disk_temp", "{d}", .{self.sys.last_disk_temp});
-        publishFmt(client, "fan_speed", "{d}", .{self.sys.last_fan_speed});
+        // Absent sensors publish nothing rather than a reading of zero.
+        if (self.sys.last_disk_temp) |temp| publishFmt(client, "disk_temp", "{d}", .{temp});
+        if (self.sys.last_fan_speed) |rpm| publishFmt(client, "fan_speed", "{d}", .{rpm});
         if (self.last_undervoltage) |active| {
             client.publish("undervoltage", if (active) "ON" else "OFF", false) catch {};
         }
@@ -357,7 +368,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     config.Config.load(init);
 
-    try logger.init(io);
+    logger.init(io);
     defer logger.deinit();
 
     // Runs unprivileged as long as the user is in the gpio and spi groups.
@@ -365,7 +376,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     log.info("SysInk starting", .{});
 
-    var sys_ops = SystemOps.init(allocator, io);
+    var sys_ops = SystemOps.init(allocator, io, init.environ_map);
     defer sys_ops.deinit();
     var net_ops = NetworkOps.init(io);
     var traffic_mon = TrafficMonitor.init(io);
@@ -436,8 +447,11 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
     try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
     try scheduler.every(fast, "nvme_health", &app, App.updateNvmeHealth);
+    // One getifaddrs walk, cheap enough for the fast tick; on the slow one a
+    // DHCP change stayed off the panel for up to three hours.
+    try scheduler.every(fast, "ip", &app, App.updateIp);
+    try scheduler.every(fast, "internet_render", &app, App.renderInternet);
 
-    try scheduler.every(slow, "ip", &app, App.updateIp);
     try scheduler.every(slow, "apt", &app, App.updateApt);
     try scheduler.every(slow, "internet", &app, App.updateInternet);
 
@@ -485,7 +499,10 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn installSignalHandlers() void {
     var fds: [2]i32 = undefined;
-    if (syscall.ok(std.os.linux.pipe(&fds))) {
+    // Close-on-exec, or every command the daemon runs inherits both ends.
+    // Non-blocking so the handler's write can never stall, not even on a pipe
+    // that nobody drains.
+    if (syscall.ok(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true }))) {
         wake_pipe = fds;
     } else {
         log.warn("Failed to create wake pipe; shutdown may lag by up to a second", .{});

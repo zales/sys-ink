@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const parse = @import("parse.zig");
 const syscall = @import("syscall.zig");
 
@@ -19,6 +20,9 @@ const max_hwmon_devices = 10;
 pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// The daemon's environment, which the APT check derives its own from.
+    /// Only ever read, so the background task may do so.
+    parent_env: ?*const std.process.Environ.Map,
     last_cpu_times: ?parse.CpuTimes = null,
     // All three are owned heap copies, freed in deinit. Uniform on purpose: two
     // of them used to be duped while this one aliased a static string, with the
@@ -55,16 +59,19 @@ pub const SystemOps = struct {
     last_cpu_temp: u32 = 0,
     last_memory: u8 = 0,
     last_disk_usage: u8 = 0,
-    last_disk_temp: u32 = 0,
-    last_fan_speed: u32 = 0,
+    /// Null when the hardware has no such sensor, which is published as nothing
+    /// rather than as a reading of zero.
+    last_disk_temp: ?u32 = null,
+    last_fan_speed: ?u32 = null,
     last_undervoltage: bool = false,
     last_nvme_health: ?parse.NvmeHealth = null,
     last_uptime: ?parse.Uptime = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) SystemOps {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, parent_env: ?*const std.process.Environ.Map) SystemOps {
         return .{
             .allocator = allocator,
             .io = io,
+            .parent_env = parent_env,
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
             .apt_count_known = std.atomic.Value(bool).init(false),
@@ -147,8 +154,12 @@ pub const SystemOps = struct {
         return self.last_cpu_load;
     }
 
-    /// Get fan speed in RPM
-    pub fn getFanSpeed(self: *SystemOps) !u32 {
+    /// Fan speed in RPM, or null when no hwmon device has a fan input at all.
+    ///
+    /// A fan that is present but stopped reads 0, which the Pi 5's cooler does
+    /// whenever it is cool enough; a machine with no fan is a different answer
+    /// and gets null, so the panel shows a dash instead of claiming 0 RPM.
+    pub fn getFanSpeed(self: *SystemOps) !?u32 {
         if (self.cached_fan_path) |path| {
             if (self.readIntFromFile(path)) |rpm| {
                 self.last_fan_speed = rpm;
@@ -161,12 +172,14 @@ pub const SystemOps = struct {
         }
 
         var path_buf: [64]u8 = undefined;
+        var any_fan = false;
         for (0..max_hwmon_devices) |i| {
             const path = std.fmt.bufPrint(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
 
             // A reading of 0 is ambiguous (stopped fan vs. wrong device), so
             // only latch onto a sensor that is actually spinning.
             const rpm = self.readIntFromFile(path) catch continue;
+            any_fan = true;
             if (rpm == 0) continue;
 
             self.cached_fan_path = try self.allocator.dupe(u8, path);
@@ -174,8 +187,8 @@ pub const SystemOps = struct {
             return rpm;
         }
 
-        self.last_fan_speed = 0;
-        return 0; // No fan found
+        self.last_fan_speed = if (any_fan) 0 else null;
+        return self.last_fan_speed;
     }
 
     /// Get memory usage percentage
@@ -232,22 +245,22 @@ pub const SystemOps = struct {
         return null;
     }
 
-    /// Get disk temperature in Celsius
+    /// Disk temperature in Celsius, or null on hardware without an NVMe sensor.
     ///
     /// Scanned once. Hardware without an NVMe hwmon device used to re-read all
     /// ten `/sys/class/hwmon/hwmonN/name` files on every cycle to reach the same
     /// answer, where `getUndervoltage` and `getNvmeHealth` already latch a
     /// missing sensor after the first look. A drive that appears later is not a
     /// case worth rescanning forever for: on this hardware it is soldered down.
-    pub fn getDiskTemp(self: *SystemOps) !u32 {
+    pub fn getDiskTemp(self: *SystemOps) !?u32 {
         if (self.cached_disk_temp_path) |path| {
             self.last_disk_temp = try self.readTempFromFile(path);
             return self.last_disk_temp;
         }
 
         if (self.disk_temp_probed) {
-            self.last_disk_temp = 0;
-            return 0;
+            self.last_disk_temp = null;
+            return null;
         }
         self.disk_temp_probed = true;
 
@@ -261,8 +274,8 @@ pub const SystemOps = struct {
         }
 
         log.debug("No NVMe hwmon sensor; disk temperature reporting disabled", .{});
-        self.last_disk_temp = 0;
-        return 0; // No disk sensor found
+        self.last_disk_temp = null;
+        return null;
     }
 
     /// Whether the firmware currently reports a low input voltage.
@@ -347,7 +360,7 @@ pub const SystemOps = struct {
     pub fn getNvmeHealth(self: *SystemOps) ?parse.NvmeHealth {
         const dev = self.nvmeDevPath() orelse return null;
 
-        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return null;
         defer _ = std.os.linux.close(fd);
 
         // Zeroed, not undefined: a partially completed command would otherwise
@@ -385,7 +398,7 @@ pub const SystemOps = struct {
         // directory iteration and matches the hwmon approach.
         for (0..4) |i| {
             const path = std.fmt.bufPrint(&path_buf, "/dev/nvme{d}", .{i}) catch continue;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             _ = std.os.linux.close(fd);
 
             self.cached_nvme_dev = self.allocator.dupe(u8, path) catch return null;
@@ -456,9 +469,16 @@ pub const SystemOps = struct {
     fn aptCheck(self: *SystemOps, run_update: bool) void {
         defer self.apt_check_running.store(false, .release);
 
+        var env = config.childEnvironment(self.allocator, self.parent_env) catch |err| {
+            log.warn("Cannot prepare the APT check's environment: {t}", .{err});
+            return;
+        };
+        defer env.deinit();
+
         if (run_update) {
             if (std.process.run(self.allocator, self.io, .{
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
+                .environ_map = &env,
             })) |update_result| {
                 self.allocator.free(update_result.stdout);
                 self.allocator.free(update_result.stderr);
@@ -470,6 +490,7 @@ pub const SystemOps = struct {
 
         const result = std.process.run(self.allocator, self.io, .{
             .argv = &[_][]const u8{ "/usr/bin/timeout", "10", "/usr/bin/apt", "list", "--upgradable" },
+            .environ_map = &env,
         }) catch |err| {
             log.warn("Failed to check APT updates: {t}", .{err});
             return;
