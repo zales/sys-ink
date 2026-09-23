@@ -75,6 +75,13 @@ pub const MqttClient = struct {
     /// timeout, around two minutes.
     const connect_timeout_ms = 5000;
 
+    /// Cap on waiting for room in the send buffer. The socket is blocking, and
+    /// with keepalive off nothing notices a broker that has silently vanished
+    /// until TCP gives up retransmitting, around fifteen minutes. Well before
+    /// that the send buffer fills, and an unbounded send would then freeze the
+    /// render loop for the minutes that remain.
+    const send_timeout_ms = 5000;
+
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
 
@@ -189,13 +196,11 @@ pub const MqttClient = struct {
             return;
         }
 
-        if (self.stream) |stream| {
-            // Best-effort; the broker reaps us on socket close anyway.
-            const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT, 0 remaining length
-            stream.socket.send(self.io, &stream.socket.address, &disconnect_packet) catch |err| {
-                log.debug("DISCONNECT send failed: {t}", .{err});
-            };
-        }
+        // Best-effort; the broker reaps us on socket close anyway.
+        const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT, 0 remaining length
+        self.sendPacket(&disconnect_packet) catch |err| {
+            log.debug("DISCONNECT send failed: {t}", .{err});
+        };
 
         self.closeStream();
         self.connected = false;
@@ -222,12 +227,11 @@ pub const MqttClient = struct {
     /// TCP connection per level, until the stack ran out.
     fn publishRaw(self: *Self, topic: []const u8, payload: []const u8, retain: bool) !void {
         if (!self.connected) return error.NotConnected;
-        const stream = self.stream orelse return error.NotConnected;
 
         var packet_buf: [max_packet_len]u8 = undefined;
         const packet = try buildPublish(&packet_buf, topic, payload, retain);
 
-        stream.socket.send(self.io, &stream.socket.address, packet) catch |err| {
+        self.sendPacket(packet) catch |err| {
             log.warn("MQTT publish failed (topic={s}): {t}", .{ topic, err });
             self.connected = false;
             self.closeStream();
@@ -287,11 +291,16 @@ pub const MqttClient = struct {
     }
 
     fn sendConnect(self: *Self) !void {
-        const stream = self.stream orelse return error.NotConnected;
-
         var packet_buf: [max_packet_len]u8 = undefined;
         const packet = try buildConnect(&packet_buf, self.client_id, self.username, self.password);
 
+        try self.sendPacket(packet);
+    }
+
+    /// Send one whole packet, waiting at most `send_timeout_ms` for room.
+    fn sendPacket(self: *Self, packet: []const u8) !void {
+        const stream = self.stream orelse return error.NotConnected;
+        try bounded_connect.waitWritable(stream.socket.handle, send_timeout_ms);
         try stream.socket.send(self.io, &stream.socket.address, packet);
     }
 

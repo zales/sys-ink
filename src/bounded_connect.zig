@@ -115,6 +115,22 @@ fn clearNonBlocking(fd: std.posix.fd_t) Error!void {
     if (@as(isize, @bitCast(rc)) < 0) return error.ConnectFailed;
 }
 
+/// Wait until `fd` has room to send, giving up after `timeout_ms`.
+///
+/// A send deadline without `SO_SNDTIMEO`, for the reason `connectStream`
+/// gives. Waiting for `POLLOUT` bounds the one case where a blocking send
+/// blocks — a full send buffer, which is what a peer that has silently gone
+/// away produces after enough unacknowledged writes — without ever making the
+/// send itself return `EAGAIN`. It is sufficient for small writes: TCP reports
+/// writable only while at least a third of the send buffer is free, several
+/// kilobytes, and nothing sent through this is larger than one.
+pub fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) error{ Timeout, PollFailed }!void {
+    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+    const ready = std.posix.poll(&fds, timeout_ms) catch return error.PollFailed;
+    if (ready == 0) return error.Timeout;
+    // An error or hangup is left for the send to report, with its own errno.
+}
+
 /// Close and discard a connection opened above, without needing an `Io`.
 pub fn closeFd(fd: std.posix.fd_t) void {
     _ = linux.close(fd);
