@@ -61,6 +61,12 @@ pub const DISK_AREA_Y_TEMP = 42;
 pub const FAN_LABEL_X = 102;
 pub const FAN_LABEL_Y = 80;
 pub const FAN_LINE_Y = 76;
+/// "rpm" at the right of the fan header, as the traffic headers carry their
+/// unit: 26px wide, ending two pixels before the divider at 201.
+pub const FAN_UNIT_X = 173;
+pub const FAN_UNIT_Y = 80;
+/// The header rule stops two pixels short of the unit, as the traffic ones do.
+pub const FAN_LINE_END_X = 171;
 pub const FAN_ICON_X = 103;
 pub const FAN_ICON_Y = 105;
 pub const FAN_VALUE_X = 133;
@@ -170,6 +176,9 @@ pub const ICON_WIFI_OK = "\u{e2bf}";
 pub const ICON_WIFI_OFF = "\u{f1ca}";
 pub const ICON_WIFI_SIGNAL = "\u{e63e}";
 pub const ICON_WIFI_NO_SIGNAL = "\u{e1da}";
+/// Shown in the signal slot when the machine is on a cable, where a Wi-Fi
+/// signal reading has nothing to say. The same glyph as the splash screen's.
+pub const ICON_ETHERNET = "\u{eb2f}";
 
 // Sleep/Loading screen constants
 pub const SLEEP_LINE_X = 124;

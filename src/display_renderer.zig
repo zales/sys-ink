@@ -161,7 +161,8 @@ pub fn Renderer(comptime Transport: type) type {
 
             // FAN section
             self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
-            self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.FAN_LINE_Y, .Black);
+            // Stops short of the "rpm" that renderFanSpeed draws at its end.
+            self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.FAN_LINE_END_X, display_config.FAN_LINE_Y, .Black);
             self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
 
             // Traffic section
@@ -503,7 +504,7 @@ pub fn Renderer(comptime Transport: type) type {
         }
 
         /// Render fan speed. Null means there is no fan, shown as a dash; a fan
-        /// that is present and stopped still reads 0.
+        /// that is present and stopped still reads 0. The unit is in the header.
         pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
             const ascent = self.bitmap.getFontAscent(.Ubuntu24);
             self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
@@ -511,6 +512,11 @@ pub fn Renderer(comptime Transport: type) type {
             var buf: [16]u8 = undefined;
             const text = if (rpm) |r| std.fmt.bufPrint(&buf, "{d}", .{r}) catch "?" else "-";
             self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
+
+            // The unit sits in the header, as it does for traffic, and is drawn
+            // here rather than with the grid for the same reason traffic's is:
+            // the "p" descends into the value's clear area, which erases it.
+            self.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
         }
 
         /// Render IP address
@@ -560,6 +566,16 @@ pub fn Renderer(comptime Transport: type) type {
             } else "N/A";
 
             self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
+        }
+
+        /// Show the machine as wired in the signal slot.
+        ///
+        /// On a cable there is no Wi-Fi reading, and the crossed-out Wi-Fi icon
+        /// with "N/A" that used to fill the slot read as a fault.
+        pub fn renderWired(self: *Self) void {
+            self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+            self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, display_config.ICON_ETHERNET, .Material14, .Black);
+            self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
         }
 
         /// Render network traffic
@@ -688,7 +704,7 @@ pub fn Renderer(comptime Transport: type) type {
             self.renderInternetStatus(true);
             self.renderIpAddress("192.168.1.231");
             self.renderUptime(11, 22, 47);
-            self.renderSignalStrength(null);
+            self.renderWired();
         }
 
         /// Draw the sleep screen, then park the panel in deep sleep.
@@ -865,6 +881,25 @@ test "a shrinking APT count leaves nothing behind outside its slot" {
     try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
 }
 
+test "shrinking traffic and fan readings leave nothing behind" {
+    // Every slot a reading draws into must be cleared in full before the next
+    // one, or a wider reading leaves pixels behind a narrower one.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(before);
+
+    h.renderer.renderTraffic(7.18, "MB", 118.0, "MB");
+    h.renderer.renderFanSpeed(8200);
+    h.renderer.renderTraffic(999.99, "kB", 3.01, "B");
+    h.renderer.renderFanSpeed(543);
+
+    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+}
+
 test "a missing sensor is drawn as a dash, not as zero" {
     var h = try Harness.init();
     h.wire();
@@ -891,6 +926,7 @@ test "a missing sensor is drawn as a dash, not as zero" {
     const fan_ascent = r.bitmap.getFontAscent(.Ubuntu24);
     r.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
     r.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    r.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
     try testing.expectEqualSlices(u8, r.bitmap.data, h.renderer.bitmap.data);
 }
 

@@ -622,6 +622,32 @@ test "traffic values fit their slot across the whole range" {
     }
 }
 
+test "the traffic slot stays clear of its icon" {
+    var bmp = try testBitmap(4, 4);
+    defer bmp.deinit();
+    const icon_end = dc.TRAFFIC_DOWN_ICON_X + @as(i32, @intCast(bmp.measureText(dc.ICON_DOWNLOAD, .Material24)));
+    try testing.expect(icon_end <= dc.TRAFFIC_DOWN_VALUE_X);
+    // And both icons sit inside their column, right of the divider at 201.
+    try testing.expect(dc.TRAFFIC_DOWN_ICON_X > dc.VERTICAL_LINE_2);
+    try testing.expect(dc.TRAFFIC_UP_ICON_X > dc.VERTICAL_LINE_2);
+}
+
+test "the fan slot ends before the divider" {
+    try testing.expect(dc.FAN_VALUE_X + @as(i32, dc.TEXT_AREA_FAN.width) <= dc.VERTICAL_LINE_2);
+}
+
+test "the fan header fits its label, rule and unit" {
+    var bmp = try testBitmap(4, 4);
+    defer bmp.deinit();
+
+    const label_end = dc.FAN_LABEL_X + @as(i32, @intCast(bmp.measureText("fan", .Ubuntu14)));
+    const unit_end = dc.FAN_UNIT_X + @as(i32, @intCast(bmp.measureText("rpm", .Ubuntu14)));
+
+    try testing.expect(label_end < 124); // where the rule starts
+    try testing.expect(dc.FAN_LINE_END_X < dc.FAN_UNIT_X);
+    try testing.expect(unit_end < dc.VERTICAL_LINE_2);
+}
+
 test "bottom bar slots do not overlap or run off the panel" {
     var bmp = try testBitmap(4, 4);
     defer bmp.deinit();

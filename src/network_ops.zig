@@ -35,6 +35,8 @@ pub const NetworkOps = struct {
     last_signal: ?i32 = null,
     last_ip: [max_ip_len]u8 = undefined,
     last_ip_len: usize = 0,
+    /// Whether that address is on a wired interface. See `lastIpIsWired`.
+    last_ip_wired: bool = false,
 
     pub fn init(io: std.Io) NetworkOps {
         return .{ .io = io };
@@ -49,6 +51,15 @@ pub const NetworkOps = struct {
     /// first. Takes no measurement, unlike `checkInternetConnection`.
     pub fn lastInternet(self: *const NetworkOps) ?bool {
         return self.cached_internet;
+    }
+
+    /// Whether the address the panel shows is on a cable rather than Wi-Fi.
+    ///
+    /// By name: `wl*` is the kernel's and udev's prefix for wireless interfaces,
+    /// and everything else that carries an address here — eth0, end0, enp*,
+    /// USB adapters — is wired.
+    pub fn lastIpIsWired(self: *const NetworkOps) bool {
+        return self.last_ip_len != 0 and self.last_ip_wired;
     }
 
     /// The address the most recent look found, or null if it found none.
@@ -117,6 +128,7 @@ pub const NetworkOps = struct {
         const no_match = std.math.maxInt(u8);
         var best_rank: u8 = no_match;
         var best_len: usize = 0;
+        var best_wired = false;
 
         var current = ifap;
         while (current) |ifa| : (current = ifa.ifa_next) {
@@ -144,6 +156,7 @@ pub const NetworkOps = struct {
             @memcpy(buf[0..ip.len], ip);
             best_rank = rank;
             best_len = ip.len;
+            best_wired = !std.mem.startsWith(u8, name, "wl");
 
             if (rank == 0) break; // nothing outranks eth0
         }
@@ -154,6 +167,7 @@ pub const NetworkOps = struct {
         // than walking the interface list a second time.
         @memcpy(self.last_ip[0..best_len], buf[0..best_len]);
         self.last_ip_len = best_len;
+        self.last_ip_wired = best_wired;
 
         return buf[0..best_len];
     }

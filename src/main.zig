@@ -117,10 +117,16 @@ const App = struct {
     }
 
     fn updateSignal(self: *App) void {
+        // Read even on a cable: MQTT publishes it whenever there is one.
         const signal = self.net.getSignalStrength("wlan0");
-        self.renderer.renderSignalStrength(signal);
-
         if (signal) |s| log.debug("Signal: {d} dBm", .{s});
+
+        // Relies on the IP task having run first this cycle; see the schedule.
+        if (self.net.lastIpIsWired()) {
+            self.renderer.renderWired();
+        } else {
+            self.renderer.renderSignalStrength(signal);
+        }
     }
 
     fn updateIp(self: *App) void {
@@ -440,6 +446,9 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "disk", &app, App.updateDisk);
     try scheduler.every(fast, "fan", &app, App.updateFan);
     try scheduler.every(fast, "traffic", &app, App.updateTraffic);
+    // Before signal: which of the two the signal slot shows depends on the
+    // interface the address is on.
+    try scheduler.every(fast, "ip", &app, App.updateIp);
     try scheduler.every(fast, "signal", &app, App.updateSignal);
     try scheduler.every(fast, "uptime", &app, App.updateUptime);
     // The APT count is repainted on the fast tick so a background check that
@@ -447,9 +456,6 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
     try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
     try scheduler.every(fast, "nvme_health", &app, App.updateNvmeHealth);
-    // One getifaddrs walk, cheap enough for the fast tick; on the slow one a
-    // DHCP change stayed off the panel for up to three hours.
-    try scheduler.every(fast, "ip", &app, App.updateIp);
     try scheduler.every(fast, "internet_render", &app, App.renderInternet);
 
     try scheduler.every(slow, "apt", &app, App.updateApt);

@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The fan section carries its "rpm" unit in the header, the way the traffic
+  sections carry theirs.
+- On a wired connection the signal slot shows an Ethernet icon and "LAN" instead
+  of a crossed-out Wi-Fi icon with "N/A", which read as a fault.
+
 ## [1.8.0] — 2026-09-23
 
 ### Fixed
