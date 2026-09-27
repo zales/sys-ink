@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-09-27
+
 ### Added
 - **Home Assistant availability.** The daemon publishes a retained `online` to
   `<prefix>/status` when it connects and `offline` before a clean shutdown, and
@@ -34,11 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for `NOTIFY_DURATION` seconds (30), set in the largest font that fits, and the
   dashboard returns with a full refresh. JSON — `{"text": "...", "duration": 120}`
   — sets the duration per notice, and `{"text": ""}` takes the notice down
-  early. A hardware-fault warning still shows over a notice.
-  The pipe is root-only unless `NOTIFY_GROUP` names a group allowed to write;
-  the service unit gains `RuntimeDirectory=sys-ink` for it.
-- **`notify.sysink_panel` in Home Assistant.** Discovery adds a notify entity
-  that sends to the notice topic, so automations can use `notify.send_message`.
+  early. A hardware-fault warning still shows over a notice. The pipe is
+  root-only unless `NOTIFY_GROUP` names a group allowed to write; the service
+  unit gains `RuntimeDirectory=sys-ink` for it.
+- **A notify entity in Home Assistant.** Discovery adds `notify.sysink_panel`
+  (prefixed with the device's area, if it has one) that sends to the notice
+  topic, so automations can use `notify.send_message`.
 - **A Hermes Agent skill**, in `examples/hermes/sysink-panel`, with a helper
   script that sends a notice through the pipe or over MQTT.
 
@@ -350,6 +353,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.9.0]: https://github.com/zales/sys-ink/releases/tag/v1.9.0
 [1.8.0]: https://github.com/zales/sys-ink/releases/tag/v1.8.0
 [1.7.0]: https://github.com/zales/sys-ink/releases/tag/v1.7.0
 [1.6.0]: https://github.com/zales/sys-ink/releases/tag/v1.6.0
