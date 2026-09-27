@@ -131,6 +131,14 @@ pub const Config = struct {
     pub var web_preview_addr: []const u8 = "127.0.0.1";
     pub var web_preview_port: u16 = 8390;
 
+    /// Accept notices through a named pipe. See `notice_fifo.zig`.
+    pub var notify_enabled: bool = true;
+    pub var notify_fifo: []const u8 = "/run/sys-ink/notify";
+    /// Group allowed to write to the pipe besides root. Unset: root only.
+    pub var notify_group: ?[]const u8 = null;
+    /// How long a notice stays on the panel, in seconds.
+    pub var notify_duration: u32 = 30;
+
     /// Load configuration from environment variables
     pub fn load(init: std.process.Init) void {
         const env = init.environ_map;
@@ -177,6 +185,19 @@ pub const Config = struct {
         }
         if (env.get("WEB_PREVIEW_PORT")) |val| {
             web_preview_port = std.fmt.parseInt(u16, val, 10) catch web_preview_port;
+        }
+
+        if (env.get("NOTIFY_ENABLED")) |val| {
+            notify_enabled = parseBool(val);
+        }
+        if (env.get("NOTIFY_FIFO")) |val| {
+            notify_fifo = val;
+        }
+        if (env.get("NOTIFY_GROUP")) |val| {
+            if (val.len > 0) notify_group = val;
+        }
+        if (env.get("NOTIFY_DURATION")) |val| {
+            notify_duration = @max(1, std.fmt.parseInt(u32, val, 10) catch notify_duration);
         }
 
         if (env.get("THRESHOLD_CPU_CRITICAL")) |val| {

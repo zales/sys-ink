@@ -77,6 +77,9 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
+# /run/sys-ink, for the notice pipe. Removed when the service stops, so a
+# notice sent then fails at once instead of blocking on a pipe nobody reads.
+RuntimeDirectory=$APP_NAME
 
 [Install]
 WantedBy=multi-user.target
@@ -119,6 +122,15 @@ LOG_LEVEL=INFO
 # --- BMP export (for previewing the rendered frame) ---------------------
 EXPORT_BMP=false
 BMP_EXPORT_PATH=/tmp/sys-ink.bmp
+
+# --- Notices ------------------------------------------------------------
+# echo "text" > /run/sys-ink/notify shows it on the panel for a while, as does
+# publishing to <MQTT_TOPIC_PREFIX>/notify when MQTT is enabled.
+#NOTIFY_ENABLED=true
+#NOTIFY_FIFO=/run/sys-ink/notify
+# Group allowed to write to the pipe besides root; unset means root only.
+#NOTIFY_GROUP=sysink-notify
+#NOTIFY_DURATION=30
 
 # --- MQTT / Home Assistant ----------------------------------------------
 #MQTT_ENABLED=true

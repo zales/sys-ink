@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registers `offline` as its MQTT Last Will for everything else — a crash, a
   `kill -9`, an OOM kill. Every entity's discovery config names that topic, so
   the device greys out at once instead of after `expire_after`.
+- **Notices.** A message can be put on the panel with
+  `echo "text" > /run/sys-ink/notify` locally, or by publishing to
+  `<MQTT_TOPIC_PREFIX>/notify` when MQTT is enabled. It replaces the dashboard
+  for `NOTIFY_DURATION` seconds (30), set in the largest font that fits, and the
+  dashboard returns with a full refresh. JSON — `{"text": "...", "duration": 120}`
+  — sets the duration per notice, and `{"text": ""}` takes the notice down
+  early. A hardware-fault warning still shows over a notice.
+  The pipe is root-only unless `NOTIFY_GROUP` names a group allowed to write;
+  the service unit gains `RuntimeDirectory=sys-ink` for it.
+- **`notify.sysink_panel` in Home Assistant.** Discovery adds a notify entity
+  that sends to the notice topic, so automations can use `notify.send_message`.
 
 ### Changed
 - The fan section carries its "rpm" unit in the header, the way the traffic

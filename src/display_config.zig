@@ -193,6 +193,20 @@ pub const SLEEP_SUBTITLE_X = 155;
 pub const SLEEP_SUBTITLE_Y = 82;
 pub const ICON_SLEEP_NET = "\u{eb2f}";
 
+// Notice screen: a header in the style of the dashboard's, and the message
+// below it in the largest font that fits.
+pub const NOTICE_LABEL = "message";
+pub const NOTICE_LABEL_X = 1;
+pub const NOTICE_LABEL_Y = 11;
+pub const NOTICE_LINE_Y = 7;
+pub const NOTICE_BODY_X = 4;
+pub const NOTICE_BODY_Y = 16;
+pub const NOTICE_BODY_W = DISPLAY_WIDTH - 2 * NOTICE_BODY_X;
+pub const NOTICE_BODY_H = DISPLAY_HEIGHT - NOTICE_BODY_Y - 2;
+/// Largest first. Six lines of the smallest is as many as the body holds.
+pub const NOTICE_FONTS = [_]@import("graphics.zig").Bitmap.FontType{ .Ubuntu34, .Ubuntu26, .Ubuntu20, .Ubuntu14 };
+pub const NOTICE_MAX_LINES = 6;
+
 // ----------------------------------------------------------------------------
 // Text that has to be fitted to a slot
 // ----------------------------------------------------------------------------

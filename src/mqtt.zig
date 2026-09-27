@@ -3,11 +3,14 @@ const config = @import("config.zig");
 const bounded_connect = @import("bounded_connect.zig");
 const net = std.Io.net;
 
+const builtin = @import("builtin");
+
 const c = @cImport({
     @cInclude("netdb.h");
     @cInclude("arpa/inet.h");
     @cInclude("sys/socket.h");
     @cInclude("netinet/in.h");
+    @cInclude("netinet/tcp.h");
 });
 
 const log = std.log.scoped(.mqtt);
@@ -69,6 +72,10 @@ fn availabilityTopic(buf: []u8, topic_prefix: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ topic_prefix, availability_suffix });
 }
 
+/// Topic, under the topic prefix, that notices are published to. See
+/// `notice.parse` for what the payload may be.
+const notify_suffix = "notify";
+
 /// Node id, unique_id stem and device identifier for the default client id —
 /// and what every release before this one used unconditionally. Deriving the
 /// others from the client id while keeping this one for the default leaves an
@@ -105,6 +112,14 @@ pub const MqttClient = struct {
     password: ?[]const u8,
     topic_prefix: []const u8,
     discovery_enabled: bool,
+    /// Subscribe to the notice topic on every connect.
+    notices_enabled: bool,
+    notify_topic_buf: [256]u8 = undefined,
+    notify_topic_len: usize = 0,
+    /// Packets from the broker, reassembled.
+    inbound: Inbound = .{},
+    /// The latest notice received, kept past the read that found it.
+    notice_buf: [Inbound.capacity]u8 = undefined,
     /// Storage for `nodeId`'s result; read through `node()`.
     node_id_buf: [max_node_id_len]u8 = undefined,
     node_id_len: usize = 0,
@@ -124,10 +139,8 @@ pub const MqttClient = struct {
     const connect_timeout_ms = 5000;
 
     /// Cap on waiting for room in the send buffer. The socket is blocking, and
-    /// with keepalive off nothing notices a broker that has silently vanished
-    /// until TCP gives up retransmitting, around fifteen minutes. Well before
-    /// that the send buffer fills, and an unbounded send would then freeze the
-    /// render loop for the minutes that remain.
+    /// a broker that has silently vanished fills the send buffer before TCP
+    /// gives up on it; an unbounded send would then freeze the render loop.
     const send_timeout_ms = 5000;
 
     /// Largest packet we will build. Discovery payloads are the big ones.
@@ -161,7 +174,14 @@ pub const MqttClient = struct {
             .password = cfg.password,
             .topic_prefix = cfg.topic_prefix,
             .discovery_enabled = cfg.discovery_enabled,
+            .notices_enabled = cfg.notices_enabled,
         };
+        if (std.fmt.bufPrint(&self.notify_topic_buf, "{s}/{s}", .{ cfg.topic_prefix, notify_suffix })) |topic| {
+            self.notify_topic_len = topic.len;
+        } else |_| {
+            log.warn("MQTT_TOPIC_PREFIX too long; notices over MQTT disabled", .{});
+            self.notices_enabled = false;
+        }
         var buf: [max_node_id_len]u8 = undefined;
         const id = nodeId(&buf, cfg.client_id);
         @memcpy(self.node_id_buf[0..id.len], id);
@@ -208,7 +228,9 @@ pub const MqttClient = struct {
             return err;
         };
         errdefer self.closeStream();
+        if (self.stream) |stream| detectDeadPeer(stream.socket.handle);
 
+        self.inbound = .{};
         try self.handshake();
 
         self.connected = true;
@@ -220,6 +242,163 @@ pub const MqttClient = struct {
         try self.publish(availability_suffix, payload_online, true);
 
         if (self.discovery_enabled) self.publishDiscovery();
+        if (self.notices_enabled and self.connected) self.subscribeNotices();
+    }
+
+    fn notifyTopic(self: *const Self) []const u8 {
+        return self.notify_topic_buf[0..self.notify_topic_len];
+    }
+
+    /// Clean session is set, so the subscription lasts as long as this
+    /// connection and is made again on every connect.
+    fn subscribeNotices(self: *Self) void {
+        var packet_buf: [max_packet_len]u8 = undefined;
+        const packet = buildSubscribe(&packet_buf, 1, self.notifyTopic()) catch return;
+        self.sendPacket(packet) catch |err| {
+            log.warn("MQTT subscribe failed: {t}", .{err});
+            self.dropConnection();
+            return;
+        };
+        log.info("Accepting notices on MQTT topic {s}", .{self.notifyTopic()});
+    }
+
+    /// Have the kernel notice a broker that vanished without closing the
+    /// connection — powered off, or behind a network that dropped — within
+    /// about a minute and a half, where TCP left alone takes a quarter of an
+    /// hour. MQTT keepalive would do the same job, but it needs PINGREQs on a
+    /// timer that this loop does not have.
+    ///
+    /// Matters because of the notice subscription: until the socket errors,
+    /// the daemon waits on a connection nothing will ever arrive on. Once it
+    /// does, poll reports it, `receive` drops the connection and the next
+    /// publish cycle reconnects and subscribes afresh.
+    ///
+    /// Probes run while the connection is idle; unacknowledged data is capped
+    /// by TCP_USER_TIMEOUT instead, since publishes every cycle keep it busy.
+    fn detectDeadPeer(handle: net.Socket.Handle) void {
+        if (builtin.os.tag != .linux) return;
+
+        const options = [_]struct { level: c_int, name: c_int, value: c_int }{
+            .{ .level = c.SOL_SOCKET, .name = c.SO_KEEPALIVE, .value = 1 },
+            .{ .level = c.IPPROTO_TCP, .name = c.TCP_KEEPIDLE, .value = 60 },
+            .{ .level = c.IPPROTO_TCP, .name = c.TCP_KEEPINTVL, .value = 10 },
+            .{ .level = c.IPPROTO_TCP, .name = c.TCP_KEEPCNT, .value = 3 },
+            .{ .level = c.IPPROTO_TCP, .name = c.TCP_USER_TIMEOUT, .value = 90_000 },
+        };
+        for (options) |opt| {
+            if (c.setsockopt(handle, opt.level, opt.name, &opt.value, @sizeOf(c_int)) != 0) {
+                log.debug("setsockopt({d}, {d}) failed; a vanished broker is noticed later", .{ opt.level, opt.name });
+            }
+        }
+    }
+
+    /// The socket to wait on for `receive`, while connected.
+    pub fn socketHandle(self: *const Self) ?net.Socket.Handle {
+        if (!self.connected) return null;
+        const stream = self.stream orelse return null;
+        return stream.socket.handle;
+    }
+
+    /// Read whatever the broker has sent, without waiting, and return the
+    /// latest notice in it. Borrowed: valid until the next call.
+    ///
+    /// Notices a subscription turned up from the retained store are skipped:
+    /// they were sent some time ago, perhaps long ago, and showing them again
+    /// on every reconnect is not what anyone publishing one meant.
+    pub fn receive(self: *Self) ?[]const u8 {
+        var latest: ?usize = null;
+
+        while (self.socketHandle()) |handle| {
+            const space = self.inbound.free();
+            const rc = c.recv(handle, space.ptr, space.len, c.MSG_DONTWAIT);
+            if (rc < 0) {
+                switch (std.posix.errno(rc)) {
+                    .AGAIN => break,
+                    .INTR => continue,
+                    else => |err| {
+                        log.warn("MQTT receive failed: {t}", .{err});
+                        self.dropConnection();
+                        break;
+                    },
+                }
+            }
+            if (rc == 0) {
+                log.warn("MQTT broker closed the connection", .{});
+                self.dropConnection();
+                break;
+            }
+            self.inbound.commit(@intCast(rc));
+
+            while (true) {
+                const packet = (self.inbound.next() catch {
+                    log.warn("Malformed packet from the MQTT broker", .{});
+                    self.dropConnection();
+                    break;
+                }) orelse break;
+                if (self.handlePacket(packet)) |len| latest = len;
+            }
+            if (self.inbound.dropped > 0) {
+                log.warn("Ignored {d} MQTT message(s) too large to show", .{self.inbound.dropped});
+                self.inbound.dropped = 0;
+            }
+        }
+
+        return if (latest) |len| self.notice_buf[0..len] else null;
+    }
+
+    /// Act on one packet from the broker. Returns the length of a notice it
+    /// copied into `notice_buf`, if it was one.
+    fn handlePacket(self: *Self, packet: Packet) ?usize {
+        switch (packet.kind()) {
+            @intFromEnum(PacketType.PUBLISH) => {
+                const message = parsePublish(packet) catch {
+                    log.warn("Malformed PUBLISH from the MQTT broker", .{});
+                    return null;
+                };
+                // Granted QoS 0 means the broker should not send QoS 1, but
+                // one that does waits on the ack, and redelivers without it.
+                if (message.qos == 1) self.sendPuback(message.packet_id.?);
+
+                if (!std.mem.eql(u8, message.topic, self.notifyTopic())) return null;
+                if (message.retain) {
+                    log.info("Ignoring a retained notice on {s}", .{message.topic});
+                    return null;
+                }
+                // What clearing a retained message (`mosquitto_pub -r -n`)
+                // delivers to everyone subscribed: housekeeping, not a request
+                // to take the notice on show down. That takes `{"text": ""}`.
+                if (message.payload.len == 0) {
+                    log.debug("Ignoring an empty message on {s}", .{message.topic});
+                    return null;
+                }
+                @memcpy(self.notice_buf[0..message.payload.len], message.payload);
+                return message.payload.len;
+            },
+            @intFromEnum(PacketType.SUBACK) => {
+                // Packet id, then one return code per filter; 0x80 is refusal.
+                if (packet.body.len >= 3 and packet.body[2] == 0x80) {
+                    log.warn("MQTT broker refused the subscription to {s}; check its ACL", .{self.notifyTopic()});
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn sendPuback(self: *Self, packet_id: u16) void {
+        var packet = [_]u8{ @as(u8, @intFromEnum(PacketType.PUBACK)) << 4, 0x02, 0, 0 };
+        std.mem.writeInt(u16, packet[2..4], packet_id, .big);
+        self.sendPacket(&packet) catch {};
+    }
+
+    /// Give up on the connection; `connect` makes a new one behind the backoff.
+    fn dropConnection(self: *Self) void {
+        self.connected = false;
+        self.closeStream();
+        // Counted like a failed connect, so a broker that accepts the
+        // connection and then drops it is retried behind the backoff rather
+        // than immediately.
+        self.recordFailure();
     }
 
     fn handshake(self: *Self) !void {
@@ -299,12 +478,7 @@ pub const MqttClient = struct {
 
         self.sendPacket(packet) catch |err| {
             log.warn("MQTT publish failed (topic={s}): {t}", .{ topic, err });
-            self.connected = false;
-            self.closeStream();
-            // Counted like a failed connect, so a broker that accepts the
-            // connection and then drops it is retried behind the backoff rather
-            // than immediately.
-            self.recordFailure();
+            self.dropConnection();
             return err;
         };
     }
@@ -325,6 +499,25 @@ pub const MqttClient = struct {
         }
 
         log.info("Published {d}/{d} discovery configs", .{ published, sensors.len });
+
+        if (self.connected) self.publishNotifyDiscovery() catch |err| {
+            log.warn("Discovery publish failed for the notify entity: {t}", .{err});
+        };
+    }
+
+    /// The notify entity while notices are accepted. Otherwise its config is
+    /// cleared — an empty retained message removes a discovered entity — so
+    /// turning notices off does not leave Home Assistant a button that does
+    /// nothing.
+    fn publishNotifyDiscovery(self: *Self) !void {
+        var topic_buf: [160]u8 = undefined;
+        const topic = try notifyDiscoveryTopic(&topic_buf, self.node());
+
+        if (!self.notices_enabled) return self.publishRaw(topic, "", true);
+
+        var payload_buf: [discovery_payload_max]u8 = undefined;
+        const payload = try notifyDiscoveryPayload(&payload_buf, self.node(), self.topic_prefix);
+        try self.publishRaw(topic, payload, true);
     }
 
     fn publishSensorDiscovery(self: *Self, sensor: Sensor) !void {
@@ -453,14 +646,52 @@ fn discoveryPayload(buf: []u8, sensor: Sensor, opts: DiscoveryOptions) ![]const 
     if (sensor.state_class) |sc| try w.print(",\"state_class\":\"{s}\"", .{sc});
     if (sensor.icon) |icon| try w.print(",\"icon\":\"{s}\"", .{icon});
     try w.print(",\"expire_after\":{d}", .{opts.expire_after});
+    try writeDevice(w, opts.node_id);
 
+    return writer.buffered();
+}
+
+/// Close a discovery config with the device every entity belongs to.
+fn writeDevice(w: *std.Io.Writer, node_id: []const u8) !void {
     // The default device keeps the name it always had; any other gets its node
     // id appended, so two panels do not both appear as "SysInk".
-    try w.print(",\"device\":{{\"identifiers\":[\"{s}\"],\"name\":\"SysInk", .{opts.node_id});
-    if (!std.mem.eql(u8, opts.node_id, default_node_id)) try w.print(" {s}", .{opts.node_id});
+    try w.print(",\"device\":{{\"identifiers\":[\"{s}\"],\"name\":\"SysInk", .{node_id});
+    if (!std.mem.eql(u8, node_id, default_node_id)) try w.print(" {s}", .{node_id});
     try w.writeAll(
         \\","manufacturer":"SysInk","model":"E-Paper Monitor"}}
     );
+}
+
+/// Object id of the notify entity, in its discovery topic and unique id.
+const notify_object_id = "panel";
+
+/// Where Home Assistant looks for the notify entity's discovery config.
+fn notifyDiscoveryTopic(buf: []u8, node_id: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "homeassistant/notify/{s}/{s}/config", .{ node_id, notify_object_id });
+}
+
+/// Discovery config for a notify entity that sends to the notice topic, so
+/// Home Assistant can put a notice on the panel with `notify.send_message`.
+///
+/// No expiry: it has no state to go stale. The message is published as it is,
+/// which the daemon reads as plain text.
+fn notifyDiscoveryPayload(buf: []u8, node_id: []const u8, topic_prefix: []const u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buf);
+    const w = &writer;
+
+    var command_topic_buf: [320]u8 = undefined;
+    const command_topic = try std.fmt.bufPrint(&command_topic_buf, "{s}/{s}", .{ topic_prefix, notify_suffix });
+
+    try w.writeAll("{\"name\":\"Panel\",\"command_topic\":");
+    try std.json.Stringify.encodeJsonString(command_topic, .{}, w);
+    try w.print(",\"unique_id\":\"{s}_{s}\"", .{ node_id, notify_object_id });
+
+    var availability_buf: [320]u8 = undefined;
+    try w.writeAll(",\"availability_topic\":");
+    try std.json.Stringify.encodeJsonString(try availabilityTopic(&availability_buf, topic_prefix), .{}, w);
+
+    try w.writeAll(",\"icon\":\"mdi:message-text\"");
+    try writeDevice(w, node_id);
 
     return writer.buffered();
 }
@@ -523,6 +754,144 @@ fn buildPublish(buf: []u8, topic: []const u8, payload: []const u8, retain: bool)
     return buf[0..pos];
 }
 
+/// Build a SUBSCRIBE for one topic filter at QoS 0 into `buf`.
+///
+/// QoS 0 because a notice that arrives late is worse than one that does not
+/// arrive: the broker then delivers at most once and never waits on an ack.
+fn buildSubscribe(buf: []u8, packet_id: u16, topic: []const u8) ![]const u8 {
+    if (topic.len > std.math.maxInt(u16)) return error.TopicTooLong;
+    // Packet id, topic, requested QoS.
+    const remaining_len = 2 + 2 + topic.len + 1;
+    if (5 + remaining_len > buf.len) return error.PacketTooLarge;
+
+    var pos: usize = 0;
+    // MQTT-3.8.1-1: the reserved flags of SUBSCRIBE are 0b0010.
+    buf[pos] = (@as(u8, @intFromEnum(MqttClient.PacketType.SUBSCRIBE)) << 4) | 0x02;
+    pos += 1;
+    pos += encodeRemainingLength(buf[pos..], remaining_len);
+    std.mem.writeInt(u16, buf[pos..][0..2], packet_id, .big);
+    pos += 2;
+    pos += writeString(buf[pos..], topic);
+    buf[pos] = 0; // QoS 0
+    pos += 1;
+    return buf[0..pos];
+}
+
+/// One whole packet from the broker. `body` is everything after the fixed
+/// header and is borrowed from the `Inbound` it came from.
+const Packet = struct {
+    header: u8,
+    body: []const u8,
+
+    fn kind(self: Packet) u4 {
+        return @intCast(self.header >> 4);
+    }
+};
+
+/// Reassembles packets from the byte stream the broker sends.
+///
+/// TCP delivers bytes, not packets: one read can end mid-packet or hold
+/// several. Bytes go in through `free` and `commit`, whole packets come out of
+/// `next`. A packet larger than the buffer is skipped rather than failing the
+/// connection, since the only large thing anyone would send here is a notice
+/// far too long to show anyway.
+const Inbound = struct {
+    buf: [capacity]u8 = undefined,
+    len: usize = 0,
+    /// Start of the bytes `next` has not yet returned.
+    start: usize = 0,
+    /// Bytes still to come of a packet too large to hold, to be thrown away.
+    skip: usize = 0,
+    /// Packets thrown away for their size, for the caller to report.
+    dropped: u32 = 0,
+
+    const capacity = 2048;
+
+    /// Room to receive into, after the packets already returned are dropped.
+    fn free(self: *Inbound) []u8 {
+        const pending = self.len - self.start;
+        std.mem.copyForwards(u8, self.buf[0..pending], self.buf[self.start..self.len]);
+        self.len = pending;
+        self.start = 0;
+        return self.buf[self.len..];
+    }
+
+    /// Account for `n` bytes received into the slice `free` returned.
+    fn commit(self: *Inbound, n: usize) void {
+        const discard = @min(self.skip, n);
+        self.skip -= discard;
+        const received = self.buf[self.len..][0..n];
+        std.mem.copyForwards(u8, received[0 .. n - discard], received[discard..n]);
+        self.len += n - discard;
+    }
+
+    /// The next whole packet, or null until more bytes arrive.
+    fn next(self: *Inbound) error{MalformedPacket}!?Packet {
+        while (true) {
+            const avail = self.buf[self.start..self.len];
+
+            // Remaining length: one to four bytes of seven bits each, least
+            // significant first (MQTT-2.2.3).
+            var remaining: usize = 0;
+            var i: usize = 1;
+            while (true) : (i += 1) {
+                if (i > 4) return error.MalformedPacket;
+                if (i >= avail.len) return null;
+                remaining |= @as(usize, avail[i] & 0x7F) << @intCast(7 * (i - 1));
+                if (avail[i] & 0x80 == 0) break;
+            }
+            const header_len = i + 1;
+            const total = header_len + remaining;
+
+            if (total > capacity) {
+                self.skip = total - avail.len;
+                self.start = self.len;
+                self.dropped +|= 1;
+                continue;
+            }
+            if (avail.len < total) return null;
+
+            self.start += total;
+            return .{ .header = avail[0], .body = avail[header_len..total] };
+        }
+    }
+};
+
+const Publish = struct {
+    topic: []const u8,
+    payload: []const u8,
+    qos: u2,
+    /// Set by the broker on a retained message delivered because we just
+    /// subscribed — a message from the past rather than one sent now.
+    retain: bool,
+    packet_id: ?u16,
+};
+
+/// Take apart the variable header and payload of a PUBLISH.
+fn parsePublish(packet: Packet) !Publish {
+    const body = packet.body;
+    if (body.len < 2) return error.MalformedPacket;
+    const topic_len = std.mem.readInt(u16, body[0..2], .big);
+    if (body.len < 2 + topic_len) return error.MalformedPacket;
+
+    const qos: u2 = @intCast((packet.header >> 1) & 0x03);
+    var pos: usize = 2 + topic_len;
+    var packet_id: ?u16 = null;
+    if (qos > 0) {
+        if (body.len < pos + 2) return error.MalformedPacket;
+        packet_id = std.mem.readInt(u16, body[pos..][0..2], .big);
+        pos += 2;
+    }
+
+    return .{
+        .topic = body[2..][0..topic_len],
+        .payload = body[pos..],
+        .qos = qos,
+        .retain = packet.header & 0x01 != 0,
+        .packet_id = packet_id,
+    };
+}
+
 /// Last Will: what the broker publishes for us if the connection is lost.
 const Will = struct {
     topic: []const u8,
@@ -537,9 +906,10 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
     const protocol_level: u8 = 4; // MQTT 3.1.1
 
     // Keep alive 0 disables the broker's inactivity timeout (MQTT-3.1.2-10).
-    // This client only publishes and never reads, so it cannot answer PINGREQ
-    // deadlines; with a nonzero keepalive the broker would silently drop us
-    // whenever the publish interval exceeded it.
+    // Nothing here sends PINGREQ, so with a nonzero keepalive the broker would
+    // drop us whenever the publish interval exceeded it. A broker that goes
+    // away is noticed by TCP keepalive instead (see `detectDeadPeer`), and
+    // the notice subscription is made again on the reconnect that follows.
     const keepalive: u16 = 0;
 
     var connect_flags: u8 = 0x02; // Clean session
@@ -623,6 +993,8 @@ pub const MqttConfig = struct {
     client_id: []const u8 = "sysink",
     topic_prefix: []const u8 = "sysink",
     discovery_enabled: bool = true,
+    /// Set from `NOTIFY_ENABLED` by the caller, which owns that setting.
+    notices_enabled: bool = true,
 
     pub fn load(init: std.process.Init) MqttConfig {
         return fromEnv(init.environ_map);
@@ -881,6 +1253,43 @@ test "discovery fits the packet with a long topic prefix" {
     }
 }
 
+test "the notify entity sends to the notice topic and belongs to the device" {
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "sysink");
+
+    var topic_buf: [160]u8 = undefined;
+    try testing.expectEqualStrings(
+        "homeassistant/notify/sysink/panel/config",
+        try notifyDiscoveryTopic(&topic_buf, node_id),
+    );
+
+    var payload_buf: [discovery_payload_max]u8 = undefined;
+    const payload = try notifyDiscoveryPayload(&payload_buf, node_id, "odd\"prefix\\");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, payload, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try testing.expectEqualStrings("odd\"prefix\\/notify", obj.get("command_topic").?.string);
+    try testing.expectEqualStrings("odd\"prefix\\/status", obj.get("availability_topic").?.string);
+    try testing.expectEqualStrings("sysink_panel", obj.get("unique_id").?.string);
+    try testing.expect(obj.get("expire_after") == null);
+    try testing.expect(obj.get("state_topic") == null);
+    try testing.expectEqualStrings("sysink", obj.get("device").?.object.get("identifiers").?.array.items[0].string);
+}
+
+test "the notify discovery fits the packet with a long topic prefix" {
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "x" ** 100);
+
+    var topic_buf: [160]u8 = undefined;
+    const topic = try notifyDiscoveryTopic(&topic_buf, node_id);
+    var payload_buf: [discovery_payload_max]u8 = undefined;
+    const payload = try notifyDiscoveryPayload(&payload_buf, node_id, "p" ** 100);
+    var packet_buf: [MqttClient.max_packet_len]u8 = undefined;
+    _ = try buildPublish(&packet_buf, topic, payload, true);
+}
+
 test "numeric sensors keep statistics and the rest do not" {
     for (sensors) |sensor| {
         const numeric = sensor.component == .sensor and !std.mem.eql(u8, sensor.id, "ip_address");
@@ -909,4 +1318,182 @@ test "sensor ids are unique" {
             try testing.expect(!std.mem.eql(u8, a.id, b.id));
         }
     }
+}
+
+test "buildSubscribe lays out one QoS 0 filter" {
+    var buf: [64]u8 = undefined;
+    const packet = try buildSubscribe(&buf, 1, "a/b");
+    try testing.expectEqualSlices(u8, &.{
+        0x82, 0x08, // SUBSCRIBE with its mandatory flags, remaining length 8
+        0x00, 0x01, // packet id
+        0x00, 0x03, 'a', '/', 'b', // topic filter
+        0x00, // requested QoS
+    }, packet);
+}
+
+/// Append one PUBLISH to the notice topic of the default prefix.
+fn notifyPacket(buf: []u8, payload: []const u8, retain: bool) ![]const u8 {
+    return buildPublish(buf, "sysink/notify", payload, retain);
+}
+
+test "Inbound returns packets however the stream splits them" {
+    var pkt_buf: [128]u8 = undefined;
+    const one = try notifyPacket(&pkt_buf, "hello", false);
+
+    // Two packets back to back, delivered a byte at a time.
+    var stream: [256]u8 = undefined;
+    @memcpy(stream[0..one.len], one);
+    @memcpy(stream[one.len..][0..one.len], one);
+    const bytes = stream[0 .. 2 * one.len];
+
+    var in: Inbound = .{};
+    var seen: usize = 0;
+    for (bytes) |b| {
+        const space = in.free();
+        space[0] = b;
+        in.commit(1);
+        while (try in.next()) |packet| {
+            const message = try parsePublish(packet);
+            try testing.expectEqualStrings("hello", message.payload);
+            seen += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "Inbound skips a packet too large to hold and carries on" {
+    var in: Inbound = .{};
+
+    // A PUBLISH claiming 3000 bytes of body, then a small one after it.
+    const big_len = 3000;
+    var big: [3 + big_len]u8 = @splat('x');
+    big[0] = 0x30;
+    _ = encodeRemainingLength(big[1..3], big_len);
+
+    var pkt_buf: [128]u8 = undefined;
+    const small = try notifyPacket(&pkt_buf, "after", false);
+
+    var feed: [big.len + 128]u8 = undefined;
+    @memcpy(feed[0..big.len], &big);
+    @memcpy(feed[big.len..][0..small.len], small);
+    var rest: []const u8 = feed[0 .. big.len + small.len];
+
+    var got: ?[]const u8 = null;
+    while (rest.len > 0) {
+        const space = in.free();
+        const n = @min(space.len, rest.len, 500);
+        @memcpy(space[0..n], rest[0..n]);
+        in.commit(n);
+        rest = rest[n..];
+        while (try in.next()) |packet| got = (try parsePublish(packet)).payload;
+    }
+
+    try testing.expectEqualStrings("after", got.?);
+    try testing.expectEqual(@as(u32, 1), in.dropped);
+}
+
+test "Inbound rejects a remaining length longer than four bytes" {
+    var in: Inbound = .{};
+    const garbage = [_]u8{ 0x30, 0xFF, 0xFF, 0xFF, 0xFF, 0x01 };
+    @memcpy(in.free()[0..garbage.len], &garbage);
+    in.commit(garbage.len);
+    try testing.expectError(error.MalformedPacket, in.next());
+}
+
+test "parsePublish reads QoS, retain and the packet id" {
+    // QoS 1, retained: topic "t", packet id 7, payload "hi".
+    const body = [_]u8{ 0x00, 0x01, 't', 0x00, 0x07, 'h', 'i' };
+    const message = try parsePublish(.{ .header = 0x33, .body = &body });
+    try testing.expectEqualStrings("t", message.topic);
+    try testing.expectEqualStrings("hi", message.payload);
+    try testing.expectEqual(@as(u2, 1), message.qos);
+    try testing.expect(message.retain);
+    try testing.expectEqual(@as(?u16, 7), message.packet_id);
+
+    try testing.expectError(error.MalformedPacket, parsePublish(.{ .header = 0x30, .body = &.{ 0x00, 0x09, 't' } }));
+}
+
+/// A client whose connection is one end of a socket pair, the other end
+/// standing in for the broker.
+const LoopbackClient = struct {
+    client: MqttClient,
+    broker: c_int,
+
+    fn init() !LoopbackClient {
+        var fds: [2]c_int = undefined;
+        if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+
+        var self: LoopbackClient = .{
+            .client = MqttClient.init(testing.allocator, testing.io, .{}),
+            .broker = fds[1],
+        };
+        self.client.stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .loopback(0) } } };
+        self.client.connected = true;
+        return self;
+    }
+
+    fn deinit(self: *LoopbackClient) void {
+        // No DISCONNECT: nothing reads it, and a full buffer would block.
+        self.client.connected = false;
+        self.client.deinit();
+        _ = std.c.close(self.broker);
+    }
+
+    fn send(self: *LoopbackClient, bytes: []const u8) !void {
+        if (std.c.write(self.broker, bytes.ptr, bytes.len) != bytes.len) return error.WriteFailed;
+    }
+};
+
+test "a notice published to the topic is received" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    try testing.expect(lb.client.receive() == null);
+
+    var pkt_buf: [128]u8 = undefined;
+    try lb.send(try notifyPacket(&pkt_buf, "first", false));
+    try lb.send(try notifyPacket(&pkt_buf, "second", false));
+    try lb.send(try buildPublish(&pkt_buf, "sysink/other", "not a notice", false));
+
+    // Several at once: the latest is the one shown.
+    try testing.expectEqualStrings("second", lb.client.receive().?);
+    try testing.expect(lb.client.connected);
+}
+
+test "a retained notice from before the subscription is not shown" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    var pkt_buf: [128]u8 = undefined;
+    try lb.send(try notifyPacket(&pkt_buf, "stale", true));
+    try testing.expect(lb.client.receive() == null);
+}
+
+test "an empty message, as clearing a retained notice sends, is not a notice" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    var pkt_buf: [128]u8 = undefined;
+    try lb.send(try notifyPacket(&pkt_buf, "", false));
+    try testing.expect(lb.client.receive() == null);
+
+    // An explicit dismissal still gets through.
+    try lb.send(try notifyPacket(&pkt_buf, "{\"text\": \"\"}", false));
+    try testing.expectEqualStrings("{\"text\": \"\"}", lb.client.receive().?);
+}
+
+test "the broker closing the connection is noticed" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    // The warning is expected; keep it out of the test output.
+    const saved = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = saved;
+
+    _ = std.c.close(lb.broker);
+    lb.broker = -1;
+    try testing.expect(lb.client.receive() == null);
+    try testing.expect(!lb.client.connected);
+    try testing.expect(lb.client.socketHandle() == null);
 }
