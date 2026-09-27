@@ -320,6 +320,19 @@ pub fn nvmeSmartLog(page: []const u8) !NvmeHealth {
 ///
 /// Octets rather than a packed integer: that is what the socket APIs want, and
 /// it leaves no byte-order question to get wrong.
+/// Group ID of `name` in the contents of /etc/group, whose lines are
+/// `name:password:gid:members`.
+pub fn groupId(content: []const u8, name: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, ':');
+        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
+        _ = fields.next() orelse return null;
+        return std.fmt.parseInt(u32, fields.next() orelse return null, 10) catch null;
+    }
+    return null;
+}
+
 pub fn ipv4(text: []const u8) ![4]u8 {
     var octets = std.mem.splitScalar(u8, text, '.');
     var addr: [4]u8 = undefined;
@@ -340,6 +353,20 @@ pub fn ipv4(text: []const u8) ![4]u8 {
 // ----------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "groupId finds a group by exact name" {
+    const content =
+        \\root:x:0:
+        \\gpio:x:997:pi
+        \\gpio-admin:x:1001:
+        \\hermes:x:1000:pi,hermes
+    ;
+    try std.testing.expectEqual(@as(?u32, 1000), groupId(content, "hermes"));
+    try std.testing.expectEqual(@as(?u32, 997), groupId(content, "gpio"));
+    try std.testing.expectEqual(@as(?u32, null), groupId(content, "gpi"));
+    try std.testing.expectEqual(@as(?u32, null), groupId(content, "nobody"));
+    try std.testing.expectEqual(@as(?u32, null), groupId("broken:x\n", "broken"));
+}
 
 test "cpuStat parses the aggregate line" {
     const content =

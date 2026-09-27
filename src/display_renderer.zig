@@ -8,6 +8,7 @@ const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const BmpExporter = @import("bmp.zig").BmpExporter;
+const notice_text = @import("notice.zig");
 
 const log = std.log.scoped(.display);
 
@@ -33,6 +34,12 @@ pub fn Renderer(comptime Transport: type) type {
         pub const EPD = epd2in9.Epd(Transport);
 
         bitmap: Bitmap,
+        /// The notice screen, drawn apart from the dashboard so that the
+        /// dashboard's slots keep updating underneath it and reappear intact
+        /// once it is dismissed.
+        notice: Bitmap,
+        /// Whether the panel shows `notice` rather than `bitmap`.
+        notice_shown: bool = false,
         epd: EPD,
         epd_buffer: *Frame,
         last_epd_buffer: *Frame,
@@ -61,6 +68,8 @@ pub fn Renderer(comptime Transport: type) type {
         pub fn init(allocator: std.mem.Allocator, io: std.Io, transport: *Transport) !Self {
             var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
             errdefer bitmap.deinit();
+            var notice = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+            errdefer notice.deinit();
 
             // Buffers for EPD (128x296 portrait = 4736 bytes each)
             const epd_buffer = try allocator.create(Frame);
@@ -73,6 +82,7 @@ pub fn Renderer(comptime Transport: type) type {
 
             return .{
                 .bitmap = bitmap,
+                .notice = notice,
                 .epd = EPD.init(transport),
                 .epd_buffer = epd_buffer,
                 .last_epd_buffer = last_epd_buffer,
@@ -85,6 +95,7 @@ pub fn Renderer(comptime Transport: type) type {
 
         pub fn deinit(self: *Self) void {
             self.bitmap.deinit();
+            self.notice.deinit();
             self.allocator.free(self.bmp_buffer);
             self.allocator.destroy(self.last_epd_buffer);
             self.allocator.destroy(self.epd_buffer);
@@ -98,6 +109,7 @@ pub fn Renderer(comptime Transport: type) type {
 
         /// Show a transient loading screen while metrics initialize
         pub fn showLoading(self: *Self) !void {
+            self.notice_shown = false;
             self.drawSplash("Loading...", .White);
 
             self.convertTo1Bit(self.epd_buffer);
@@ -161,7 +173,8 @@ pub fn Renderer(comptime Transport: type) type {
 
             // FAN section
             self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
-            self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.FAN_LINE_Y, .Black);
+            // Stops short of the "rpm" that renderFanSpeed draws at its end.
+            self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.FAN_LINE_END_X, display_config.FAN_LINE_Y, .Black);
             self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
 
             // Traffic section
@@ -199,12 +212,100 @@ pub fn Renderer(comptime Transport: type) type {
             self.warn_fault = active;
         }
 
-        fn invertStatusBar(self: *Self) void {
-            self.bitmap.invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
+        /// Put a notice on the panel in place of the dashboard, from the next
+        /// update until `clearNotice`.
+        ///
+        /// The fonts cover ASCII only, so the text is folded to it first, and it
+        /// is set in the largest font it fits. What does not fit even the
+        /// smallest is cut off with an ellipsis.
+        pub fn showNotice(self: *Self, text: []const u8) void {
+            const b = &self.notice;
+            b.clear(.White);
+
+            b.drawTextFont(display_config.NOTICE_LABEL_X, display_config.NOTICE_LABEL_Y, display_config.NOTICE_LABEL, .Ubuntu14, .Black);
+            const rule_x: i32 = @intCast(display_config.NOTICE_LABEL_X + b.measureText(display_config.NOTICE_LABEL, .Ubuntu14) + 3);
+            b.drawLine(rule_x, display_config.NOTICE_LINE_Y, display_config.DISPLAY_WIDTH - 1, display_config.NOTICE_LINE_Y, .Black);
+
+            var folded_buf: [notice_text.max_len]u8 = undefined;
+            const folded = notice_text.foldToAscii(&folded_buf, text);
+
+            var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+            var last_buf: [notice_text.max_len + 3]u8 = undefined;
+            const layout = self.layoutNotice(folded, &lines, &last_buf);
+
+            // The block is centred vertically in the body, left-aligned.
+            const line_h = b.getLineHeight(layout.font);
+            const block_h = line_h * @as(u32, @intCast(layout.count));
+            var baseline: i32 = display_config.NOTICE_BODY_Y +
+                @as(i32, @intCast((display_config.NOTICE_BODY_H - block_h) / 2)) +
+                b.getFontAscent(layout.font);
+
+            for (lines[0..layout.count]) |line| {
+                b.drawTextFont(display_config.NOTICE_BODY_X, baseline, line, layout.font, .Black);
+                baseline += @intCast(line_h);
+            }
+
+            self.notice_shown = true;
         }
 
-        /// Toggle the fault overlay on the bitmap. Its own inverse, so a paired call
-        /// restores the bitmap.
+        /// Go back to the dashboard.
+        pub fn clearNotice(self: *Self) void {
+            self.notice_shown = false;
+        }
+
+        const NoticeLayout = struct {
+            font: FontType,
+            count: usize,
+        };
+
+        /// Wrap `text` into `lines` in the largest notice font that holds all of
+        /// it. Failing that, the smallest font's lines as far as they go, the last
+        /// rebuilt in `last_buf` to end in an ellipsis.
+        fn layoutNotice(self: *Self, text: []const u8, lines: *[display_config.NOTICE_MAX_LINES][]const u8, last_buf: []u8) NoticeLayout {
+            const b = &self.notice;
+            const width = display_config.NOTICE_BODY_W;
+
+            var max: usize = 0;
+            for (display_config.NOTICE_FONTS) |font| {
+                max = @min(lines.len, display_config.NOTICE_BODY_H / b.getLineHeight(font));
+                const needed = b.wrapText(text, font, width, lines[0..max]);
+                if (needed <= max) return .{ .font = font, .count = needed };
+            }
+
+            // The loop left the smallest font's lines in place.
+            const font = display_config.NOTICE_FONTS[display_config.NOTICE_FONTS.len - 1];
+            const ellipsis = "...";
+
+            var last = lines[max - 1];
+            while (true) {
+                last = std.mem.trimEnd(u8, last, " ");
+                if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
+                // A whole codepoint at a time: the degree sign survives folding
+                // and is two bytes, and half of it would eat the ellipsis.
+                var cut = last.len - 1;
+                while (cut > 0 and last[cut] & 0xC0 == 0x80) cut -= 1;
+                last = last[0..cut];
+            }
+            @memcpy(last_buf[0..last.len], last);
+            @memcpy(last_buf[last.len..][0..ellipsis.len], ellipsis);
+            lines[max - 1] = last_buf[0 .. last.len + ellipsis.len];
+
+            return .{ .font = font, .count = max };
+        }
+
+        /// What the panel shows: the notice while there is one, else the dashboard.
+        fn frameBitmap(self: *Self) *Bitmap {
+            return if (self.notice_shown) &self.notice else &self.bitmap;
+        }
+
+        /// On whatever is shown: a notice can stay up for a day, and a hardware
+        /// fault must not wait that long to be seen.
+        fn invertStatusBar(self: *Self) void {
+            self.frameBitmap().invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
+        }
+
+        /// Toggle the fault overlay on the frame being shown. Its own inverse, so a
+        /// paired call restores it.
         ///
         /// Not drawn into the layout, because the status bar's three slots are each
         /// redrawn by their own scheduled task and any of them would erase part of it.
@@ -395,9 +496,10 @@ pub fn Renderer(comptime Transport: type) type {
             // One hardware row is packed from one logical column, so the panel's
             // short side has to be exactly the bitmap's height. `output` carries its
             // own length in its type.
-            std.debug.assert(self.bitmap.height == hw_bytes_per_row * 8);
+            const src = self.frameBitmap();
+            std.debug.assert(src.height == hw_bytes_per_row * 8);
 
-            const width = self.bitmap.width;
+            const width = src.width;
 
             var hw_y: u32 = 0;
             while (hw_y < width) : (hw_y += 1) {
@@ -409,7 +511,7 @@ pub fn Renderer(comptime Transport: type) type {
                     var bits: u8 = 0;
                     for (0..8) |b| {
                         const src_y = byte_idx * 8 + b;
-                        if (self.bitmap.data[src_y * self.bitmap.stride + src_x] >= 128) {
+                        if (src.data[src_y * src.stride + src_x] >= 128) {
                             bits |= @as(u8, 0x80) >> @intCast(b);
                         }
                     }
@@ -423,19 +525,20 @@ pub fn Renderer(comptime Transport: type) type {
             if (!config.Config.export_bmp) return;
 
             self.packBmpBuffer();
-            try self.bmp_exporter.save(self.io, self.bmp_buffer, self.bitmap.width, self.bitmap.height, config.Config.bmp_export_path);
+            try self.bmp_exporter.save(self.io, self.bmp_buffer, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT, config.Config.bmp_export_path);
         }
 
         /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
         fn packBmpBuffer(self: *Self) void {
-            const width = self.bitmap.width;
-            const height = self.bitmap.height;
+            const src = self.frameBitmap();
+            const width = src.width;
+            const height = src.height;
             const row_bytes = (width + 7) / 8;
 
             // Pack to 1-bit without rotation, into the preallocated scratch buffer.
             var y: u32 = 0;
             while (y < height) : (y += 1) {
-                const src_row = self.bitmap.data[y * self.bitmap.stride ..][0..width];
+                const src_row = src.data[y * src.stride ..][0..width];
                 const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
 
                 for (dst_row, 0..) |*out_byte, byte_idx| {
@@ -503,7 +606,7 @@ pub fn Renderer(comptime Transport: type) type {
         }
 
         /// Render fan speed. Null means there is no fan, shown as a dash; a fan
-        /// that is present and stopped still reads 0.
+        /// that is present and stopped still reads 0. The unit is in the header.
         pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
             const ascent = self.bitmap.getFontAscent(.Ubuntu24);
             self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
@@ -511,6 +614,11 @@ pub fn Renderer(comptime Transport: type) type {
             var buf: [16]u8 = undefined;
             const text = if (rpm) |r| std.fmt.bufPrint(&buf, "{d}", .{r}) catch "?" else "-";
             self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
+
+            // The unit sits in the header, as it does for traffic, and is drawn
+            // here rather than with the grid for the same reason traffic's is:
+            // the "p" descends into the value's clear area, which erases it.
+            self.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
         }
 
         /// Render IP address
@@ -560,6 +668,16 @@ pub fn Renderer(comptime Transport: type) type {
             } else "N/A";
 
             self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
+        }
+
+        /// Show the machine as wired in the signal slot.
+        ///
+        /// On a cable there is no Wi-Fi reading, and the crossed-out Wi-Fi icon
+        /// with "N/A" that used to fill the slot read as a fault.
+        pub fn renderWired(self: *Self) void {
+            self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+            self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, display_config.ICON_ETHERNET, .Material14, .Black);
+            self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
         }
 
         /// Render network traffic
@@ -688,7 +806,7 @@ pub fn Renderer(comptime Transport: type) type {
             self.renderInternetStatus(true);
             self.renderIpAddress("192.168.1.231");
             self.renderUptime(11, 22, 47);
-            self.renderSignalStrength(null);
+            self.renderWired();
         }
 
         /// Draw the sleep screen, then park the panel in deep sleep.
@@ -702,6 +820,7 @@ pub fn Renderer(comptime Transport: type) type {
             };
             self.panel_asleep = false;
 
+            self.notice_shown = false;
             self.drawSplash("Sleeping...", .Black);
             self.convertTo1Bit(self.epd_buffer);
 
@@ -865,6 +984,25 @@ test "a shrinking APT count leaves nothing behind outside its slot" {
     try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
 }
 
+test "shrinking traffic and fan readings leave nothing behind" {
+    // Every slot a reading draws into must be cleared in full before the next
+    // one, or a wider reading leaves pixels behind a narrower one.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    defer testing.allocator.free(before);
+
+    h.renderer.renderTraffic(7.18, "MB", 118.0, "MB");
+    h.renderer.renderFanSpeed(8200);
+    h.renderer.renderTraffic(999.99, "kB", 3.01, "B");
+    h.renderer.renderFanSpeed(543);
+
+    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+}
+
 test "a missing sensor is drawn as a dash, not as zero" {
     var h = try Harness.init();
     h.wire();
@@ -891,6 +1029,7 @@ test "a missing sensor is drawn as a dash, not as zero" {
     const fan_ascent = r.bitmap.getFontAscent(.Ubuntu24);
     r.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
     r.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    r.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
     try testing.expectEqualSlices(u8, r.bitmap.data, h.renderer.bitmap.data);
 }
 
@@ -998,6 +1137,188 @@ test "the warning leaves everything above the status bar alone" {
     h.renderer.toggleFaultOverlay();
 
     try testing.expectEqualSlices(u8, clean_above, h.renderer.bmp_buffer[0..above_len]);
+}
+
+test "a notice replaces the dashboard and clearing it brings the dashboard back intact" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    const dashboard = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    defer testing.allocator.free(dashboard);
+
+    h.renderer.showNotice("Pračka dokončila praní");
+    try testing.expect(!std.mem.eql(u8, dashboard, h.renderer.packedFrame()));
+
+    h.renderer.clearNotice();
+    try testing.expectEqualSlices(u8, dashboard, h.renderer.packedFrame());
+}
+
+test "the dashboard keeps updating underneath a notice" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.showNotice("hello");
+    const shown = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    defer testing.allocator.free(shown);
+
+    // A reading lands while the notice is up: the panel does not change...
+    h.renderer.renderCpuLoad(99);
+    try testing.expectEqualSlices(u8, shown, h.renderer.packedFrame());
+
+    // ...and the dashboard it returns to has it.
+    h.renderer.clearNotice();
+    var expected = try Harness.init();
+    expected.wire();
+    defer expected.deinit();
+    expected.drawReferenceScreen();
+    expected.renderer.renderCpuLoad(99);
+    try testing.expectEqualSlices(u8, expected.renderer.packedFrame(), h.renderer.packedFrame());
+}
+
+test "a notice reaches the panel through the normal update" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    config.Config.panel_sleep = false;
+    defer config.Config.panel_sleep = true;
+    h.drawReferenceScreen();
+    try h.renderer.showInitialFrame();
+
+    h.renderer.showNotice("hello");
+    h.transport.resetLog();
+    try h.renderer.updateDisplay(true);
+    try testing.expect(h.transport.events.items.len > 0);
+
+    // Unchanged while it stays up, so idle ticks cost nothing.
+    h.transport.resetLog();
+    try h.renderer.updateDisplay(true);
+    try testing.expectEqual(@as(usize, 0), h.transport.events.items.len);
+}
+
+test "a hardware fault shows over a notice too" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.showNotice("Deploy running");
+    const quiet = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    defer testing.allocator.free(quiet);
+
+    h.renderer.setFaultWarning(true);
+    const faulted = h.renderer.packedFrame();
+
+    // The status bar rows are inverted on the notice, and only they are.
+    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const bar_start = display_config.STATUS_BAR_Y * row_bytes;
+    try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
+    for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
+
+    // And the overlay is not left behind in the notice itself.
+    h.renderer.setFaultWarning(false);
+    try testing.expectEqualSlices(u8, quiet, h.renderer.packedFrame());
+}
+
+test "the ellipsis never splits the degree sign" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var last_buf: [notice_text.max_len + 3]u8 = undefined;
+    // Folded text keeps the degree sign as two bytes. Shifting the text a
+    // character at a time moves the cut across it, whatever the font metrics.
+    const body = "\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}" ** 80;
+    var buf: [8 + body.len]u8 = undefined;
+    for (0..8) |shift| {
+        @memset(buf[0..shift], 'x');
+        @memcpy(buf[shift..][0..body.len], body);
+        const layout = h.renderer.layoutNotice(buf[0 .. shift + body.len], &lines, &last_buf);
+
+        const last = lines[layout.count - 1];
+        try testing.expect(std.mem.endsWith(u8, last, "..."));
+        try testing.expect(std.unicode.utf8ValidateSlice(last));
+    }
+}
+
+test "the sleep screen takes over from a notice" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    h.drawReferenceScreen();
+    h.renderer.showNotice("hello");
+    try h.renderer.goToSleep();
+
+    try testing.expect(!h.renderer.notice_shown);
+    // The splash is drawn white on black: a notice would be mostly white.
+    var black: usize = 0;
+    for (h.renderer.bitmap.data) |px| black += @intFromBool(px == 0);
+    try testing.expect(black > h.renderer.bitmap.data.len / 2);
+}
+
+test "a short notice gets the largest font, a longer one steps down" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var last_buf: [notice_text.max_len + 3]u8 = undefined;
+
+    const short = h.renderer.layoutNotice("Backup done", &lines, &last_buf);
+    try testing.expectEqual(FontType.Ubuntu34, short.font);
+    try testing.expectEqual(@as(usize, 1), short.count);
+
+    const longer = h.renderer.layoutNotice(
+        "The nightly backup finished in 14 minutes and copied 2.3 GB to the NAS",
+        &lines,
+        &last_buf,
+    );
+    try testing.expect(longer.font != .Ubuntu34);
+    for (lines[0..longer.count]) |line| {
+        try testing.expect(h.renderer.notice.measureText(line, longer.font) <= display_config.NOTICE_BODY_W);
+    }
+}
+
+test "the lengths the Hermes skill promises hold" {
+    // examples/hermes/sysink-panel/SKILL.md tells an agent what fits; keep it true.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var last_buf: [notice_text.max_len + 3]u8 = undefined;
+
+    // About 30 characters: the largest font.
+    try testing.expectEqual(FontType.Ubuntu34, h.renderer.layoutNotice("Backup finished, disk is fine.", &lines, &last_buf).font);
+
+    // About 250: all of it, in the smallest.
+    const long = "Nightly backup of the NAS finished with warnings. " ** 6;
+    const layout = h.renderer.layoutNotice(long[0..250], &lines, &last_buf);
+    try testing.expect(!std.mem.endsWith(u8, lines[layout.count - 1], "..."));
+}
+
+test "a notice too long for the smallest font ends in an ellipsis within the body" {
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    const long = "word " ** 100;
+    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var last_buf: [notice_text.max_len + 3]u8 = undefined;
+    const layout = h.renderer.layoutNotice(long, &lines, &last_buf);
+
+    try testing.expectEqual(FontType.Ubuntu14, layout.font);
+    const last = lines[layout.count - 1];
+    try testing.expect(std.mem.endsWith(u8, last, "..."));
+    try testing.expect(h.renderer.notice.measureText(last, .Ubuntu14) <= display_config.NOTICE_BODY_W);
+    // And the block fits the body height.
+    try testing.expect(layout.count * h.renderer.notice.getLineHeight(.Ubuntu14) <= display_config.NOTICE_BODY_H);
 }
 
 test "no warning means no overlay at all" {

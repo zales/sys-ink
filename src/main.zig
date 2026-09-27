@@ -12,6 +12,8 @@ const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
 const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
 const MqttClient = @import("mqtt.zig").MqttClient;
 const MqttConfig = @import("mqtt.zig").MqttConfig;
+const NoticeFifo = @import("notice_fifo.zig").Fifo;
+const notice = @import("notice.zig");
 
 const log = std.log.scoped(.main);
 
@@ -56,8 +58,13 @@ const App = struct {
     renderer: *DisplayRenderer,
     mqtt: ?*MqttClient = null,
     preview: ?*WebPreview = null,
+    notices: ?*NoticeFifo = null,
     /// Monotonic timestamp of the last full (non-partial) panel refresh.
     last_full_refresh: i64 = 0,
+    /// Makes the next display update a full refresh, whatever the timer says.
+    full_refresh_due: bool = false,
+    /// Monotonic timestamp at which the notice on show is taken down, if one is.
+    notice_until: ?i64 = null,
     /// Previous readings, so transitions are logged once rather than every
     /// cycle. Null means the source has not reported yet.
     last_undervoltage: ?bool = null,
@@ -117,10 +124,16 @@ const App = struct {
     }
 
     fn updateSignal(self: *App) void {
+        // Read even on a cable: MQTT publishes it whenever there is one.
         const signal = self.net.getSignalStrength("wlan0");
-        self.renderer.renderSignalStrength(signal);
-
         if (signal) |s| log.debug("Signal: {d} dBm", .{s});
+
+        // Relies on the IP task having run first this cycle; see the schedule.
+        if (self.net.lastIpIsWired()) {
+            self.renderer.renderWired();
+        } else {
+            self.renderer.renderSignalStrength(signal);
+        }
     }
 
     fn updateIp(self: *App) void {
@@ -268,8 +281,12 @@ const App = struct {
 
         // Periodic full refresh clears the ghosting that partial updates leave
         // behind. Driven by elapsed time so it does not depend on INTERVAL_FAST.
-        const full_refresh = elapsed >= @as(i64, config.Config.interval_full_refresh);
-        if (full_refresh) self.last_full_refresh = now;
+        const full_refresh = self.full_refresh_due or
+            elapsed >= @as(i64, config.Config.interval_full_refresh);
+        if (full_refresh) {
+            self.last_full_refresh = now;
+            self.full_refresh_due = false;
+        }
 
         self.renderer.updateDisplay(!full_refresh) catch |err| {
             log.warn("Failed to update display: {t}", .{err});
@@ -282,6 +299,62 @@ const App = struct {
     fn publishPreview(self: *App) void {
         const preview = self.preview orelse return;
         preview.publish(self.renderer.packedFrame());
+    }
+
+    // ------------------------------------------------------------------------
+    // Notices
+    // ------------------------------------------------------------------------
+
+    fn receivePipeNotice(self: *App) void {
+        const fifo = self.notices orelse return;
+        if (fifo.receive()) |raw| self.applyNotice(raw);
+    }
+
+    fn receiveMqttNotice(self: *App) void {
+        const client = self.mqtt orelse return;
+        if (client.receive()) |raw| self.applyNotice(raw);
+    }
+
+    /// Put a notice on the panel straight away, rather than at the next display
+    /// tick, which may be half a minute off. One with no text takes down the
+    /// notice on show instead.
+    fn applyNotice(self: *App, raw: []const u8) void {
+        // Room for the unescaped strings of the largest payload either source
+        // delivers, with the JSON parser's own bookkeeping.
+        var scratch: [8192]u8 = undefined;
+        const n = notice.parse(&scratch, raw) orelse return;
+
+        if (n.text.len == 0) {
+            if (self.notice_until == null) return;
+            log.info("Notice dismissed", .{});
+            self.notice_until = self.nowSeconds();
+            self.expireNotice();
+            return;
+        }
+
+        const duration = n.duration orelse config.Config.notify_duration;
+        log.info("Notice for {d}s: {s}", .{ duration, n.text });
+        self.renderer.showNotice(n.text);
+        self.notice_until = self.nowSeconds() + @as(i64, duration);
+        self.updateDisplay();
+    }
+
+    /// Take the notice down once its time is up.
+    fn expireNotice(self: *App) void {
+        const until = self.notice_until orelse return;
+        if (self.nowSeconds() < until) return;
+
+        self.notice_until = null;
+        self.renderer.clearNotice();
+        // A partial update from a screen of large text back to the dashboard
+        // can leave a faint ghost of it; the full refresh is worth its flash.
+        self.full_refresh_due = true;
+        self.updateDisplay();
+    }
+
+    fn noticeSecondsLeft(self: *App) ?i64 {
+        const until = self.notice_until orelse return null;
+        return @max(0, until - self.nowSeconds());
     }
 
     // ------------------------------------------------------------------------
@@ -411,7 +484,8 @@ pub fn main(init: std.process.Init) !u8 {
         .renderer = &renderer,
     };
 
-    const mqtt_config = MqttConfig.load(init);
+    var mqtt_config = MqttConfig.load(init);
+    mqtt_config.notices_enabled = config.Config.notify_enabled;
     var mqtt_client: ?MqttClient = null;
     defer if (mqtt_client) |*client| client.deinit();
 
@@ -440,6 +514,9 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "disk", &app, App.updateDisk);
     try scheduler.every(fast, "fan", &app, App.updateFan);
     try scheduler.every(fast, "traffic", &app, App.updateTraffic);
+    // Before signal: which of the two the signal slot shows depends on the
+    // interface the address is on.
+    try scheduler.every(fast, "ip", &app, App.updateIp);
     try scheduler.every(fast, "signal", &app, App.updateSignal);
     try scheduler.every(fast, "uptime", &app, App.updateUptime);
     // The APT count is repainted on the fast tick so a background check that
@@ -447,9 +524,6 @@ pub fn main(init: std.process.Init) !u8 {
     try scheduler.every(fast, "apt_render", &app, App.renderApt);
     try scheduler.every(fast, "undervoltage", &app, App.updateUndervoltage);
     try scheduler.every(fast, "nvme_health", &app, App.updateNvmeHealth);
-    // One getifaddrs walk, cheap enough for the fast tick; on the slow one a
-    // DHCP change stayed off the panel for up to three hours.
-    try scheduler.every(fast, "ip", &app, App.updateIp);
     try scheduler.every(fast, "internet_render", &app, App.renderInternet);
 
     try scheduler.every(slow, "apt", &app, App.updateApt);
@@ -482,12 +556,25 @@ pub fn main(init: std.process.Init) !u8 {
         app.publishPreview();
     }
 
+    var notice_fifo: ?NoticeFifo = null;
+    if (config.Config.notify_enabled) {
+        notice_fifo = NoticeFifo.open(io, config.Config.notify_fifo, config.Config.notify_group) catch |err| blk: {
+            log.err("Notices disabled: {t}", .{err});
+            break :blk null;
+        };
+    }
+    defer if (notice_fifo) |*f| f.close();
+    if (notice_fifo) |*f| {
+        app.notices = f;
+        log.info("Accepting notices on {s}", .{config.Config.notify_fifo});
+    }
+
     // Registered last so it does not run before the base frame exists. Its first
     // tick is a no-op anyway: the frame is unchanged, so the update is skipped.
     try scheduler.every(fast, "display", &app, App.updateDisplay);
 
     log.info("Starting main loop (Ctrl+C to exit)", .{});
-    runLoop(&scheduler);
+    runLoop(&scheduler, &app);
 
     log.info("Shutting down gracefully", .{});
     renderer.goToSleep() catch |err| {
@@ -527,30 +614,55 @@ fn installSignalHandlers() void {
 ///
 /// Between ticks the loop blocks on the wake pipe for exactly as long as the
 /// next task is away, so an idle daemon wakes once per interval rather than
-/// once per second, while a signal still stops it immediately.
-fn runLoop(scheduler: *Scheduler) void {
+/// once per second, while a signal still stops it immediately. It watches the
+/// notice pipe and the MQTT connection as well, so a notice goes up the moment
+/// it arrives, and wakes for the one on show to come down on time.
+fn runLoop(scheduler: *Scheduler, app: *App) void {
     const max_sleep_seconds = 3600;
     const have_pipe = wake_pipe[0] >= 0;
 
     while (!should_exit.load(.acquire)) {
         scheduler.runPending();
+        app.expireNotice();
         if (should_exit.load(.acquire)) break;
 
         const idle = scheduler.idleSeconds() orelse max_sleep_seconds;
         var seconds = @min(idle, max_sleep_seconds);
+        if (app.noticeSecondsLeft()) |left| seconds = @min(seconds, left);
 
         // Without the pipe there is nothing to interrupt the wait, so fall back
         // to short naps to keep shutdown responsive.
         if (!have_pipe) seconds = @min(seconds, 1);
 
-        var fds = [_]std.posix.pollfd{.{
-            .fd = wake_pipe[0],
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        // With no pipe, poll on zero descriptors degrades to a plain sleep.
-        const watched: []std.posix.pollfd = if (have_pipe) fds[0..1] else fds[0..0];
+        // With nothing to watch, poll on zero descriptors degrades to a plain sleep.
+        var fds: [3]std.posix.pollfd = undefined;
+        var watched: usize = 0;
+        if (have_pipe) {
+            fds[watched] = .{ .fd = wake_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
+            watched += 1;
+        }
+        const notice_slot = watched;
+        if (app.notices) |fifo| {
+            fds[watched] = .{ .fd = fifo.fd, .events = std.posix.POLL.IN, .revents = 0 };
+            watched += 1;
+        }
+        // Looked up afresh every time round: the socket changes on reconnect.
+        const mqtt_slot = watched;
+        const mqtt_socket = if (app.mqtt) |client| client.socketHandle() else null;
+        if (mqtt_socket) |socket| {
+            fds[watched] = .{ .fd = socket, .events = std.posix.POLL.IN, .revents = 0 };
+            watched += 1;
+        }
 
-        _ = std.posix.poll(watched, @intCast(seconds * 1000)) catch {};
+        _ = std.posix.poll(fds[0..watched], @intCast(seconds * 1000)) catch {};
+
+        const ready = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR;
+        if (app.notices != null and fds[notice_slot].revents & std.posix.POLL.IN != 0) {
+            app.receivePipeNotice();
+        }
+        // A hangup or error is read too, which is how a dropped broker is seen.
+        if (mqtt_socket != null and fds[mqtt_slot].revents & ready != 0) {
+            app.receiveMqttNotice();
+        }
     }
 }

@@ -11,6 +11,7 @@
 
 test {
     _ = @import("parse.zig");
+    _ = @import("notice.zig");
     _ = @import("syscall.zig");
     _ = @import("bounded_connect.zig");
     _ = @import("scheduler.zig");

@@ -11,6 +11,8 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
   inverted status bar on the panel and published over MQTT as problem entities.
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.
 - **Home Assistant**: Optional MQTT publishing with auto-discovery.
+- **Notices**: Any program can put a short message on the panel for a while,
+  through a named pipe locally or an MQTT topic from anywhere on the network.
 - **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
 
 ## Screenshots
@@ -128,6 +130,9 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   `ConnectOptions.timeout`.
 - `src/network_ops.zig`: Network status and traffic monitoring.
 - `src/mqtt.zig`: MQTT 3.1.1 client and Home Assistant discovery.
+- `src/notice.zig`, `src/notice_fifo.zig`: notices — reading the payload,
+  folding its text to what the fonts can draw, and receiving it through the
+  named pipe. MQTT notices arrive through `src/mqtt.zig`.
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging.
 - `src/waveshare_epd/`: Low-level driver for the e-Paper display, generic over its
@@ -248,6 +253,7 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
+RuntimeDirectory=sys-ink
 
 [Install]
 WantedBy=multi-user.target
@@ -264,6 +270,8 @@ The hardening lines are the ones the `.deb` unit uses. They leave the devices,
 need, and close off home directories and the kernel's tunables. With
 `ProtectHome`, `BMP_EXPORT_PATH` and `LOG_FILE_PATH` cannot point into `/home`
 or `/root`. `systemd-analyze security sys-ink` shows what is left open.
+`RuntimeDirectory` gives the notice pipe its `/run/sys-ink` and removes it when
+the service stops.
 
 ## Configuration
 
@@ -365,6 +373,139 @@ for up to its deadline. Nothing recovers from that but waiting, so treat the
 preview as a diagnostic aid on a network you trust rather than a service to
 expose.
 
+### Notices
+
+Other programs can show a message on the panel. It replaces the dashboard for
+`NOTIFY_DURATION` seconds and then the dashboard comes back, readings current,
+with a full refresh to clear the large text's ghost.
+
+On the machine itself, write to the pipe:
+
+```bash
+echo "Backup finished" > /run/sys-ink/notify
+```
+
+From anywhere that reaches the broker, with MQTT enabled, publish to
+`<MQTT_TOPIC_PREFIX>/notify`:
+
+```bash
+mosquitto_pub -h broker -t sysink/notify -m "Backup finished"
+```
+
+Both take the same payload: plain text, or JSON when a notice should stay up
+longer or shorter than the default:
+
+```bash
+mosquitto_pub -t sysink/notify -m '{"text": "Deploy running", "duration": 300}'
+```
+
+`message` is accepted for `text`. `duration` is in seconds, at most a day; it
+may be a fraction or a number in a string, and zero, a negative number or
+leaving it out means `NOTIFY_DURATION`. `{"text": ""}` takes the notice on show
+down early. Plain text with nothing visible in it, only spaces or control
+characters, is ignored rather than shown as a blank panel.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOTIFY_ENABLED` | `true` | Accept notices: create the pipe, and subscribe to the MQTT topic when MQTT is enabled |
+| `NOTIFY_FIFO` | `/run/sys-ink/notify` | Path of the pipe. Its directory is created if missing; nothing above it is |
+| `NOTIFY_GROUP` | unset | Group allowed to write besides root. Unset leaves the pipe root-only |
+| `NOTIFY_DURATION` | `30` | Seconds a notice stays up |
+
+- **A newer notice replaces the one on show** and restarts its timer.
+- **On the pipe, one line is one notice.** The line ends at a newline or at the
+  end of the write, so `printf` works as well as `echo`. A JSON notice may be
+  spread over several lines, as `jq` prints it.
+- **A hardware fault still shows.** The inverted status bar for under-voltage
+  or a SMART warning is drawn over a notice too, however long it stays up.
+- **Text is set in the largest font that fits,** from one large line down to
+  six small ones. Longer text is cut off with `...`; about 250 characters is the
+  most the panel holds.
+- **The fonts cover ASCII only.** Diacritics are dropped (`Příliš žluťoučký`
+  shows as `Prilis zlutoucky`), typographic quotes and dashes become their ASCII
+  lookalikes, and anything else, emoji included, shows as `?`.
+- **Who may write** is decided by the pipe's permissions: `0600` root-only by
+  default, `0620` with `NOTIFY_GROUP` set. To let a program running as an
+  ordinary user post notices, put that user in a group and name it:
+
+  ```bash
+  sudo groupadd -f sysink-notify
+  sudo usermod -aG sysink-notify hermes
+  echo 'NOTIFY_GROUP=sysink-notify' | sudo tee -a /etc/default/sys-ink
+  sudo systemctl restart sys-ink
+  ```
+
+- **A writer blocks while nothing reads.** Opening a pipe for writing waits for
+  a reader. Under the packaged unit the directory disappears when the service
+  stops, so the write fails at once instead; when running the daemon by hand
+  the pipe stays behind, and a sender that must never hang should bound it:
+  `timeout 2 sh -c 'echo "..." > /run/sys-ink/notify'`.
+
+- **Over MQTT, retained notices are ignored.** A retained message is replayed
+  to every new subscriber, which would bring an old notice back each time the
+  daemon reconnects. Publish without `-r`. An empty message is ignored as well:
+  it is what clearing a retained one (`mosquitto_pub -r -n`) delivers. Who may publish is up to the
+  broker's ACL; anyone who can write to the topic can put text on the panel.
+- **Over MQTT, notices arrive only while connected.** One sent while the
+  daemon is reconnecting is lost, since the subscription is QoS 0 on a clean
+  session: a notice shown late is worse than one not shown. A broker that
+  vanishes without closing the connection is noticed by TCP keepalive within
+  about a minute and a half, and the daemon reconnects and subscribes again.
+
+#### From Home Assistant
+
+With discovery on, the device gains a notify entity, `notify.sysink_panel`,
+that publishes to the notice topic. An automation can then put a notice on the
+panel like any other notification:
+
+```yaml
+action: notify.send_message
+target:
+  entity_id: notify.sysink_panel
+data:
+  message: "Washing machine finished"
+```
+
+Home Assistant names the entity after the device and its area, so a panel
+assigned to an area gets that prefix, e.g. `notify.office_sysink_panel`; the
+actual ID is under Settings → Devices & Services → MQTT → SysInk. Turning
+notices off with `NOTIFY_ENABLED=false` removes the entity again.
+
+#### From an AI agent
+
+[`examples/hermes/sysink-panel`](examples/hermes/sysink-panel) is a skill for
+[Hermes Agent](https://hermes-agent.nousresearch.com/): when to use the panel
+and when not (it is readable by anyone in the room), how short to keep the
+text, and a helper script that writes to the pipe or falls back to MQTT.
+Install it with:
+
+```bash
+cp -r examples/hermes/sysink-panel ~/.hermes/skills/
+```
+
+An agent whose commands run in a sandbox container cannot see the pipe, so
+the helper falls back to MQTT: with a standard-library Python publisher, which
+keeps the password out of the process list, or `mosquitto_pub` where there is
+no Python, reaching the host's broker
+through the container's gateway. Give it credentials in `sysink.env` next to
+`SKILL.md`, readable only by you:
+
+```bash
+cat > ~/.hermes/skills/sysink-panel/sysink.env <<'ENV'
+SYSINK_MQTT_USER=hermes
+SYSINK_MQTT_PASSWORD=...
+ENV
+chmod 600 ~/.hermes/skills/sysink-panel/sysink.env
+```
+
+`SYSINK_MQTT_HOST`, `SYSINK_MQTT_PORT` and `SYSINK_MQTT_TOPIC` go there too if
+the defaults do not fit. A broker user of its own for the agent is better than
+sharing Home Assistant's, and a broker ACL can limit it to the notice topic.
+
+The skill follows the [agentskills.io](https://agentskills.io) format, so other
+agents that read `SKILL.md` skills can use it too; the helper,
+`scripts/notify.sh`, works on its own as well.
+
 ### Logging and export
 
 | Variable | Default | Description |
@@ -434,6 +575,12 @@ the "SysInk" device — the metrics shown on the panel plus SSD wear, and two
 problem entities (`Under-voltage`, `NVMe SMART Fault`) that Home Assistant can
 turn into notifications. SMART reading needs the daemon to run as root, which
 the packaged service does; unprivileged runs disable it silently.
+
+The device goes **unavailable** in Home Assistant as soon as the daemon stops:
+it publishes `offline` to `<MQTT_TOPIC_PREFIX>/status` on a clean shutdown, and
+the broker publishes the same as its Last Will after a crash or `kill -9`. A Pi
+that loses power sends nothing, so there the entities time out after three
+`INTERVAL_FAST` periods instead.
 
 A ready-made dashboard showing all of it is provided in
 [`examples/home-assistant/dashboard.yaml`](examples/home-assistant/dashboard.yaml)

@@ -61,6 +61,12 @@ pub const DISK_AREA_Y_TEMP = 42;
 pub const FAN_LABEL_X = 102;
 pub const FAN_LABEL_Y = 80;
 pub const FAN_LINE_Y = 76;
+/// "rpm" at the right of the fan header, as the traffic headers carry their
+/// unit: 26px wide, ending two pixels before the divider at 201.
+pub const FAN_UNIT_X = 173;
+pub const FAN_UNIT_Y = 80;
+/// The header rule stops two pixels short of the unit, as the traffic ones do.
+pub const FAN_LINE_END_X = 171;
 pub const FAN_ICON_X = 103;
 pub const FAN_ICON_Y = 105;
 pub const FAN_VALUE_X = 133;
@@ -170,6 +176,9 @@ pub const ICON_WIFI_OK = "\u{e2bf}";
 pub const ICON_WIFI_OFF = "\u{f1ca}";
 pub const ICON_WIFI_SIGNAL = "\u{e63e}";
 pub const ICON_WIFI_NO_SIGNAL = "\u{e1da}";
+/// Shown in the signal slot when the machine is on a cable, where a Wi-Fi
+/// signal reading has nothing to say. The same glyph as the splash screen's.
+pub const ICON_ETHERNET = "\u{eb2f}";
 
 // Sleep/Loading screen constants
 pub const SLEEP_LINE_X = 124;
@@ -183,6 +192,20 @@ pub const SLEEP_TITLE_Y = 60;
 pub const SLEEP_SUBTITLE_X = 155;
 pub const SLEEP_SUBTITLE_Y = 82;
 pub const ICON_SLEEP_NET = "\u{eb2f}";
+
+// Notice screen: a header in the style of the dashboard's, and the message
+// below it in the largest font that fits.
+pub const NOTICE_LABEL = "message";
+pub const NOTICE_LABEL_X = 1;
+pub const NOTICE_LABEL_Y = 11;
+pub const NOTICE_LINE_Y = 7;
+pub const NOTICE_BODY_X = 4;
+pub const NOTICE_BODY_Y = 16;
+pub const NOTICE_BODY_W = DISPLAY_WIDTH - 2 * NOTICE_BODY_X;
+pub const NOTICE_BODY_H = DISPLAY_HEIGHT - NOTICE_BODY_Y - 2;
+/// Largest first. Six lines of the smallest is as many as the body holds.
+pub const NOTICE_FONTS = [_]@import("graphics.zig").Bitmap.FontType{ .Ubuntu34, .Ubuntu26, .Ubuntu20, .Ubuntu14 };
+pub const NOTICE_MAX_LINES = 6;
 
 // ----------------------------------------------------------------------------
 // Text that has to be fitted to a slot

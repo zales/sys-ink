@@ -235,24 +235,81 @@ pub const Bitmap = struct {
 
         var it = CodepointIterator{ .text = text };
         while (it.next()) |cp| {
-            width += if (font.get(cp)) |glyph| glyph.advance_x else missing_glyph_advance;
+            width += advance(font, cp);
         }
         return width;
+    }
+
+    /// Distance between the baselines of consecutive lines.
+    pub fn getLineHeight(_: *Bitmap, font_type: FontType) u32 {
+        return getFont(font_type).height;
+    }
+
+    fn advance(font: *const font_data.Font, cp: u32) u32 {
+        return if (font.get(cp)) |glyph| glyph.advance_x else missing_glyph_advance;
+    }
+
+    /// Break `text` into lines no wider than `max_width`, at spaces where it can
+    /// and mid-word only for a word that is wider than a line on its own.
+    ///
+    /// Fills `lines` with slices of `text` as far as it goes and returns how many
+    /// lines the whole text needs, which may be more than `lines` holds: a
+    /// caller fitting text to a box can tell from that alone that it overflows.
+    pub fn wrapText(_: *Bitmap, text: []const u8, font_type: FontType, max_width: u32, lines: [][]const u8) usize {
+        const font = getFont(font_type);
+        var count: usize = 0;
+
+        var rest = std.mem.trim(u8, text, " ");
+        while (rest.len > 0) {
+            const end = lineEnd(font, rest, max_width);
+            if (count < lines.len) lines[count] = std.mem.trimEnd(u8, rest[0..end], " ");
+            count += 1;
+            rest = std.mem.trimStart(u8, rest[end..], " ");
+        }
+        return count;
+    }
+
+    /// Bytes of `text` that go on its first line. Never zero, so wrapping
+    /// always makes progress even when a single glyph is wider than the line.
+    fn lineEnd(font: *const font_data.Font, text: []const u8, max_width: u32) usize {
+        var width: u32 = 0;
+        var last_space: ?usize = null;
+
+        var it = CodepointIterator{ .text = text };
+        while (true) {
+            const start = it.i;
+            const cp = it.next() orelse return text.len;
+            if (cp == ' ') last_space = start;
+
+            width += advance(font, cp);
+            if (width <= max_width) continue;
+
+            if (cp == ' ') return start;
+            if (last_space) |space| return space;
+            return if (start == 0) it.i else start;
+        }
     }
 };
 
 /// Decodes UTF-8, substituting '?' for malformed sequences.
-const CodepointIterator = struct {
+///
+/// An invalid lead byte is one '?', not the Latin-1 character with its value:
+/// decoding it as a one-byte sequence turned a stray 0xFF into 'ÿ'. A sequence
+/// cut short by the end of the text is a '?' too, rather than silently lost.
+pub const CodepointIterator = struct {
     text: []const u8,
     i: usize = 0,
 
-    fn next(self: *CodepointIterator) ?u32 {
+    pub fn next(self: *CodepointIterator) ?u32 {
         if (self.i >= self.text.len) return null;
 
-        const len = std.unicode.utf8ByteSequenceLength(self.text[self.i]) catch 1;
+        const len = std.unicode.utf8ByteSequenceLength(self.text[self.i]) catch {
+            self.i += 1;
+            return '?';
+        };
         if (self.i + len > self.text.len) {
             self.i = self.text.len;
-            return null;
+            return '?';
         }
 
         const cp = std.unicode.utf8Decode(self.text[self.i..][0..len]) catch '?';
@@ -278,6 +335,69 @@ fn countBlack(bmp: *const Bitmap) u32 {
         if (px == 0) n += 1;
     }
     return n;
+}
+
+test "wrapText breaks at spaces and keeps every line within the width" {
+    var bmp = try testBitmap(1, 1);
+    defer bmp.deinit();
+
+    const text = "the quick brown fox jumps over the lazy dog";
+    const max_width = bmp.measureText("the quick brown", .Ubuntu14);
+
+    var lines: [8][]const u8 = undefined;
+    const n = bmp.wrapText(text, .Ubuntu14, max_width, &lines);
+
+    try testing.expectEqualStrings("the quick brown", lines[0]);
+    for (lines[0..n]) |line| {
+        try testing.expect(bmp.measureText(line, .Ubuntu14) <= max_width);
+        try testing.expect(line[0] != ' ' and line[line.len - 1] != ' ');
+    }
+    // Nothing lost: the lines joined by spaces are the text again.
+    const joined = try std.mem.join(testing.allocator, " ", lines[0..n]);
+    defer testing.allocator.free(joined);
+    try testing.expectEqualStrings(text, joined);
+}
+
+test "wrapText splits a word too wide for any line" {
+    var bmp = try testBitmap(1, 1);
+    defer bmp.deinit();
+
+    var lines: [8][]const u8 = undefined;
+    const max_width = bmp.measureText("abcd", .Ubuntu14);
+    const n = bmp.wrapText("abcdefghij", .Ubuntu14, max_width, &lines);
+
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("abcd", lines[0]);
+    try testing.expectEqualStrings("efgh", lines[1]);
+    try testing.expectEqualStrings("ij", lines[2]);
+}
+
+test "wrapText counts the lines it had no room to return" {
+    var bmp = try testBitmap(1, 1);
+    defer bmp.deinit();
+
+    var lines: [2][]const u8 = undefined;
+    const max_width = bmp.measureText("aa", .Ubuntu14);
+    try testing.expectEqual(@as(usize, 4), bmp.wrapText("aa aa aa aa", .Ubuntu14, max_width, &lines));
+    try testing.expectEqualStrings("aa", lines[1]);
+}
+
+test "wrapText makes progress even when one glyph is wider than the line" {
+    var bmp = try testBitmap(1, 1);
+    defer bmp.deinit();
+
+    var lines: [4][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 2), bmp.wrapText("WW", .Ubuntu34, 1, &lines));
+    try testing.expectEqual(@as(usize, 0), bmp.wrapText("   ", .Ubuntu14, 100, &lines));
+}
+
+test "malformed UTF-8 decodes to question marks, never to other letters" {
+    var it = CodepointIterator{ .text = "a\xffb\xc4" };
+    try testing.expectEqual(@as(?u32, 'a'), it.next());
+    try testing.expectEqual(@as(?u32, '?'), it.next());
+    try testing.expectEqual(@as(?u32, 'b'), it.next());
+    try testing.expectEqual(@as(?u32, '?'), it.next());
+    try testing.expectEqual(@as(?u32, null), it.next());
 }
 
 test "fillRect fills exactly the requested area" {
@@ -620,6 +740,32 @@ test "traffic values fit their slot across the whole range" {
         const unit = try std.fmt.bufPrint(&unit_buf, "{s}/s", .{scaled.unit});
         try testing.expect(bmp.measureText(unit, .Ubuntu14) <= dc.TEXT_AREA_TRAFFIC_UNIT.width);
     }
+}
+
+test "the traffic slot stays clear of its icon" {
+    var bmp = try testBitmap(4, 4);
+    defer bmp.deinit();
+    const icon_end = dc.TRAFFIC_DOWN_ICON_X + @as(i32, @intCast(bmp.measureText(dc.ICON_DOWNLOAD, .Material24)));
+    try testing.expect(icon_end <= dc.TRAFFIC_DOWN_VALUE_X);
+    // And both icons sit inside their column, right of the divider at 201.
+    try testing.expect(dc.TRAFFIC_DOWN_ICON_X > dc.VERTICAL_LINE_2);
+    try testing.expect(dc.TRAFFIC_UP_ICON_X > dc.VERTICAL_LINE_2);
+}
+
+test "the fan slot ends before the divider" {
+    try testing.expect(dc.FAN_VALUE_X + @as(i32, dc.TEXT_AREA_FAN.width) <= dc.VERTICAL_LINE_2);
+}
+
+test "the fan header fits its label, rule and unit" {
+    var bmp = try testBitmap(4, 4);
+    defer bmp.deinit();
+
+    const label_end = dc.FAN_LABEL_X + @as(i32, @intCast(bmp.measureText("fan", .Ubuntu14)));
+    const unit_end = dc.FAN_UNIT_X + @as(i32, @intCast(bmp.measureText("rpm", .Ubuntu14)));
+
+    try testing.expect(label_end < 124); // where the rule starts
+    try testing.expect(dc.FAN_LINE_END_X < dc.FAN_UNIT_X);
+    try testing.expect(unit_end < dc.VERTICAL_LINE_2);
 }
 
 test "bottom bar slots do not overlap or run off the panel" {

@@ -3,8 +3,9 @@
 //! Metrics are smooth functions of time rather than fixed values, so slots walk
 //! through their own formatting without anyone driving them: traffic sweeps
 //! several orders of magnitude to visit every unit, the signal reading crosses
-//! the width where it drops its `dBm` suffix, and the fault overlay flares
-//! periodically so the inverted status bar can be checked too.
+//! the width where it drops its `dBm` suffix, the fault overlay flares
+//! periodically so the inverted status bar can be checked too, and notices of
+//! every length come and go so each font step of their layout shows up.
 
 const std = @import("std");
 const parse = @import("parse.zig");
@@ -24,6 +25,27 @@ pub const row_bytes = (width + 7) / 8;
 pub fn faultActive(t: f64) bool {
     const phase = @mod(t, 30.0);
     return phase >= 20.0 and phase < 26.0;
+}
+
+/// Samples from one line up to one too long for the panel, with diacritics
+/// the renderer has to fold away.
+const notice_samples = [_][]const u8{
+    "Záloha dokončena",
+    "Pračka doprala. Nezapomeň pověsit prádlo.",
+    "V 18:00 máš call s týmem, potom vyzvednout balík na poště a cestou koupit mléko.",
+    "Tohle je schválně dlouhá zpráva, která se na panel celá nevejde ani nejmenším písmem, " ++
+        "takže poslední řádek musí skončit trojtečkou a nic nesmí přetéct přes okraj. " ++
+        "Příliš žluťoučký kůň úpěl ďábelské ódy, a pořád ještě není konec, " ++
+        "protože tahle věta je tu jen proto, aby se text opravdu nevešel.",
+};
+
+/// A notice for 8 s out of every 60, a different sample each time; null for the
+/// rest. Starts at 40 s, clear of the first thirty seconds the frame test walks.
+pub fn noticeAt(t: f64) ?[]const u8 {
+    const phase = @mod(t, 60.0);
+    if (phase < 40.0 or phase >= 48.0) return null;
+    const round: usize = @intFromFloat(@floor(t / 60.0));
+    return notice_samples[round % notice_samples.len];
 }
 
 fn wave(t: f64, period: f64) f64 {
@@ -57,6 +79,8 @@ pub fn draw(renderer: *SimRenderer, t: f64, uptime_s: u64) void {
     renderer.renderAptUpdates(@intFromFloat(7.0 * wave(t, 131.0)));
     renderer.renderInternetStatus(wave(t, 149.0) > 0.05);
     renderer.setFaultWarning(faultActive(t));
+
+    if (noticeAt(t)) |text| renderer.showNotice(text) else renderer.clearNotice();
 }
 
 /// Expand the renderer's packed 1-bit frame into 8-bit greyscale, magnified by
@@ -146,6 +170,23 @@ test "the fault overlay is part of the frame it hands over" {
     // Only the status bar moves: rows above it are untouched.
     const bar_start = 113 * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
+}
+
+test "every notice sample comes round, and the dashboard in between" {
+    const testing = std.testing;
+    var seen: [notice_samples.len]bool = @splat(false);
+    var quiet = false;
+    for (0..60 * notice_samples.len) |t| {
+        const text = noticeAt(@floatFromInt(t)) orelse {
+            quiet = true;
+            continue;
+        };
+        for (notice_samples, 0..) |sample, i| {
+            if (sample.ptr == text.ptr) seen[i] = true;
+        }
+    }
+    try testing.expect(quiet);
+    for (seen) |s| try testing.expect(s);
 }
 
 test "expand magnifies without smearing neighbouring pixels" {
