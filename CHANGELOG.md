@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the service unit gains `RuntimeDirectory=sys-ink` for it.
 - **`notify.sysink_panel` in Home Assistant.** Discovery adds a notify entity
   that sends to the notice topic, so automations can use `notify.send_message`.
+- **A Hermes Agent skill**, in `examples/hermes/sysink-panel`, with a helper
+  script that sends a notice through the pipe or over MQTT.
 
 ### Changed
 - The fan section carries its "rpm" unit in the header, the way the traffic

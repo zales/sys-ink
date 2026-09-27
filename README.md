@@ -471,6 +471,41 @@ assigned to an area gets that prefix, e.g. `notify.office_sysink_panel`; the
 actual ID is under Settings → Devices & Services → MQTT → SysInk. Turning
 notices off with `NOTIFY_ENABLED=false` removes the entity again.
 
+#### From an AI agent
+
+[`examples/hermes/sysink-panel`](examples/hermes/sysink-panel) is a skill for
+[Hermes Agent](https://hermes-agent.nousresearch.com/): when to use the panel
+and when not (it is readable by anyone in the room), how short to keep the
+text, and a helper script that writes to the pipe or falls back to MQTT.
+Install it with:
+
+```bash
+cp -r examples/hermes/sysink-panel ~/.hermes/skills/
+```
+
+An agent whose commands run in a sandbox container cannot see the pipe, so
+the helper falls back to MQTT: with a standard-library Python publisher, which
+keeps the password out of the process list, or `mosquitto_pub` where there is
+no Python, reaching the host's broker
+through the container's gateway. Give it credentials in `sysink.env` next to
+`SKILL.md`, readable only by you:
+
+```bash
+cat > ~/.hermes/skills/sysink-panel/sysink.env <<'ENV'
+SYSINK_MQTT_USER=hermes
+SYSINK_MQTT_PASSWORD=...
+ENV
+chmod 600 ~/.hermes/skills/sysink-panel/sysink.env
+```
+
+`SYSINK_MQTT_HOST`, `SYSINK_MQTT_PORT` and `SYSINK_MQTT_TOPIC` go there too if
+the defaults do not fit. A broker user of its own for the agent is better than
+sharing Home Assistant's, and a broker ACL can limit it to the notice topic.
+
+The skill follows the [agentskills.io](https://agentskills.io) format, so other
+agents that read `SKILL.md` skills can use it too; the helper,
+`scripts/notify.sh`, works on its own as well.
+
 ### Logging and export
 
 | Variable | Default | Description |

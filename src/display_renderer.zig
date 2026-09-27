@@ -1285,6 +1285,24 @@ test "a short notice gets the largest font, a longer one steps down" {
     }
 }
 
+test "the lengths the Hermes skill promises hold" {
+    // examples/hermes/sysink-panel/SKILL.md tells an agent what fits; keep it true.
+    var h = try Harness.init();
+    h.wire();
+    defer h.deinit();
+
+    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var last_buf: [notice_text.max_len + 3]u8 = undefined;
+
+    // About 30 characters: the largest font.
+    try testing.expectEqual(FontType.Ubuntu34, h.renderer.layoutNotice("Backup finished, disk is fine.", &lines, &last_buf).font);
+
+    // About 250: all of it, in the smallest.
+    const long = "Nightly backup of the NAS finished with warnings. " ** 6;
+    const layout = h.renderer.layoutNotice(long[0..250], &lines, &last_buf);
+    try testing.expect(!std.mem.endsWith(u8, lines[layout.count - 1], "..."));
+}
+
 test "a notice too long for the smallest font ends in an ellipsis within the body" {
     var h = try Harness.init();
     h.wire();
