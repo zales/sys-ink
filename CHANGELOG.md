@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Home Assistant availability.** The daemon publishes a retained `online` to
+  `<prefix>/status` when it connects and `offline` before a clean shutdown, and
+  registers `offline` as its MQTT Last Will for everything else — a crash, a
+  `kill -9`, an OOM kill. Every entity's discovery config names that topic, so
+  the device greys out at once instead of after `expire_after`.
+
 ### Changed
 - The fan section carries its "rpm" unit in the header, the way the traffic
   sections carry theirs.

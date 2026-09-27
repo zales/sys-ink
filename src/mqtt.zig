@@ -53,6 +53,22 @@ pub const sensors = [_]Sensor{
 
 const measurement = "measurement";
 
+/// Topic, under the topic prefix, that says whether the daemon is running.
+///
+/// The broker sets it to `offline` itself when the connection drops without a
+/// DISCONNECT — a crash, SIGKILL, an OOM kill — and the daemon does so before a
+/// clean one, so Home Assistant greys the device out at once instead of after
+/// `expire_after`. A Pi that loses power closes nothing, and with keepalive off
+/// the broker never notices; `expire_after` still covers that case.
+const availability_suffix = "status";
+/// Home Assistant's default availability payloads, so discovery need not name them.
+const payload_online = "online";
+const payload_offline = "offline";
+
+fn availabilityTopic(buf: []u8, topic_prefix: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ topic_prefix, availability_suffix });
+}
+
 /// Node id, unique_id stem and device identifier for the default client id —
 /// and what every release before this one used unconditionally. Deriving the
 /// others from the client id while keeping this one for the default leaves an
@@ -199,6 +215,10 @@ pub const MqttClient = struct {
         self.consecutive_failures = 0;
         log.info("Connected to MQTT broker", .{});
 
+        // Retained, and ahead of discovery, so Home Assistant finds it the moment
+        // it subscribes. Also overwrites the `offline` a previous run left behind.
+        try self.publish(availability_suffix, payload_online, true);
+
         if (self.discovery_enabled) self.publishDiscovery();
     }
 
@@ -237,6 +257,10 @@ pub const MqttClient = struct {
             self.closeStream();
             return;
         }
+
+        // A clean DISCONNECT makes the broker discard the will, so the daemon
+        // has to say it is going away itself.
+        self.publish(availability_suffix, payload_offline, true) catch {};
 
         // Best-effort; the broker reaps us on socket close anyway.
         const disconnect_packet = [_]u8{ 0xE0, 0x00 }; // DISCONNECT, 0 remaining length
@@ -318,8 +342,14 @@ pub const MqttClient = struct {
     }
 
     fn sendConnect(self: *Self) !void {
+        var will_topic_buf: [256]u8 = undefined;
+        const will: Will = .{
+            .topic = availabilityTopic(&will_topic_buf, self.topic_prefix) catch return error.TopicTooLong,
+            .payload = payload_offline,
+        };
+
         var packet_buf: [max_packet_len]u8 = undefined;
-        const packet = try buildConnect(&packet_buf, self.client_id, self.username, self.password);
+        const packet = try buildConnect(&packet_buf, self.client_id, will, self.username, self.password);
 
         try self.sendPacket(packet);
     }
@@ -414,6 +444,10 @@ fn discoveryPayload(buf: []u8, sensor: Sensor, opts: DiscoveryOptions) ![]const 
     try std.json.Stringify.encodeJsonString(state_topic, .{}, w);
     try w.print(",\"unique_id\":\"{s}_{s}\"", .{ opts.node_id, sensor.id });
 
+    var availability_buf: [320]u8 = undefined;
+    try w.writeAll(",\"availability_topic\":");
+    try std.json.Stringify.encodeJsonString(try availabilityTopic(&availability_buf, opts.topic_prefix), .{}, w);
+
     if (sensor.unit) |unit| try w.print(",\"unit_of_measurement\":\"{s}\"", .{unit});
     if (sensor.device_class) |dc| try w.print(",\"device_class\":\"{s}\"", .{dc});
     if (sensor.state_class) |sc| try w.print(",\"state_class\":\"{s}\"", .{sc});
@@ -489,8 +523,16 @@ fn buildPublish(buf: []u8, topic: []const u8, payload: []const u8, retain: bool)
     return buf[0..pos];
 }
 
+/// Last Will: what the broker publishes for us if the connection is lost.
+const Will = struct {
+    topic: []const u8,
+    payload: []const u8,
+    /// Retained, so a Home Assistant that restarts later still sees it.
+    retain: bool = true,
+};
+
 /// Build a CONNECT packet into `buf`.
-fn buildConnect(buf: []u8, client_id: []const u8, username: ?[]const u8, password: ?[]const u8) ![]const u8 {
+fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]const u8, password: ?[]const u8) ![]const u8 {
     const protocol_name = "MQTT";
     const protocol_level: u8 = 4; // MQTT 3.1.1
 
@@ -501,10 +543,15 @@ fn buildConnect(buf: []u8, client_id: []const u8, username: ?[]const u8, passwor
     const keepalive: u16 = 0;
 
     var connect_flags: u8 = 0x02; // Clean session
+    if (will) |wl| {
+        connect_flags |= 0x04; // Will flag, QoS 0
+        if (wl.retain) connect_flags |= 0x20;
+    }
     if (username != null) connect_flags |= 0x80;
     if (password != null) connect_flags |= 0x40;
 
     var remaining_len: usize = 2 + protocol_name.len + 1 + 1 + 2 + 2 + client_id.len;
+    if (will) |wl| remaining_len += 2 + wl.topic.len + 2 + wl.payload.len;
     if (username) |u| remaining_len += 2 + u.len;
     if (password) |p| remaining_len += 2 + p.len;
 
@@ -526,6 +573,11 @@ fn buildConnect(buf: []u8, client_id: []const u8, username: ?[]const u8, passwor
 
     // Payload
     pos += writeString(buf[pos..], client_id);
+    // MQTT-3.1.3-1: will topic and message come between client id and username.
+    if (will) |wl| {
+        pos += writeString(buf[pos..], wl.topic);
+        pos += writeString(buf[pos..], wl.payload);
+    }
     if (username) |u| pos += writeString(buf[pos..], u);
     if (password) |p| pos += writeString(buf[pos..], p);
 
@@ -646,7 +698,7 @@ test "buildPublish refuses to overflow the buffer" {
 
 test "buildConnect emits protocol name, level and clean session" {
     var buf: [128]u8 = undefined;
-    const packet = try buildConnect(&buf, "sysink", null, null);
+    const packet = try buildConnect(&buf, "sysink", null, null, null);
 
     try testing.expectEqual(@as(u8, 0x10), packet[0]); // CONNECT
     try testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, packet[2..4], .big));
@@ -660,7 +712,7 @@ test "buildConnect emits protocol name, level and clean session" {
 
 test "buildConnect sets the credential flags and payload" {
     var buf: [128]u8 = undefined;
-    const packet = try buildConnect(&buf, "id", "user", "pass");
+    const packet = try buildConnect(&buf, "id", null, "user", "pass");
 
     try testing.expectEqual(@as(u8, 0xC2), packet[9]); // username|password|clean
 
@@ -671,10 +723,27 @@ test "buildConnect sets the credential flags and payload" {
     try testing.expectEqual(@as(usize, 28), packet.len);
 }
 
+test "buildConnect places the will between client id and credentials" {
+    var buf: [128]u8 = undefined;
+    const packet = try buildConnect(&buf, "id", .{ .topic = "p/status", .payload = "offline" }, "user", "pass");
+
+    try testing.expectEqual(@as(u8, 0xE6), packet[9]); // username|password|will retain|will|clean
+
+    try testing.expectEqualStrings("id", packet[14..16]);
+    try testing.expectEqual(@as(u16, 8), std.mem.readInt(u16, packet[16..18], .big));
+    try testing.expectEqualStrings("p/status", packet[18..26]);
+    try testing.expectEqual(@as(u16, 7), std.mem.readInt(u16, packet[26..28], .big));
+    try testing.expectEqualStrings("offline", packet[28..35]);
+    try testing.expectEqualStrings("user", packet[37..41]);
+    try testing.expectEqualStrings("pass", packet[43..47]);
+    try testing.expectEqual(@as(usize, 47), packet.len);
+    try testing.expectEqual(@as(u8, 45), packet[1]); // remaining length
+}
+
 test "buildConnect rejects an oversized client id" {
     var buf: [32]u8 = undefined;
     const long_id = "x" ** 64;
-    try testing.expectError(error.PacketTooLarge, buildConnect(&buf, long_id, null, null));
+    try testing.expectError(error.PacketTooLarge, buildConnect(&buf, long_id, null, null, null));
 }
 
 test "interpretConnack accepts success and maps refusals" {
@@ -779,6 +848,7 @@ test "every discovery payload is valid JSON carrying expiry and state class" {
         const obj = parsed.value.object;
 
         try testing.expectEqual(@as(i64, 90), obj.get("expire_after").?.integer);
+        try testing.expectEqualStrings("odd\"prefix\\/status", obj.get("availability_topic").?.string);
         var expected_buf: [64]u8 = undefined;
         try testing.expectEqualStrings(
             try std.fmt.bufPrint(&expected_buf, "odd\"prefix\\/{s}", .{sensor.id}),
@@ -789,6 +859,25 @@ test "every discovery payload is valid JSON carrying expiry and state class" {
         } else {
             try testing.expect(obj.get("state_class") == null);
         }
+    }
+}
+
+test "discovery fits the packet with a long topic prefix" {
+    var buf: [max_node_id_len]u8 = undefined;
+    const node_id = nodeId(&buf, "x" ** 100);
+    const prefix = "p" ** 100;
+
+    for (sensors) |sensor| {
+        var topic_buf: [160]u8 = undefined;
+        const topic = try discoveryTopic(&topic_buf, sensor, node_id);
+        var payload_buf: [discovery_payload_max]u8 = undefined;
+        const payload = try discoveryPayload(&payload_buf, sensor, .{
+            .node_id = node_id,
+            .topic_prefix = prefix,
+            .expire_after = 90,
+        });
+        var packet_buf: [MqttClient.max_packet_len]u8 = undefined;
+        _ = try buildPublish(&packet_buf, topic, payload, true);
     }
 }
 
@@ -814,6 +903,8 @@ test "the topic prefix follows the client id unless set" {
 
 test "sensor ids are unique" {
     for (sensors, 0..) |a, i| {
+        // A sensor there would share its state topic with the availability one.
+        try testing.expect(!std.mem.eql(u8, a.id, availability_suffix));
         for (sensors[i + 1 ..]) |b| {
             try testing.expect(!std.mem.eql(u8, a.id, b.id));
         }

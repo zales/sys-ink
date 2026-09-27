@@ -435,6 +435,12 @@ problem entities (`Under-voltage`, `NVMe SMART Fault`) that Home Assistant can
 turn into notifications. SMART reading needs the daemon to run as root, which
 the packaged service does; unprivileged runs disable it silently.
 
+The device goes **unavailable** in Home Assistant as soon as the daemon stops:
+it publishes `offline` to `<MQTT_TOPIC_PREFIX>/status` on a clean shutdown, and
+the broker publishes the same as its Last Will after a crash or `kill -9`. A Pi
+that loses power sends nothing, so there the entities time out after three
+`INTERVAL_FAST` periods instead.
+
 A ready-made dashboard showing all of it is provided in
 [`examples/home-assistant/dashboard.yaml`](examples/home-assistant/dashboard.yaml)
 — paste it into a new dashboard's raw configuration editor. The file explains
