@@ -1,0 +1,33 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: SysInk
+Label: SysInk Repo
+Suite: stable
+Codename: stable
+Architectures: arm64 armhf
+Components: main
+Description: SysInk Debian Repository
+Date: Sat, 03 Oct 2026 22:52:47 +0000
+MD5Sum:
+ 396d8f3da893d5dbe746ef24dfb2656b 1310 Packages
+ 9b57bff917ea2932d1beb217cbbcb4a9 600 Packages.gz
+SHA256:
+ bf81740cd792c7a27beb06751d831ba85a239574a05ee23f92fda0d357977e86 1310 Packages
+ 5e7c45cc85a138cfec9656b7af0add230401928ad5e66becfcf3fe308ea170df 600 Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEyDSEESE/eU4nc4EEgqmq/5GJWJEFAmrBh0AACgkQgqmq/5GJ
+WJER8A/+JguvFJnq84LQI5uI2aJh1TWtxQvtU5k6v6NCE/95IW/sSODkUZdiChuF
+wq4IXWEzV19th1+QCWl814atey/0FRAiCgApr53D0oDO0Q1XL9sWmAB3OiUP/sGu
+bG/acNnb6xAlE0tCQd3RIqa82qEwAtthkq90WT9FyyWjW3iAngV3wfMLYJfGBu79
+EtPZ6lHIpqrOf9ICw256WqBk1pyRNB0cZf5ayVpBejZxYBeJbavROJyaopX09SIF
+d/eSTPVMvCLymvdigocE6y+GZLiHC0nnYsnIZCZ/gOTXPO4zgMqCWl2CJ9Mo1xYv
+H/EQj66gRUZk9JedRFYZOhMvPPFz15UIcTD+qcE5ZkvFBoAXho/NVaUDeYTlgvvD
+Rdw0YWDhS77VzEepUOXBm5cmfSTZjOPGsZEc97cSwsnEV8p5Z8yRfKuoD4RAgEmz
+TF2ZLMWj+jg7VMERHOo0R7CAVCzAk+GpBMJXL3VEafqHnD/xYDKwKEuOS3fjJT2f
+7mOmifuXjETEaquEL+aZdkUG1JRptWua8qk2K4ejKEKfnRRBP4B4IBxfo3q3w6SC
+udu8R3RkMT2CThi3Q4zGtgilKaD2LS3HjDzjdhUnxHJawYzvwlgddAN1QiAHZ3rj
+2fWz1ujyylKIghFBp1awP5/B+XlCeR6VGmmi1f2XJpVsfddN+dc=
+=00Tm
+-----END PGP SIGNATURE-----
