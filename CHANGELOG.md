@@ -22,6 +22,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-04
+
+### Added
+- **HTTP API.** With `WEB_PREVIEW` on, the preview's server also answers
+  `GET /api/status` with the latest readings as JSON, and `POST /api/notice`
+  and `DELETE /api/notice` to put a notice on the panel or take it down. The
+  notice body is the same plain text or JSON the pipe and MQTT take. Writing
+  needs `Authorization: Bearer <WEB_API_TOKEN>`; without a token configured, or
+  with `NOTIFY_ENABLED=false`, the notice routes answer 403. A notice goes up
+  at once, not at the next tick. The token is withheld from the commands the
+  daemon runs, like the MQTT password.
+  The API is described in `docs/openapi.yaml` (OpenAPI 3.1).
+- The packaged `/etc/default/sys-ink` lists `WEB_PREVIEW`, `WEB_PREVIEW_ADDR`,
+  `WEB_PREVIEW_PORT` and `WEB_API_TOKEN`, commented out like the rest.
+
+### Changed
+- The preview reads the whole request rather than its first line. Another
+  method on `/` or `/frame.bmp` is answered `405` instead of `404`, a malformed
+  request `400`, and headers over 4 KB `413`.
+- The viewer page fetches `frame.bmp` by a relative URL, so the preview also
+  works behind a reverse proxy under a path prefix. The README shows how, with
+  an example that says who may read the preview and rate-limits the notice
+  route rather than leaving both to whoever reaches the proxy.
+- **Releases are built `ReleaseSafe` instead of `ReleaseSmall`.** The daemon
+  runs as root and reads from the network, and `ReleaseSmall` drops the bounds
+  and overflow checks: a parsing bug was memory corruption, where it is now a
+  logged exit and a restart by systemd. The binary grows from 470 KB to 671 KB
+  on `aarch64-linux-musl`. CI runs the unit tests in that mode as well.
+- The notice pipe and the HTTP server are tested against a real pipe and a
+  real loopback socket, on Linux. Until now only their I/O-free halves were.
+
+### Fixed
+- **A PUBLISH claiming a topic 65534 or 65535 bytes long overflowed the bounds
+  check meant to reject it.** The length was added to in the 16 bits it was
+  read as. In the shipped `ReleaseSmall` binary the sum wrapped and the check
+  passed, harmlessly as it happened; in a safe build it is a panic, which a
+  broker, or anyone between it and the daemon, could have set off at will.
+- **A sender that never stopped writing to the notice pipe held the main loop
+  for as long as it wrote.** `yes > /run/sys-ink/notify` froze the panel and
+  kept the daemon from noticing a shutdown signal, so systemd killed it without
+  the sleep screen. One look at the pipe now reads at most a pipeful, 64 KB,
+  and leaves the rest for the next time round.
+- `WEB_PREVIEW_PORT=0` no longer hangs shutdown. The preview stops its accept
+  loop by connecting to itself, and did so on the port it was given rather
+  than the one it got; the log line names the real one too.
+
 ## [1.9.0] — 2026-09-27
 
 ### Added
@@ -353,6 +399,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.10.0]: https://github.com/zales/sys-ink/releases/tag/v1.10.0
 [1.9.0]: https://github.com/zales/sys-ink/releases/tag/v1.9.0
 [1.8.0]: https://github.com/zales/sys-ink/releases/tag/v1.8.0
 [1.7.0]: https://github.com/zales/sys-ink/releases/tag/v1.7.0

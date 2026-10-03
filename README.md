@@ -12,7 +12,10 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 - **Optimized Rendering**: Partial updates for e-Paper display to minimize flickering and maximize refresh rate.
 - **Home Assistant**: Optional MQTT publishing with auto-discovery.
 - **Notices**: Any program can put a short message on the panel for a while,
-  through a named pipe locally or an MQTT topic from anywhere on the network.
+  through a named pipe locally, or an MQTT topic or the HTTP API from anywhere
+  on the network.
+- **HTTP API**: Current readings as JSON, and notices with a bearer token,
+  served beside the optional panel preview.
 - **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
 
 ## Screenshots
@@ -54,14 +57,19 @@ You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_6
 
 ### Tests
 
-Parsing, layout, rendering, the panel driver and the MQTT protocol are covered
-by unit tests that run on any host — the driver and renderer are generic over
+Parsing, layout, rendering, the panel driver, the MQTT protocol and the HTTP
+API's request reading, routing and token check are covered by unit tests that run on any host — the driver and renderer are generic over
 their transport, so their command sequences are checked against a recorder
 rather than a panel:
 
 ```bash
 zig build test --summary all
 ```
+
+On Linux the same command also runs the daemon's HTTP server on a loopback
+port and talks to it as a client would, and reads notices through a real named
+pipe. Neither needs a panel, but both make Linux system calls, so other hosts
+leave them out.
 
 The remaining hardware-facing modules only compile for Linux, so they are
 type-checked separately:
@@ -132,14 +140,18 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/mqtt.zig`: MQTT 3.1.1 client and Home Assistant discovery.
 - `src/notice.zig`, `src/notice_fifo.zig`: notices — reading the payload,
   folding its text to what the fonts can draw, and receiving it through the
-  named pipe. MQTT notices arrive through `src/mqtt.zig`.
+  named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
+  `src/web_preview.zig`.
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging.
 - `src/waveshare_epd/`: Low-level driver for the e-Paper display, generic over its
   transport; `fake_transport.zig` is the recorder the tests drive it with.
 - `src/syscall.zig`: Interpreting raw Linux syscall returns (see the module comment).
 - `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
-- `src/web_preview.zig`: optional HTTP view of the current frame, off by default.
+- `src/web_preview.zig`: optional HTTP view of the current frame and the API,
+  off by default.
+- `src/api.zig`, `src/http_request.zig`: the API's routes, token check and
+  status JSON, and reading a request — both free of I/O and unit tested.
 - `src/frame_server.zig`, `src/viewer_page.html`: the HTTP serving and the
   viewer page, shared by the preview and the simulator.
 - `src/sim_frame.zig`: what the simulators draw; the front ends are
@@ -153,20 +165,26 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 
 ### Building for Raspberry Pi (AArch64)
 
-To build a minimal, statically linked binary for Raspberry Pi:
+To build a statically linked binary for Raspberry Pi:
 
 ```bash
-zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall
+zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
 ```
 
 The resulting binary will be located at `zig-out/bin/sys-ink`.
+
+`ReleaseSafe` is what the releases are built with: it keeps the bounds and
+overflow checks in, so a bug in reading something off the network ends the
+daemon — which systemd restarts — instead of corrupting the memory of a
+process that runs as root. `ReleaseSmall` builds too and is about 200 KB
+smaller, without them.
 
 For 32-bit Raspberry Pi OS, name the CPU as well. Zig's default for this
 target is ARMv7, which the Pi Zero, Zero W and Pi 1 cannot run; the ARM1176
 build below runs on every 32-bit Pi:
 
 ```bash
-zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=ReleaseSmall
+zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=ReleaseSafe
 ```
 
 ## Installation
@@ -343,7 +361,7 @@ way to see it on a machine you are not standing next to.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WEB_PREVIEW` | `false` | Serve the current frame over HTTP |
+| `WEB_PREVIEW` | `false` | Serve the current frame over HTTP, and the [HTTP API](#http-api) beside it |
 | `WEB_PREVIEW_ADDR` | `127.0.0.1` | Address to bind |
 | `WEB_PREVIEW_PORT` | `8390` | Port to bind |
 
@@ -373,6 +391,112 @@ for up to its deadline. Nothing recovers from that but waiting, so treat the
 preview as a diagnostic aid on a network you trust rather than a service to
 expose.
 
+### HTTP API
+
+The preview's server also answers a small API, so it is on whenever
+`WEB_PREVIEW` is. [`docs/openapi.yaml`](docs/openapi.yaml) describes it in
+full as an OpenAPI 3.1 document.
+
+| Method | Path | What it does |
+|--------|------|--------------|
+| `GET` | `/api/status` | The latest readings as JSON |
+| `POST` | `/api/notice` | Put a notice on the panel; needs the token |
+| `DELETE` | `/api/notice` | Take the notice on show down early; needs the token |
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEB_API_TOKEN` | unset | Bearer token for the notice routes. Unset leaves them shut |
+
+```bash
+curl -s http://127.0.0.1:8390/api/status
+```
+
+```json
+{"cpu_load":12,"cpu_temp":48,"memory":31,"disk_usage":67,"disk_temp":null,
+ "fan_speed":2100,"uptime_minutes":4445,"ip_address":"192.168.1.20","wired":true,
+ "signal_strength":null,"internet":true,"download_bytes_per_second":1250000,
+ "upload_bytes_per_second":0,"apt_updates":3,"undervoltage":false,
+ "nvme_fault":null,"ssd_wear":2}
+```
+
+The readings are the ones the panel was last drawn from, taken every
+`INTERVAL_FAST` seconds; asking more often returns the same numbers. Units are
+percent, °C, RPM, dBm and bytes per second. `null` means not known — no such
+sensor on this hardware, or no reading yet — never zero standing in for one.
+CPU load and temperature, memory and disk usage are the exception: every
+machine has them, so they are always numbers, and a read that fails keeps the
+previous value. Names follow the MQTT topics where there is one, except
+traffic: MQTT publishes `traffic_down` and `traffic_up` in kB/s, the API
+`download_bytes_per_second` and `upload_bytes_per_second` in bytes per second.
+
+A notice takes the same body as the pipe and MQTT, plain text or JSON (see
+[Notices](#notices)):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -d 'Backup finished' http://127.0.0.1:8390/api/notice
+curl -H "Authorization: Bearer $TOKEN" -d '{"text": "Deploy running", "duration": 300}' http://127.0.0.1:8390/api/notice
+curl -H "Authorization: Bearer $TOKEN" -X DELETE http://127.0.0.1:8390/api/notice
+```
+
+| Answer | When |
+|--------|------|
+| `202` | Accepted; it is on the panel within a moment |
+| `400` | Nothing visible in the text, or a malformed request |
+| `401` | Token missing or wrong |
+| `403` | No `WEB_API_TOKEN` configured, or `NOTIFY_ENABLED=false` |
+| `411` | A chunked body; send `Content-Length`, as `curl -d` does |
+| `413` | Body over 4 KB |
+
+- **Reading is as open as the preview.** `/api/status` shows nothing the frame
+  does not, so it needs no token, and the loopback default applies to it too.
+- **Writing is shut until you choose a token.** Listening on a port is not a
+  decision to let whoever reaches it write on the panel. Pick a long random
+  one, e.g. `openssl rand -hex 32`, and keep it where only root can read it.
+  The `.deb` ships `/etc/default/sys-ink` as mode 0640, so it can go there;
+  on a manual install, or if you have loosened that file, use a root-only
+  environment file as for the
+  [MQTT password](#mqtt--home-assistant-integration). The daemon withholds it
+  from the commands it runs, as it does the MQTT password.
+- **The token travels in clear.** There is no TLS. On loopback or through the
+  SSH tunnel that does not matter; with `WEB_PREVIEW_ADDR=0.0.0.0` anyone who
+  can watch the network can read it, so only open the API up on a network you
+  trust, or put a TLS-terminating proxy in front.
+- **A notice sent over HTTP is not queued.** Like the other sources, a newer
+  one replaces the one waiting or on show.
+
+#### Behind a reverse proxy
+
+To reach the preview and the API from elsewhere with TLS, leave the daemon on
+loopback and put a proxy on the same host in front of it. The viewer page
+fetches `frame.bmp` by a relative URL, so it works under a path prefix as well
+as at the root. The proxy has to pass `Authorization` through, which nginx and
+Caddy do by default. With nginx:
+
+```nginx
+# In the http block: a notice a second from any one address.
+limit_req_zone $binary_remote_addr zone=sysink_notice:1m rate=1r/s;
+
+# The preview and /api/status take no token, so say here who may see them.
+location /sysink/ {
+    allow 192.168.0.0/16;
+    deny all;
+    proxy_pass http://127.0.0.1:8390/;
+}
+
+# Notices carry a token of their own, so this may reach further than the rest.
+location = /sysink/api/notice {
+    limit_req zone=sysink_notice burst=5 nodelay;
+    proxy_pass http://127.0.0.1:8390/api/notice;
+}
+```
+
+The preview and `/api/status` need no token. Without the `allow` and `deny`
+they are as open as the proxy is, and tell whoever asks the machine's address
+on its own network, how long it has been up and how many updates it is behind;
+leave them out only if that is what you mean. The limit on the notice route is
+what stops a token being guessed at speed, since the daemon keeps no count of
+failed attempts.
+
 ### Notices
 
 Other programs can show a message on the panel. It replaces the dashboard for
@@ -392,8 +516,15 @@ From anywhere that reaches the broker, with MQTT enabled, publish to
 mosquitto_pub -h broker -t sysink/notify -m "Backup finished"
 ```
 
-Both take the same payload: plain text, or JSON when a notice should stay up
-longer or shorter than the default:
+With `WEB_PREVIEW` on and a `WEB_API_TOKEN` set, `POST` it to the
+[HTTP API](#http-api):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -d "Backup finished" http://127.0.0.1:8390/api/notice
+```
+
+All three take the same payload: plain text, or JSON when a notice should stay
+up longer or shorter than the default:
 
 ```bash
 mosquitto_pub -t sysink/notify -m '{"text": "Deploy running", "duration": 300}'
@@ -407,7 +538,7 @@ characters, is ignored rather than shown as a blank panel.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NOTIFY_ENABLED` | `true` | Accept notices: create the pipe, and subscribe to the MQTT topic when MQTT is enabled |
+| `NOTIFY_ENABLED` | `true` | Accept notices: create the pipe, subscribe to the MQTT topic when MQTT is enabled, and open the API's notice routes when it has a token |
 | `NOTIFY_FIFO` | `/run/sys-ink/notify` | Path of the pipe. Its directory is created if missing; nothing above it is |
 | `NOTIFY_GROUP` | unset | Group allowed to write besides root. Unset leaves the pipe root-only |
 | `NOTIFY_DURATION` | `30` | Seconds a notice stays up |

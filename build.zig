@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
     } else {
         const explain = b.addFail(
             "sys-ink targets Linux; this host cannot build the daemon.\n" ++
-                "       Cross-compile it:  zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall\n" ++
+                "       Cross-compile it:  zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe\n" ++
                 "       Or run locally:    zig build sim | zig build test | zig build check",
         );
         b.getInstallStep().dependOn(&explain.step);

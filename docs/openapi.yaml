@@ -1,0 +1,397 @@
+openapi: 3.1.0
+
+info:
+  title: SysInk HTTP API
+  version: 1.10.0
+  summary: Readings from a SysInk panel, and notices onto it.
+  description: |
+    Served by the daemon beside the panel preview when `WEB_PREVIEW=true`.
+    It binds `WEB_PREVIEW_ADDR:WEB_PREVIEW_PORT`, loopback port 8390 by default;
+    see "Behind a reverse proxy" in the README for reaching it from elsewhere
+    with TLS.
+
+    **Reading** needs nothing: `/api/status` and the preview show what the
+    panel already shows to anyone in the room.
+
+    **Writing** a notice needs `Authorization: Bearer <WEB_API_TOKEN>`. With no
+    token configured, or with `NOTIFY_ENABLED=false`, the notice routes
+    answer 403.
+
+    One request per connection (`Connection: close`), no keep-alive, and a
+    two-second deadline to send the whole request. Every response carries
+    `Cache-Control: no-store`.
+  license:
+    name: MIT
+    url: https://github.com/zales/sys-ink/blob/master/LICENSE
+
+servers:
+  - url: http://{address}:{port}
+    description: The daemon itself
+    variables:
+      address:
+        default: 127.0.0.1
+        description: WEB_PREVIEW_ADDR
+      port:
+        default: "8390"
+        description: WEB_PREVIEW_PORT
+
+tags:
+  - name: API
+  - name: Preview
+    description: The live view of the panel, for a browser.
+
+paths:
+  /api/status:
+    get:
+      tags: [API]
+      operationId: getStatus
+      summary: Latest readings
+      description: |
+        The readings the panel was last drawn from. They are taken every
+        `INTERVAL_FAST` seconds, so asking more often returns the same numbers.
+
+        `null` means not known — no such sensor on this hardware, or no
+        reading yet — never zero standing in for one. CPU load and
+        temperature, memory and disk usage are always numbers: every machine
+        has them, and a read that fails keeps the previous value.
+
+        Names follow the MQTT topics where there is one, except traffic: MQTT
+        publishes `traffic_down` and `traffic_up` in kB/s.
+      responses:
+        "200":
+          description: The latest readings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: The daemon has not drawn its first frame yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: no readings yet
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/notice:
+    post:
+      tags: [API]
+      operationId: postNotice
+      summary: Put a notice on the panel
+      description: |
+        The notice replaces the dashboard at once, for `duration` seconds or
+        `NOTIFY_DURATION` (30 by default), and a newer one replaces the one on
+        show. It takes the same payload as the notice pipe and the MQTT topic.
+
+        The body is read by what it contains, not by `Content-Type`: a body
+        that parses as a JSON object is a JSON notice, unless its `text` (or
+        `message`) is there but not a string. Anything else is shown as sent.
+        A JSON object without `text` takes the notice on show down, as `{}`
+        does.
+
+        The panel's fonts cover ASCII only: diacritics are dropped
+        ("Záloha" shows as "Zaloha"), typographic punctuation becomes its
+        ASCII lookalike, anything else shows as `?`. About 250 characters fit;
+        longer text is cut off with `...`.
+
+        The body must carry `Content-Length`; chunked bodies are refused.
+      security:
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              maxLength: 4096
+            example: Backup finished
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Notice"
+            examples:
+              withDuration:
+                summary: Stay up for five minutes
+                value:
+                  text: Deploy running
+                  duration: 300
+              dismiss:
+                summary: Take the notice on show down
+                value:
+                  text: ""
+      responses:
+        "202":
+          $ref: "#/components/responses/Accepted"
+        "400":
+          description: |
+            The text has nothing visible in it, which would do nothing, or the
+            request itself is malformed. The latter comes with an empty
+            `text/plain` body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: nothing to show
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NoticesOff"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "411":
+          description: A chunked body. Send `Content-Length` instead.
+        "413":
+          description: The body is over 4096 bytes, or the headers over 4096.
+
+    delete:
+      tags: [API]
+      operationId: deleteNotice
+      summary: Take the notice on show down
+      description: |
+        The same as posting `{"text": ""}`. Accepted whether or not a notice
+        is on show.
+      security:
+        - bearer: []
+      responses:
+        "202":
+          $ref: "#/components/responses/Accepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NoticesOff"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /:
+    get:
+      tags: [Preview]
+      operationId: getPreviewPage
+      summary: Live preview page
+      description: Shows the panel magnified, reloading `frame.bmp` once a second.
+      responses:
+        "200":
+          description: The viewer page.
+          content:
+            text/html:
+              schema:
+                type: string
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /frame.bmp:
+    get:
+      tags: [Preview]
+      operationId: getFrame
+      summary: The frame on the panel
+      description: |
+        The 1-bit frame the daemon last sent to the panel, as a BMP, 296×128.
+        It is the frame itself, not a re-render, so it agrees with the glass,
+        fault overlay and notices included.
+      responses:
+        "200":
+          description: The current frame.
+          content:
+            image/bmp:
+              schema:
+                type: string
+                contentMediaType: image/bmp
+        "503":
+          description: No frame drawn yet.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: no frame yet
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: The value of `WEB_API_TOKEN`.
+
+  responses:
+    Accepted:
+      description: Accepted; on the panel within a moment.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status:
+                const: accepted
+    Unauthorized:
+      description: The token is missing or wrong.
+      headers:
+        WWW-Authenticate:
+          schema:
+            const: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: unauthorized
+    NoticesOff:
+      description: No `WEB_API_TOKEN` is configured, or `NOTIFY_ENABLED=false`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: notices over HTTP are off; set WEB_API_TOKEN
+    MethodNotAllowed:
+      description: The path exists, but not with that method.
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: POST, DELETE
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: method not allowed
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Notice:
+      type: object
+      description: |
+        Other fields are ignored. A JSON body that does not fit this shape —
+        `text` not a string, say — is shown as sent, as plain text.
+      properties:
+        text:
+          type: string
+          description: |
+            What to show. Empty, or only whitespace and control characters,
+            takes the notice on show down; so does leaving it out.
+        message:
+          type: string
+          description: Accepted in place of `text`, which wins when both are there.
+        duration:
+          description: |
+            Seconds to stay up, rounded, at most 86400. May be a fraction or a
+            number in a string. Zero, negative, under one or unreadable means
+            `NOTIFY_DURATION`.
+          oneOf:
+            - type: number
+            - type: string
+          examples: [120]
+
+    Status:
+      type: object
+      additionalProperties: false
+      required:
+        - cpu_load
+        - cpu_temp
+        - memory
+        - disk_usage
+        - disk_temp
+        - fan_speed
+        - uptime_minutes
+        - ip_address
+        - wired
+        - signal_strength
+        - internet
+        - download_bytes_per_second
+        - upload_bytes_per_second
+        - apt_updates
+        - undervoltage
+        - nvme_fault
+        - ssd_wear
+      properties:
+        cpu_load:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Percent.
+        cpu_temp:
+          type: integer
+          minimum: 0
+          description: °C.
+        memory:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Percent in use.
+        disk_usage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Percent of the root filesystem in use.
+        disk_temp:
+          type: [integer, "null"]
+          minimum: 0
+          description: NVMe temperature, °C.
+        fan_speed:
+          type: [integer, "null"]
+          minimum: 0
+          description: RPM.
+        uptime_minutes:
+          type: [integer, "null"]
+          minimum: 0
+        ip_address:
+          type: [string, "null"]
+          description: The IPv4 address the panel shows.
+          examples: [192.168.1.20]
+        wired:
+          type: boolean
+          description: Whether that address is on a cable rather than Wi-Fi.
+        signal_strength:
+          type: [integer, "null"]
+          description: Wi-Fi signal, dBm. Read even on a cable when there is Wi-Fi.
+          examples: [-58]
+        internet:
+          type: [boolean, "null"]
+          description: Result of the last reachability probe; null before the first.
+        download_bytes_per_second:
+          type: integer
+          minimum: 0
+        upload_bytes_per_second:
+          type: integer
+          minimum: 0
+        apt_updates:
+          type: [integer, "null"]
+          minimum: 0
+          description: Upgradable packages; null until a check has finished.
+        undervoltage:
+          type: [boolean, "null"]
+          description: Firmware under-voltage flag; null on hardware without one.
+        nvme_fault:
+          type: [boolean, "null"]
+          description: NVMe SMART critical warning; null without an NVMe drive.
+        ssd_wear:
+          type: [integer, "null"]
+          minimum: 0
+          description: Percent of rated life used; may exceed 100.
+      example:
+        cpu_load: 12
+        cpu_temp: 48
+        memory: 31
+        disk_usage: 67
+        disk_temp: null
+        fan_speed: 2100
+        uptime_minutes: 4445
+        ip_address: 192.168.1.20
+        wired: true
+        signal_strength: null
+        internet: true
+        download_bytes_per_second: 1250000
+        upload_bytes_per_second: 0
+        apt_updates: 3
+        undervoltage: false
+        nvme_fault: null
+        ssd_wear: 2

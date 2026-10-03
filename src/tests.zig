@@ -5,9 +5,15 @@
 //! free of I/O and runs anywhere. Those are type-checked by `zig build check`
 //! instead.
 //!
+//! The notice pipe and the daemon's HTTP server are Linux-only as well, but
+//! need no hardware: their tests run against a real pipe and a real loopback
+//! socket, on Linux — which is where CI runs — and are left out elsewhere.
+//!
 //! The panel driver and the renderer are here despite talking to hardware: both
 //! are generic over the transport, so command sequences and the rendered frame
 //! are asserted against a recorder.
+
+const builtin = @import("builtin");
 
 test {
     _ = @import("parse.zig");
@@ -24,4 +30,11 @@ test {
     _ = @import("display_renderer.zig");
     _ = @import("sim_frame.zig");
     _ = @import("frame_server.zig");
+    _ = @import("http_request.zig");
+    _ = @import("api.zig");
+
+    if (builtin.os.tag == .linux) {
+        _ = @import("notice_fifo.zig");
+        _ = @import("web_preview.zig");
+    }
 }

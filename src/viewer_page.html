@@ -40,7 +40,8 @@
     function refresh() {
       const next = new Image();
       next.onload = () => { screen.src = next.src; };
-      next.src = "/frame.bmp?t=" + Date.now();
+      // Relative, so the page also works behind a proxy under a path prefix.
+      next.src = "frame.bmp?t=" + Date.now();
     }
     refresh();
     setInterval(refresh, 1000);

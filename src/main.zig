@@ -3,6 +3,7 @@ const config = @import("config.zig");
 const logger = @import("logger.zig");
 const syscall = @import("syscall.zig");
 const WebPreview = @import("web_preview.zig").WebPreview;
+const api = @import("api.zig");
 const network_ops = @import("network_ops.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
@@ -295,10 +296,40 @@ const App = struct {
         self.publishPreview();
     }
 
-    /// Hand the frame just drawn to the preview, if one is running.
+    /// Hand the frame just drawn to the preview, if one is running, and the
+    /// readings it was drawn from to the API.
     fn publishPreview(self: *App) void {
         const preview = self.preview orelse return;
         preview.publish(self.renderer.packedFrame());
+        preview.publishStatus(self.status());
+    }
+
+    /// The cached readings, as `/api/status` reports them. Takes no
+    /// measurement: the display tasks have just done that.
+    fn status(self: *App) api.Status {
+        const raw = self.traffic.getRawTraffic();
+        return .{
+            .cpu_load = self.sys.last_cpu_load,
+            .cpu_temp = self.sys.last_cpu_temp,
+            .memory = self.sys.last_memory,
+            .disk_usage = self.sys.last_disk_usage,
+            .disk_temp = self.sys.last_disk_temp,
+            .fan_speed = self.sys.last_fan_speed,
+            .uptime_minutes = if (self.sys.lastUptime()) |u|
+                @as(u64, u.days) * 1440 + @as(u64, u.hours) * 60 + u.minutes
+            else
+                null,
+            .ip_address = self.net.lastIpAddress(),
+            .wired = self.net.lastIpIsWired(),
+            .signal_strength = self.net.lastSignalStrength(),
+            .internet = self.net.lastInternet(),
+            .download_bytes_per_second = @intFromFloat(@max(0, @round(raw.rx_bytes_per_sec))),
+            .upload_bytes_per_second = @intFromFloat(@max(0, @round(raw.tx_bytes_per_sec))),
+            .apt_updates = self.sys.updatesCount(),
+            .undervoltage = self.last_undervoltage,
+            .nvme_fault = self.last_nvme_fault,
+            .ssd_wear = if (self.sys.last_nvme_health) |h| h.percentage_used else null,
+        };
     }
 
     // ------------------------------------------------------------------------
@@ -313,6 +344,12 @@ const App = struct {
     fn receiveMqttNotice(self: *App) void {
         const client = self.mqtt orelse return;
         if (client.receive()) |raw| self.applyNotice(raw);
+    }
+
+    fn receiveApiNotice(self: *App) void {
+        const preview = self.preview orelse return;
+        var buf: [api.max_notice_body]u8 = undefined;
+        if (preview.takeNotice(&buf)) |raw| self.applyNotice(raw);
     }
 
     /// Put a notice on the panel straight away, rather than at the next display
@@ -544,7 +581,11 @@ pub fn main(init: std.process.Init) !u8 {
     // pointer to it, so it must not move afterwards.
     var preview: ?WebPreview = null;
     if (config.Config.web_preview) {
-        preview = WebPreview.init(io, config.Config.web_preview_addr, config.Config.web_preview_port) catch |err| blk: {
+        const api_options: api.Options = .{
+            .token = config.Config.web_api_token,
+            .notices_enabled = config.Config.notify_enabled,
+        };
+        preview = WebPreview.init(io, config.Config.web_preview_addr, config.Config.web_preview_port, api_options) catch |err| blk: {
             log.err("Cannot start the panel preview: {t}", .{err});
             break :blk null;
         };
@@ -615,8 +656,9 @@ fn installSignalHandlers() void {
 /// Between ticks the loop blocks on the wake pipe for exactly as long as the
 /// next task is away, so an idle daemon wakes once per interval rather than
 /// once per second, while a signal still stops it immediately. It watches the
-/// notice pipe and the MQTT connection as well, so a notice goes up the moment
-/// it arrives, and wakes for the one on show to come down on time.
+/// notice pipe, the MQTT connection and the API's mailbox as well, so a notice
+/// goes up the moment it arrives, and wakes for the one on show to come down on
+/// time.
 fn runLoop(scheduler: *Scheduler, app: *App) void {
     const max_sleep_seconds = 3600;
     const have_pipe = wake_pipe[0] >= 0;
@@ -635,7 +677,7 @@ fn runLoop(scheduler: *Scheduler, app: *App) void {
         if (!have_pipe) seconds = @min(seconds, 1);
 
         // With nothing to watch, poll on zero descriptors degrades to a plain sleep.
-        var fds: [3]std.posix.pollfd = undefined;
+        var fds: [4]std.posix.pollfd = undefined;
         var watched: usize = 0;
         if (have_pipe) {
             fds[watched] = .{ .fd = wake_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
@@ -654,6 +696,13 @@ fn runLoop(scheduler: *Scheduler, app: *App) void {
             watched += 1;
         }
 
+        const api_slot = watched;
+        const api_fd = if (app.preview) |preview| preview.noticeFd() else null;
+        if (api_fd) |fd| {
+            fds[watched] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+            watched += 1;
+        }
+
         _ = std.posix.poll(fds[0..watched], @intCast(seconds * 1000)) catch {};
 
         const ready = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR;
@@ -663,6 +712,9 @@ fn runLoop(scheduler: *Scheduler, app: *App) void {
         // A hangup or error is read too, which is how a dropped broker is seen.
         if (mqtt_socket != null and fds[mqtt_slot].revents & ready != 0) {
             app.receiveMqttNotice();
+        }
+        if (api_fd != null and fds[api_slot].revents & std.posix.POLL.IN != 0) {
+            app.receiveApiNotice();
         }
     }
 }

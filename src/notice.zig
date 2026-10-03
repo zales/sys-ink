@@ -3,10 +3,10 @@
 //!
 //! This module is the I/O-free half: reading what arrived and turning it into
 //! text the panel can draw. Receiving it is `notice_fifo.zig` for the local
-//! pipe and `mqtt.zig` for the network.
+//! pipe, `mqtt.zig` for the broker and `web_preview.zig` for the HTTP API.
 //!
-//! Both carry the same thing: plain text, or a JSON object for when a notice
-//! needs more than that — see `parse`.
+//! All three carry the same thing: plain text, or a JSON object for when a
+//! notice needs more than that — see `parse`.
 
 const std = @import("std");
 const CodepointIterator = @import("graphics.zig").CodepointIterator;

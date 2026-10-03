@@ -16,7 +16,7 @@ pub fn parseBool(val: []const u8) bool {
 /// Variables withheld from child processes. The daemon has no use for passing
 /// them on, and `apt update` runs every configured hook with the environment it
 /// is given.
-const secret_variables = [_][]const u8{"MQTT_PASSWORD"};
+const secret_variables = [_][]const u8{ "MQTT_PASSWORD", "WEB_API_TOKEN" };
 
 /// The environment for commands whose output is parsed: the daemon's own, in
 /// the C locale, without the secrets.
@@ -130,6 +130,9 @@ pub const Config = struct {
     /// carries addresses and load figures. Widening this is a decision.
     pub var web_preview_addr: []const u8 = "127.0.0.1";
     pub var web_preview_port: u16 = 8390;
+    /// Bearer token for the API's notice routes. Unset: they stay shut. See
+    /// `api.zig`.
+    pub var web_api_token: ?[]const u8 = null;
 
     /// Accept notices through a named pipe. See `notice_fifo.zig`.
     pub var notify_enabled: bool = true;
@@ -185,6 +188,9 @@ pub const Config = struct {
         }
         if (env.get("WEB_PREVIEW_PORT")) |val| {
             web_preview_port = std.fmt.parseInt(u16, val, 10) catch web_preview_port;
+        }
+        if (env.get("WEB_API_TOKEN")) |val| {
+            if (val.len > 0) web_api_token = val;
         }
 
         if (env.get("NOTIFY_ENABLED")) |val| {
@@ -297,12 +303,13 @@ test "parseBool accepts the usual truthy spellings" {
     }
 }
 
-test "childEnvironment forces the C locale and drops the broker password" {
+test "childEnvironment forces the C locale and drops the secrets" {
     var parent: std.process.Environ.Map = .init(testing.allocator);
     defer parent.deinit();
     try parent.put("LANG", "cs_CZ.UTF-8");
     try parent.put("LC_ALL", "cs_CZ.UTF-8");
     try parent.put("MQTT_PASSWORD", "secret");
+    try parent.put("WEB_API_TOKEN", "token");
     try parent.put("http_proxy", "http://proxy:3128");
 
     var child = try childEnvironment(testing.allocator, &parent);
@@ -310,6 +317,7 @@ test "childEnvironment forces the C locale and drops the broker password" {
 
     try testing.expectEqualStrings("C", child.get("LC_ALL").?);
     try testing.expect(child.get("MQTT_PASSWORD") == null);
+    try testing.expect(child.get("WEB_API_TOKEN") == null);
     // Everything else passes through, proxies included.
     try testing.expectEqualStrings("http://proxy:3128", child.get("http_proxy").?);
     // And the daemon's own environment is left as it was.

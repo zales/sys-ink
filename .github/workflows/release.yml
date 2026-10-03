@@ -26,6 +26,9 @@ jobs:
       - name: Unit tests
         run: zig build test --summary all
 
+      - name: Unit tests, optimised as released
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
       - name: Type-check Linux-only modules
         run: zig build check
 
@@ -58,8 +61,12 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      # ReleaseSafe, not ReleaseSmall: the daemon runs as root and reads from
+      # the network, and ReleaseSmall drops the bounds and overflow checks that
+      # turn a parsing bug into a clean exit rather than memory corruption.
+      # About 200 KB of binary on arm64.
       - name: Build for ${{ matrix.target }}
-        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=ReleaseSmall
+        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=ReleaseSafe
 
       - name: Package Debian (.deb)
         env:
