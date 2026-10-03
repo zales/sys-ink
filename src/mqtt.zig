@@ -871,7 +871,11 @@ const Publish = struct {
 fn parsePublish(packet: Packet) !Publish {
     const body = packet.body;
     if (body.len < 2) return error.MalformedPacket;
-    const topic_len = std.mem.readInt(u16, body[0..2], .big);
+    // Widened before anything is added to it. Left as the u16 it is read as,
+    // `2 + topic_len` overflows for a claimed length of 65534 or more: a panic
+    // in a safe build, and in an unsafe one a bounds check that wraps round to
+    // pass.
+    const topic_len: usize = std.mem.readInt(u16, body[0..2], .big);
     if (body.len < 2 + topic_len) return error.MalformedPacket;
 
     const qos: u2 = @intCast((packet.header >> 1) & 0x03);
@@ -1413,6 +1417,17 @@ test "parsePublish reads QoS, retain and the packet id" {
     try testing.expectError(error.MalformedPacket, parsePublish(.{ .header = 0x30, .body = &.{ 0x00, 0x09, 't' } }));
 }
 
+test "parsePublish rejects a topic length the packet cannot hold" {
+    // The two largest used to overflow the u16 they were added to 2 in.
+    for ([_]u16{ 0xFFFF, 0xFFFE, 0x8000, 2 }) |claimed| {
+        var body = [_]u8{ 0, 0, 't' };
+        std.mem.writeInt(u16, body[0..2], claimed, .big);
+        try testing.expectError(error.MalformedPacket, parsePublish(.{ .header = 0x30, .body = &body }));
+        // With a packet id expected after the topic as well.
+        try testing.expectError(error.MalformedPacket, parsePublish(.{ .header = 0x32, .body = &body }));
+    }
+}
+
 /// A client whose connection is one end of a socket pair, the other end
 /// standing in for the broker.
 const LoopbackClient = struct {
@@ -1480,6 +1495,26 @@ test "an empty message, as clearing a retained notice sends, is not a notice" {
     // An explicit dismissal still gets through.
     try lb.send(try notifyPacket(&pkt_buf, "{\"text\": \"\"}", false));
     try testing.expectEqualStrings("{\"text\": \"\"}", lb.client.receive().?);
+}
+
+test "a PUBLISH with an impossible topic length is ignored and the connection kept" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    // The warning is expected; keep it out of the test output.
+    const saved = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = saved;
+
+    // Remaining length 2: nothing but a topic length of 65535.
+    try lb.send(&.{ 0x30, 0x02, 0xFF, 0xFF });
+    try testing.expect(lb.client.receive() == null);
+    try testing.expect(lb.client.connected);
+
+    // And what follows it is still read.
+    var pkt_buf: [128]u8 = undefined;
+    try lb.send(try notifyPacket(&pkt_buf, "after", false));
+    try testing.expectEqualStrings("after", lb.client.receive().?);
 }
 
 test "the broker closing the connection is noticed" {
