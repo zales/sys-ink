@@ -23,6 +23,10 @@ jobs:
       - name: Unit tests
         run: zig build test --summary all
 
+      # The mode releases are built in, where the optimiser has had its say.
+      - name: Unit tests, optimised as released
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
       - name: Type-check Linux-only modules
         run: zig build check
 
