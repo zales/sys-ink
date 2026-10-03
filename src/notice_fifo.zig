@@ -31,6 +31,15 @@ const parse = @import("parse.zig");
 
 const log = std.log.scoped(.notice);
 
+/// Most that one `receive` reads before handing back to its caller: a full
+/// pipe, at Linux's default capacity.
+///
+/// Whatever was waiting when the main loop woke fits in that, so only a sender
+/// still writing can run past it — and one that never stops (`yes > pipe`) must
+/// not keep the loop from everything else it does, noticing a shutdown signal
+/// included. The rest stays in the pipe, which poll then reports again.
+const max_drain = 64 * 1024;
+
 pub const Fifo = struct {
     fd: linux.fd_t,
     /// Holds the latest notice between the reads that find it and the caller.
@@ -96,11 +105,13 @@ pub const Fifo = struct {
     ///
     /// All of it is gathered before it is looked at, so a line that straddles
     /// two reads, or a JSON notice written over several lines, stays whole.
+    /// "Everything" stops at `max_drain`, so this always returns.
     pub fn receive(self: *Fifo) ?[]const u8 {
         var data: [8192]u8 = undefined;
         var len: usize = 0;
+        var drained: usize = 0;
 
-        while (true) {
+        while (drained < max_drain) {
             // More than fits: the newest half is kept, since the latest notice
             // is at the end.
             if (len == data.len) {
@@ -109,7 +120,8 @@ pub const Fifo = struct {
                 len = half;
             }
 
-            const rc = linux.read(self.fd, data[len..].ptr, data.len - len);
+            const want = @min(data.len - len, max_drain - drained);
+            const rc = linux.read(self.fd, data[len..].ptr, want);
             switch (syscall.errno(rc)) {
                 .SUCCESS => {},
                 .INTR => continue,
@@ -121,6 +133,7 @@ pub const Fifo = struct {
             }
             if (rc == 0) break;
             len += rc;
+            drained += rc;
         }
 
         const message = notice.pipeMessage(data[0..len]) orelse return null;
@@ -167,4 +180,149 @@ fn lookupGroup(io: std.Io, name: []const u8) ?u32 {
     var buf: [32 * 1024]u8 = undefined;
     const n = file.readPositionalAll(io, &buf, 0) catch return null;
     return parse.groupId(buf[0..n], name);
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+//
+// Linux only, as the module is: `tests.zig` leaves it out anywhere else.
+
+const testing = std.testing;
+
+/// Where one test's pipe goes: a directory of its own, which `open` creates
+/// and `cleanup` removes. Call `init` on it where it will stay, since the
+/// paths point into its own buffers.
+const Scratch = struct {
+    dir_buf: [64]u8 = undefined,
+    path_buf: [72]u8 = undefined,
+    dir: [:0]const u8 = undefined,
+    path: [:0]const u8 = undefined,
+
+    var next: std.atomic.Value(u32) = .init(0);
+
+    fn init(self: *Scratch) !void {
+        const n = next.fetchAdd(1, .monotonic);
+        self.dir = try std.fmt.bufPrintZ(&self.dir_buf, "/tmp/sys-ink-test-{d}-{d}", .{ linux.getpid(), n });
+        self.path = try std.fmt.bufPrintZ(&self.path_buf, "{s}/notify", .{self.dir});
+    }
+
+    fn cleanup(self: *Scratch) void {
+        _ = linux.unlinkat(linux.AT.FDCWD, self.path, 0);
+        _ = linux.unlinkat(linux.AT.FDCWD, self.dir, linux.AT.REMOVEDIR);
+    }
+};
+
+/// What `echo text > pipe` does: open for writing, write, close.
+fn send(path: [:0]const u8, bytes: []const u8) !void {
+    const rc = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+    if (!syscall.ok(rc)) return error.OpenFailed;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+
+    if (linux.write(fd, bytes.ptr, bytes.len) != bytes.len) return error.WriteFailed;
+}
+
+/// What poll has to say about `fd` right now.
+fn polled(fd: linux.fd_t) i16 {
+    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    _ = std.posix.poll(&fds, 0) catch return std.posix.POLL.ERR;
+    return fds[0].revents;
+}
+
+fn permissions(fd: linux.fd_t) !u32 {
+    var st: linux.Statx = undefined;
+    if (!syscall.ok(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MODE = true }, &st))) return error.StatFailed;
+    return @as(u32, st.mode) & 0o777;
+}
+
+test "what a sender writes to the pipe is received, once" {
+    var scratch: Scratch = .{};
+    try scratch.init();
+    defer scratch.cleanup();
+
+    var fifo = try Fifo.open(testing.io, scratch.path, null);
+    defer fifo.close();
+
+    try testing.expect(fifo.receive() == null);
+
+    try send(scratch.path, "Backup finished\n");
+    try testing.expect(polled(fifo.fd) & std.posix.POLL.IN != 0);
+    try testing.expectEqualStrings("Backup finished", fifo.receive().?);
+    try testing.expect(fifo.receive() == null);
+
+    // The sender has closed its end. With a writer end held here that is not
+    // an end-of-file, so poll has nothing to report: no hangup to spin on.
+    try testing.expectEqual(@as(i16, 0), polled(fifo.fd));
+
+    // The next sender is heard too, and of several notices the last is kept.
+    try send(scratch.path, "first\n");
+    try send(scratch.path, "{\"text\": \"second\"}\n");
+    try testing.expectEqualStrings("{\"text\": \"second\"}", fifo.receive().?);
+}
+
+test "the pipe is its owner's alone, even where a looser one was left behind" {
+    var scratch: Scratch = .{};
+    try scratch.init();
+    defer scratch.cleanup();
+
+    {
+        var fifo = try Fifo.open(testing.io, scratch.path, null);
+        defer fifo.close();
+        try testing.expectEqual(@as(u32, 0o600), try permissions(fifo.fd));
+    }
+
+    // Still there from that run, and opened up to everyone since.
+    try testing.expect(syscall.ok(linux.fchmodat(linux.AT.FDCWD, scratch.path, 0o666)));
+
+    var fifo = try Fifo.open(testing.io, scratch.path, null);
+    defer fifo.close();
+    try testing.expectEqual(@as(u32, 0o600), try permissions(fifo.fd));
+}
+
+test "a group that does not exist lets nobody else in" {
+    var scratch: Scratch = .{};
+    try scratch.init();
+    defer scratch.cleanup();
+
+    // The warning is expected; keep it out of the test output.
+    const saved = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = saved;
+
+    var fifo = try Fifo.open(testing.io, scratch.path, "sys-ink-no-such-group");
+    defer fifo.close();
+    try testing.expectEqual(@as(u32, 0o600), try permissions(fifo.fd));
+}
+
+test "a sender that never stops is read a pipeful at a time" {
+    var scratch: Scratch = .{};
+    try scratch.init();
+    defer scratch.cleanup();
+
+    var fifo = try Fifo.open(testing.io, scratch.path, null);
+    defer fifo.close();
+
+    // Room for several times what one call may read, which only a pipe made
+    // larger than the default has.
+    if (!syscall.ok(linux.fcntl(fifo.fd, linux.F.SETPIPE_SZ, 4 * max_drain))) return error.SkipZigTest;
+
+    // Our own descriptor is read-write, so it can stand in for the sender.
+    // Each write is under PIPE_BUF, so it goes in whole or not at all.
+    const lines = "flood\n" ** 512;
+    var written: usize = 0;
+    while (written < 3 * max_drain) {
+        const rc = linux.write(fifo.fd, lines, lines.len);
+        if (!syscall.ok(rc)) break;
+        written += rc;
+    }
+    try testing.expect(written > 2 * max_drain);
+
+    var calls: usize = 0;
+    while (polled(fifo.fd) & std.posix.POLL.IN != 0) : (calls += 1) {
+        try testing.expect(calls < 8);
+        try testing.expect(fifo.receive() != null);
+    }
+    // Every call but the last stopped at its budget with more still waiting.
+    try testing.expectEqual((written + max_drain - 1) / max_drain, calls);
 }
