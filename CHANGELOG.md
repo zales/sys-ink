@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-04
+
 ### Added
 - **HTTP API.** With `WEB_PREVIEW` on, the preview's server also answers
   `GET /api/status` with the latest readings as JSON, and `POST /api/notice`
@@ -397,6 +399,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.10.0]: https://github.com/zales/sys-ink/releases/tag/v1.10.0
 [1.9.0]: https://github.com/zales/sys-ink/releases/tag/v1.9.0
 [1.8.0]: https://github.com/zales/sys-ink/releases/tag/v1.8.0
 [1.7.0]: https://github.com/zales/sys-ink/releases/tag/v1.7.0
