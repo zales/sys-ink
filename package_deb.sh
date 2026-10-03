@@ -123,9 +123,20 @@ LOG_LEVEL=INFO
 EXPORT_BMP=false
 BMP_EXPORT_PATH=/tmp/sys-ink.bmp
 
+# --- Panel preview and HTTP API ----------------------------------------
+# Serves the frame on the panel, /api/status and /api/notice. No TLS, and the
+# preview and status need no token: keep it on loopback unless you mean it.
+#WEB_PREVIEW=false
+#WEB_PREVIEW_ADDR=127.0.0.1
+#WEB_PREVIEW_PORT=8390
+# Bearer token for POST/DELETE /api/notice; unset keeps them shut. This file
+# is root-only (0640), so the token can go here; see README.
+#WEB_API_TOKEN=
+
 # --- Notices ------------------------------------------------------------
 # echo "text" > /run/sys-ink/notify shows it on the panel for a while, as does
-# publishing to <MQTT_TOPIC_PREFIX>/notify when MQTT is enabled.
+# publishing to <MQTT_TOPIC_PREFIX>/notify when MQTT is enabled, or POSTing to
+# /api/notice when the HTTP API has a token.
 #NOTIFY_ENABLED=true
 #NOTIFY_FIFO=/run/sys-ink/notify
 # Group allowed to write to the pipe besides root; unset means root only.
@@ -137,7 +148,7 @@ BMP_EXPORT_PATH=/tmp/sys-ink.bmp
 #MQTT_HOST=192.168.1.100
 #MQTT_PORT=1883
 #MQTT_USERNAME=homeassistant
-# Keep credentials out of this world-readable file if you can; see README.
+# Only root can read this file (0640), so credentials may go here; see README.
 #MQTT_PASSWORD=secret
 #MQTT_CLIENT_ID=sysink
 #MQTT_TOPIC_PREFIX=sysink
@@ -166,8 +177,9 @@ cat > "$PKG_DIR/DEBIAN/conffiles" <<EOF
 /etc/logrotate.d/$APP_NAME
 EOF
 
-# 5.7 The file holds MQTT_PASSWORD and the service runs as root, so there is no
-# reason for anyone else on the machine to read it. dpkg preserves this mode.
+# 5.7 The file holds MQTT_PASSWORD and WEB_API_TOKEN, and the service runs as
+# root, so there is no reason for anyone else on the machine to read it. dpkg
+# preserves this mode.
 chmod 640 "$PKG_DIR/etc/default/$APP_NAME"
 
 # 6. Create postinst script
