@@ -247,6 +247,16 @@ pub fn aptUpgradableCount(stdout: []const u8) u32 {
     return count;
 }
 
+/// Rate of `bytes` moved over `interval_ms`, which must be positive.
+///
+/// The interval is in milliseconds because it is never a whole number of
+/// seconds: the loop that samples wakes a fraction earlier or later each time.
+/// Counted in seconds, that fraction was charged to the rate — up to a tenth
+/// of it on a ten-second cycle.
+pub fn bytesPerSecond(bytes: u64, interval_ms: i64) f64 {
+    return @as(f64, @floatFromInt(bytes)) * 1000.0 / @as(f64, @floatFromInt(interval_ms));
+}
+
 pub const Scaled = struct { value: f64, unit: []const u8 };
 
 /// Divisor between traffic units.
@@ -512,6 +522,13 @@ test "an interface with no hardware behind it ranks below Wi-Fi" {
         try testing.expectEqual(InterfaceRank.virtual, interfaceRank(name, false));
     }
     try testing.expect(@backingInt(InterfaceRank.wireless) < @backingInt(InterfaceRank.virtual));
+}
+
+test "a rate is taken over the interval as measured, not one rounded to seconds" {
+    try testing.expectEqual(@as(f64, 1000), bytesPerSecond(10_000, 10_000));
+    // 10.9 s used to count as 10, and the same traffic read 9% high.
+    try testing.expectEqual(@as(f64, 1000), bytesPerSecond(10_900, 10_900));
+    try testing.expectEqual(@as(f64, 2000), bytesPerSecond(1_000, 500));
 }
 
 test "netDevTotals sums interfaces and skips loopback" {

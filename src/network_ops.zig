@@ -175,11 +175,15 @@ fn hasDevice(io: std.Io, name: []const u8) bool {
     return true;
 }
 
+/// Shortest interval a rate is measured over.
+const min_interval_ms = 1000;
+
 /// Traffic monitor for tracking network traffic
 pub const TrafficMonitor = struct {
     io: std.Io,
     last_rx_bytes: ?u64 = null,
     last_tx_bytes: ?u64 = null,
+    /// Monotonic, in milliseconds.
     last_time: ?i64 = null,
     last_rx_speed: f64 = 0,
     last_tx_speed: f64 = 0,
@@ -224,7 +228,7 @@ pub const TrafficMonitor = struct {
 
         // Monotonic: a wall-clock step would otherwise fabricate a huge or
         // negative interval and with it a nonsense rate.
-        const now = std.Io.Timestamp.now(self.io, .awake).toSeconds();
+        const now = std.Io.Timestamp.now(self.io, .awake).toMilliseconds();
 
         const last_rx = self.last_rx_bytes;
         const last_tx = self.last_tx_bytes;
@@ -239,11 +243,12 @@ pub const TrafficMonitor = struct {
             return self.currentResult();
         }
 
-        const interval = now - last_time.?;
-        // Sampled twice within the same second: keep the previous rate rather
-        // than reporting a spurious zero, and leave the baseline untouched so
-        // the next real interval still measures against a matching timestamp.
-        if (interval < 1) return self.currentResult();
+        const interval_ms = now - last_time.?;
+        // Sampled twice within a second: keep the previous rate rather than
+        // reporting one measured over next to nothing, and leave the baseline
+        // untouched so the next real interval still measures against a
+        // matching timestamp.
+        if (interval_ms < min_interval_ms) return self.currentResult();
 
         self.takeSample(totals, now);
 
@@ -251,9 +256,8 @@ pub const TrafficMonitor = struct {
         const rx_diff = totals.rx_bytes -| last_rx.?;
         const tx_diff = totals.tx_bytes -| last_tx.?;
 
-        const interval_f: f64 = @floatFromInt(interval);
-        self.last_rx_speed = @as(f64, @floatFromInt(rx_diff)) / interval_f;
-        self.last_tx_speed = @as(f64, @floatFromInt(tx_diff)) / interval_f;
+        self.last_rx_speed = parse.bytesPerSecond(rx_diff, interval_ms);
+        self.last_tx_speed = parse.bytesPerSecond(tx_diff, interval_ms);
 
         return self.currentResult();
     }

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a web server reading `BMP_EXPORT_PATH` no longer catches an empty or
   half-written image as the panel changes. Where the directory cannot be
   written to, the file is still written in place.
+- Network rates were worked out over an interval rounded to whole seconds,
+  which misread them by up to a second's worth of traffic: 3% at the default
+  `INTERVAL_FAST=30`, 10% at `INTERVAL_FAST=10`. The interval is now measured
+  in milliseconds. Affects the panel and the MQTT rates alike.
 
 ## [1.10.2] — 2026-10-04
 
