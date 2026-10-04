@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2] — 2026-10-04
+
 ### Changed
 - The renderer no longer drives the panel. Deciding between a partial and a
   full refresh, parking the controller in deep sleep and restoring the
@@ -426,6 +428,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.10.2]: https://github.com/zales/sys-ink/releases/tag/v1.10.2
 [1.10.1]: https://github.com/zales/sys-ink/releases/tag/v1.10.1
 [1.10.0]: https://github.com/zales/sys-ink/releases/tag/v1.10.0
 [1.9.0]: https://github.com/zales/sys-ink/releases/tag/v1.9.0
