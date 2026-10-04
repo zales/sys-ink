@@ -168,7 +168,7 @@ test "an oversized body is refused before it is waited for" {
 }
 
 test "an endless header block is refused" {
-    const junk = "GET / HTTP/1.1\r\nX: " ++ "a" ** max_header_len;
+    const junk = "GET / HTTP/1.1\r\nX: " ++ @as([max_header_len]u8, @splat('a'));
     try testing.expectEqual(Result.too_large, parse(junk, 1024));
     try testing.expectEqual(Result.too_large, parse(junk ++ "\r\n\r\n", 1024));
 }

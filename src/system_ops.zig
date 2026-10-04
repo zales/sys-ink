@@ -3,13 +3,11 @@ const config = @import("config.zig");
 const parse = @import("parse.zig");
 const syscall = @import("syscall.zig");
 
-// statfs comes from the target libc headers rather than a hand-rolled struct:
-// fsblkcnt_t is 64-bit even on 32-bit ARM, so an all-c_ulong layout reads
-// garbage there. (sys/statvfs.h cannot be used — musl declares an anonymous
-// bitfield in it that translate-c renders opaque.)
-const c = @cImport({
-    @cInclude("sys/vfs.h");
-});
+// statfs comes from the target libc headers (src/c.h) rather than a
+// hand-rolled struct: fsblkcnt_t is 64-bit even on 32-bit ARM, so an
+// all-c_ulong layout reads garbage there. (sys/statvfs.h cannot be used — musl
+// declares an anonymous bitfield in it that translate-c renders opaque.)
+const c = @import("c");
 
 const log = std.log.scoped(.system);
 
@@ -174,7 +172,7 @@ pub const SystemOps = struct {
         var path_buf: [64]u8 = undefined;
         var any_fan = false;
         for (0..max_hwmon_devices) |i| {
-            const path = std.fmt.bufPrint(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
+            const path = std.mem.print(&path_buf, "/sys/class/hwmon/hwmon{d}/fan1_input", .{i}) catch continue;
 
             // A reading of 0 is ambiguous (stopped fan vs. wrong device), so
             // only latch onto a sensor that is actually spinning.
@@ -234,13 +232,13 @@ pub const SystemOps = struct {
         var name_buf: [64]u8 = undefined;
 
         for (0..max_hwmon_devices) |i| {
-            const name_path = std.fmt.bufPrint(&name_path_buf, "/sys/class/hwmon/hwmon{d}/name", .{i}) catch continue;
+            const name_path = std.mem.print(&name_path_buf, "/sys/class/hwmon/hwmon{d}/name", .{i}) catch continue;
             const raw_name = self.readFile(name_path, &name_buf) catch continue;
             const name = std.mem.trim(u8, raw_name, &std.ascii.whitespace);
 
             if (std.mem.find(u8, name, sensor_name) == null) continue;
 
-            return std.fmt.bufPrint(buf, "/sys/class/hwmon/hwmon{d}/{s}", .{ i, file }) catch continue;
+            return std.mem.print(buf, "/sys/class/hwmon/hwmon{d}/{s}", .{ i, file }) catch continue;
         }
         return null;
     }
@@ -397,7 +395,7 @@ pub const SystemOps = struct {
         // Controllers are numbered from zero; scanning a fixed range avoids
         // directory iteration and matches the hwmon approach.
         for (0..4) |i| {
-            const path = std.fmt.bufPrint(&path_buf, "/dev/nvme{d}", .{i}) catch continue;
+            const path = std.mem.print(&path_buf, "/dev/nvme{d}", .{i}) catch continue;
             const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             _ = std.os.linux.close(fd);
 

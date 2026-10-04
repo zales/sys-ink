@@ -446,7 +446,7 @@ test "what cannot be taken is refused with the status that says why" {
         // A body over the limit, refused on its length before any of it is read.
         .{ .request = "POST /api/notice HTTP/1.1\r\nContent-Length: 513\r\n\r\n", .status = "413 Content Too Large" },
         // Headers that have not ended by the time the buffer is full.
-        .{ .request = "GET / HTTP/1.1\r\nX: " ++ "a" ** 300, .status = "413 Content Too Large" },
+        .{ .request = "GET / HTTP/1.1\r\nX: " ++ @as([300]u8, @splat('a')), .status = "413 Content Too Large" },
     };
 
     for (cases) |case| {
@@ -500,7 +500,7 @@ test "a frame is served as a BMP of the length its headers give" {
     try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, response, "Content-Type: image/bmp\r\n") != null);
     var length_buf: [32]u8 = undefined;
-    const length = try std.fmt.bufPrint(&length_buf, "Content-Length: {d}\r\n", .{bmp.byteSize(width, height)});
+    const length = try std.mem.print(&length_buf, "Content-Length: {d}\r\n", .{bmp.byteSize(width, height)});
     try testing.expect(std.mem.indexOf(u8, response, length) != null);
     try testing.expectEqual(bmp.byteSize(width, height), body.len);
     try testing.expectEqualStrings("BM", body[0..2]);

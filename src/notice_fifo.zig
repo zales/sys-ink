@@ -52,7 +52,7 @@ pub const Fifo = struct {
     /// Create the pipe, or reuse one a previous run left behind, and open it.
     pub fn open(io: std.Io, path: []const u8, group: ?[]const u8) Error!Fifo {
         var path_buf: [256]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.NameTooLong;
+        const path_z = std.mem.printSentinel(&path_buf, "{s}", .{path}, 0) catch return error.NameTooLong;
 
         makeParentDir(path);
 
@@ -148,7 +148,7 @@ pub const Fifo = struct {
 fn makeParentDir(path: []const u8) void {
     const dir = std.fs.path.dirname(path) orelse return;
     var buf: [256]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&buf, "{s}", .{dir}) catch return;
+    const dir_z = std.mem.printSentinel(&buf, "{s}", .{dir}, 0) catch return;
     _ = linux.mkdirat(linux.AT.FDCWD, dir_z, 0o755);
 }
 
@@ -203,8 +203,8 @@ const Scratch = struct {
 
     fn init(self: *Scratch) !void {
         const n = next.fetchAdd(1, .monotonic);
-        self.dir = try std.fmt.bufPrintZ(&self.dir_buf, "/tmp/sys-ink-test-{d}-{d}", .{ linux.getpid(), n });
-        self.path = try std.fmt.bufPrintZ(&self.path_buf, "{s}/notify", .{self.dir});
+        self.dir = try std.mem.printSentinel(&self.dir_buf, "/tmp/sys-ink-test-{d}-{d}", .{ linux.getpid(), n }, 0);
+        self.path = try std.mem.printSentinel(&self.path_buf, "{s}/notify", .{self.dir}, 0);
     }
 
     fn cleanup(self: *Scratch) void {
@@ -309,7 +309,10 @@ test "a sender that never stops is read a pipeful at a time" {
 
     // Our own descriptor is read-write, so it can stand in for the sender.
     // Each write is under PIPE_BUF, so it goes in whole or not at all.
-    const lines = "flood\n" ** 512;
+    const lines: *const [512 * 6]u8 = comptime lines: {
+        const copies: [512][6]u8 = @splat("flood\n".*);
+        break :lines @ptrCast(&copies);
+    };
     var written: usize = 0;
     while (written < 3 * max_drain) {
         const rc = linux.write(fifo.fd, lines, lines.len);

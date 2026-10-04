@@ -225,14 +225,14 @@ pub const UptimeBuffers = struct {
 pub fn uptimeCandidates(buf: *UptimeBuffers, days: u32, hours: u32, minutes: u32) [4][]const u8 {
     // Under a day the day counter is noise: "5h 3m" beats "0d 5h 3m".
     const full = if (days == 0)
-        std.fmt.bufPrint(&buf.full, "{d}h {d}m", .{ hours, minutes }) catch "?"
+        std.mem.print(&buf.full, "{d}h {d}m", .{ hours, minutes }) catch "?"
     else
-        std.fmt.bufPrint(&buf.full, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
+        std.mem.print(&buf.full, "{d}d {d}h {d}m", .{ days, hours, minutes }) catch "?";
 
     return .{
         full,
-        std.fmt.bufPrint(&buf.compact, "{d}d {d}:{d:0>2}", .{ days, hours, minutes }) catch "?",
-        std.fmt.bufPrint(&buf.hours, "{d}d {d}h", .{ days, hours }) catch "?",
-        std.fmt.bufPrint(&buf.days, "{d}d", .{days}) catch "?",
+        std.mem.print(&buf.compact, "{d}d {d}:{d:0>2}", .{ days, hours, minutes }) catch "?",
+        std.mem.print(&buf.hours, "{d}d {d}h", .{ days, hours }) catch "?",
+        std.mem.print(&buf.days, "{d}d", .{days}) catch "?",
     };
 }

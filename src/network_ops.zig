@@ -3,13 +3,7 @@ const config = @import("config.zig");
 const parse = @import("parse.zig");
 const bounded_connect = @import("bounded_connect.zig");
 
-// C interop for network functions
-const c = @cImport({
-    @cInclude("ifaddrs.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-});
+const c = @import("c"); // src/c.h
 
 const log = std.log.scoped(.network);
 
@@ -266,7 +260,7 @@ pub const TrafficMonitor = struct {
 
         pub fn counts(self: Physical, name: []const u8) bool {
             var path_buf: [64]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
+            const path = std.mem.print(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
             std.Io.Dir.accessAbsolute(self.io, path, .{}) catch return false;
             return true;
         }

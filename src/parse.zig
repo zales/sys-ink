@@ -438,7 +438,7 @@ test "uptime splits into days, hours and minutes" {
     // 2 days, 3 hours, 4 minutes, 5 seconds.
     const total = 2 * 86400 + 3 * 3600 + 4 * 60 + 5;
     var buf: [64]u8 = undefined;
-    const content = try std.fmt.bufPrint(&buf, "{d}.42 9999.00", .{total});
+    const content = try std.mem.print(&buf, "{d}.42 9999.00", .{total});
 
     const up = try uptime(content);
     try testing.expectEqual(@as(u32, 2), up.days);
@@ -601,7 +601,7 @@ test "ipv4 rejects malformed input" {
 }
 
 test "nvmeSmartLog decodes the leading fields" {
-    var page = [_]u8{0} ** 512;
+    var page: [512]u8 = @splat(0);
     page[0] = 0x04; // reliability degraded
     std.mem.writeInt(u16, page[1..3], 307, .little); // 34 C
     page[3] = 100;
@@ -617,14 +617,14 @@ test "nvmeSmartLog decodes the leading fields" {
 }
 
 test "a healthy drive reports no fault" {
-    var page = [_]u8{0} ** 512;
+    var page: [512]u8 = @splat(0);
     page[3] = 100;
     const h = try nvmeSmartLog(&page);
     try testing.expect(!h.faulted());
 }
 
 test "nvmeSmartLog rejects a truncated page" {
-    const short = [_]u8{0} ** 100;
+    const short: [100]u8 = @splat(0);
     try testing.expectError(error.ShortLogPage, nvmeSmartLog(&short));
 }
 

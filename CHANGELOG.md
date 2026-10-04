@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
+| Unreleased | Requires Zig 0.17.0 to build, and network access on the first build to fetch the translate-c package. | Only affects building from source. `-Doptimize=ReleaseSafe` still works, as a deprecated spelling of `-Doptimize=safe`. |
 | 1.8.0 | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
 | 1.8.0 | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
 | 1.5.0 | Network rates became decimal: `kB` now means 1000 bytes, matching the label. Earlier releases divided by 1024. | Displayed and MQTT-published rates read 2.4% higher for the same throughput. Nothing to do unless you have alerts on absolute values. |
@@ -21,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+### Changed
+- **Built with Zig 0.17.0.** `@cImport` is gone from the language, so the libc
+  declarations the daemon uses are listed in `src/c.h` and translated by the
+  official [translate-c](https://codeberg.org/ziglang/translate-c) package,
+  pinned to 2.0.0 in the new `build.zig.zon`. Layouts still come from the
+  target's own headers; `struct statfs` keeps its 64-bit block counts on
+  32-bit ARM.
+- In `safe` builds Zig now gives the daemon its new checking allocator,
+  `std.heap.SafeAllocator`, instead of libc's `malloc`: a double free or a use
+  after free is a panic rather than silent corruption.
+- A panic says more: "index out of bounds: index 5, len 3" rather than "index
+  out of bounds". Zig 0.17.0's minimal handler, which this used, does not
+  compile; the replacement costs 3 KB.
+- The binary grows from 671 KB to 717 KB on `aarch64-linux-musl`, nearly all
+  of it from the new toolchain.
 
 ## [1.10.0] — 2026-10-04
 

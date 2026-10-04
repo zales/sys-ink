@@ -39,7 +39,7 @@ pub fn connect(address: [4]u8, port: u16, timeout_ms: i32) Error!std.posix.fd_t 
     var addr = linux.sockaddr.in{
         .family = linux.AF.INET,
         .port = std.mem.nativeToBig(u16, port),
-        .addr = @bitCast(address),
+        .addr = std.mem.bytesToValue(u32, &address),
     };
     const connect_rc = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
     switch (try connectStarted(syscall.errno(connect_rc))) {

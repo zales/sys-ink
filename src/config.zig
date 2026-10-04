@@ -271,7 +271,7 @@ pub const Config = struct {
         var path_buf: [32]u8 = undefined;
         var i: u8 = 0;
         while (i < 32) : (i += 1) {
-            const path = std.fmt.bufPrintZ(&path_buf, "/dev/gpiochip{d}", .{i}) catch continue;
+            const path = std.mem.printSentinel(&path_buf, "/dev/gpiochip{d}", .{i}, 0) catch continue;
             const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
             defer _ = std.os.linux.close(fd);
 
@@ -281,7 +281,7 @@ pub const Config = struct {
 
             const chip_label = std.mem.sliceTo(&info.label, 0);
             if (std.mem.eql(u8, chip_label, label)) {
-                return std.fmt.bufPrint(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
+                return std.mem.print(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
             }
         }
         return null;

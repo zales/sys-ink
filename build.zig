@@ -1,8 +1,10 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const translate_c = b.dependency("translate_c", .{});
 
     const exe = b.addExecutable(.{
         .name = "sys-ink",
@@ -12,13 +14,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .strip = true, // Remove debug symbols
             .link_libc = true, // Link libc for system calls and C interop
+            .imports = &.{.{ .name = "c", .module = libc(b, translate_c, target, optimize) }},
         }),
     });
 
     // Link-time optimisation for release builds: about 10% of the binary on
     // aarch64-musl, for no change in behaviour and no runtime cost. Left off in
     // Debug, where the extra link time buys nothing.
-    if (optimize != .Debug) exe.lto = .full;
+    if (optimize != .debug) exe.lto = .full;
 
     // The daemon is Linux-only: it talks to GPIO chardev, spidev, /proc and
     // /sys directly. Building it for another host does not fail with anything
@@ -31,7 +34,7 @@ pub fn build(b: *std.Build) void {
     } else {
         const explain = b.addFail(
             "sys-ink targets Linux; this host cannot build the daemon.\n" ++
-                "       Cross-compile it:  zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe\n" ++
+                "       Cross-compile it:  zig build -Dtarget=aarch64-linux-musl -Doptimize=safe\n" ++
                 "       Or run locally:    zig build sim | zig build test | zig build check",
         );
         b.getInstallStep().dependOn(&explain.step);
@@ -40,9 +43,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -56,6 +57,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{.{ .name = "c", .module = libc(b, translate_c, target, optimize) }},
         }),
     });
 
@@ -71,8 +73,9 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = check_target,
-            .optimize = .Debug,
+            .optimize = .debug,
             .link_libc = true,
+            .imports = &.{.{ .name = "c", .module = libc(b, translate_c, check_target, .debug) }},
         }),
     });
 
@@ -87,7 +90,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/golden_gen.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
             .link_libc = true,
         }),
     });
@@ -101,14 +104,15 @@ pub fn build(b: *std.Build) void {
     // HTTP-served preview everywhere else.
     //
     // Debug by default, since the point of the thing is development. Note when
-    // reading its memory use that the debug allocator does not return pages, so
-    // a healthy preview still looks like it is growing; `-Doptimize=ReleaseSafe`
-    // gives a figure worth trusting.
+    // reading its memory use that in debug and safe modes Zig gives main a
+    // checking allocator that never reuses memory, so a healthy preview can
+    // still look like it is growing; `-Dsim-optimize=fast` uses libc's malloc
+    // and gives a figure worth trusting.
     const sim_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "sim-optimize",
-        "Optimisation mode for the simulator (default Debug)",
-    ) orelse .Debug;
+        "Optimisation mode for the simulator (default debug)",
+    ) orelse .debug;
     const sim_web_module = b.createModule(.{
         .root_source_file = b.path("src/sim_web.zig"),
         .target = b.graph.host,
@@ -136,4 +140,20 @@ pub fn build(b: *std.Build) void {
     } else {
         sim_step.dependOn(&run_sim_web.step);
     }
+}
+
+/// The libc declarations in src/c.h as the Zig module "c", translated for
+/// `target`. This is what `@cImport` did before Zig 0.17 removed it.
+fn libc(
+    b: *std.Build,
+    translate_c: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) *std.Build.Module {
+    const translator: Translator = .init(translate_c, .{
+        .c_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    return translator.mod;
 }

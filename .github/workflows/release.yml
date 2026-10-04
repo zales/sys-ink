@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
 
 jobs:
   test:
@@ -27,7 +27,7 @@ jobs:
         run: zig build test --summary all
 
       - name: Unit tests, optimised as released
-        run: zig build test -Doptimize=ReleaseSafe --summary all
+        run: zig build test -Doptimize=safe --summary all
 
       - name: Type-check Linux-only modules
         run: zig build check
@@ -61,12 +61,12 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # ReleaseSafe, not ReleaseSmall: the daemon runs as root and reads from
-      # the network, and ReleaseSmall drops the bounds and overflow checks that
+      # safe, not small: the daemon runs as root and reads from the network,
+      # and small drops the bounds and overflow checks that
       # turn a parsing bug into a clean exit rather than memory corruption.
       # About 200 KB of binary on arm64.
       - name: Build for ${{ matrix.target }}
-        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=ReleaseSafe
+        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=safe
 
       - name: Package Debian (.deb)
         env:

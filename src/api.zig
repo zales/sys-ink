@@ -267,7 +267,7 @@ test "the status is JSON with unknown readings as null" {
     try testing.expect(obj.get("disk_temp").? == .null);
     try testing.expect(obj.get("apt_updates").? == .null);
     try testing.expectEqual(false, obj.get("undervoltage").?.bool);
-    try testing.expectEqual(@as(usize, @typeInfo(Status).@"struct".fields.len), obj.count());
+    try testing.expectEqual(@as(usize, @typeInfo(Status).@"struct".field_names.len), obj.count());
 }
 
 test "the largest status fits the buffer" {

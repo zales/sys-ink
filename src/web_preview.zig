@@ -280,7 +280,7 @@ pub const WebPreview = struct {
                 },
                 .method_not_allowed => {
                     var allow_buf: [64]u8 = undefined;
-                    const allow = std.fmt.bufPrint(&allow_buf, "Allow: {s}\r\n", .{api.allowedMethods(request.path)}) catch "";
+                    const allow = std.mem.print(&allow_buf, "Allow: {s}\r\n", .{api.allowedMethods(request.path)}) catch "";
                     respondJson(stream, self.io, "405 Method Not Allowed", allow, "{\"error\":\"method not allowed\"}");
                 },
                 .not_found => frame_server.respondNotFound(stream, self.io),
@@ -341,7 +341,7 @@ fn exchange(preview: *WebPreview, request: []const u8, buf: []u8) ![]const u8 {
 fn expectStatus(expected: []const u8, response: []const u8) !void {
     const line_end = std.mem.indexOf(u8, response, "\r\n") orelse response.len;
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "HTTP/1.1 {s}", .{expected}), response[0..line_end]);
+    try testing.expectEqualStrings(try std.mem.print(&buf, "HTTP/1.1 {s}", .{expected}), response[0..line_end]);
 }
 
 fn bodyOf(response: []const u8) []const u8 {
@@ -396,7 +396,7 @@ test "the frame and the readings are served as published, and not before" {
     try testing.expectEqualStrings("{\"error\":\"no readings yet\"}", bodyOf(early));
 
     // A frame of the wrong size is not one, and changes nothing.
-    preview.publish(&[_]u8{0x00} ** 16);
+    preview.publish(&@as([16]u8, @splat(0x00)));
     try expectStatus("503 Service Unavailable", try exchange(&preview, "GET /frame.bmp HTTP/1.1\r\n\r\n", &buf));
 
     var frame: [frame_bytes]u8 = @splat(0xFF);
@@ -487,7 +487,7 @@ test "the largest notice the API takes arrives whole" {
     try serve(&preview, .{ .token = "s3cret" });
     defer preview.deinit();
 
-    const body = "x" ** api.max_notice_body;
+    const body: [api.max_notice_body]u8 = @splat('x');
     var buf: [1024]u8 = undefined;
     try expectStatus("202 Accepted", try exchange(
         &preview,
@@ -496,7 +496,7 @@ test "the largest notice the API takes arrives whole" {
     ));
 
     var taken: [api.max_notice_body]u8 = undefined;
-    try testing.expectEqualStrings(body, preview.takeNotice(&taken).?);
+    try testing.expectEqualStrings(&body, preview.takeNotice(&taken).?);
 
     // One byte more is refused on its length alone, with nothing delivered.
     try expectStatus("413 Content Too Large", try exchange(
