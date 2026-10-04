@@ -97,7 +97,7 @@ pub const WebPreview = struct {
         return .{
             .io = io,
             // Where it is listening, not where it was asked to: with port 0
-            // these differ, and `deinit` has to connect to the former.
+            // these differ, and the former is the one a client can reach.
             .address = server.socket.address,
             .server = server,
             .options = options,
@@ -189,23 +189,17 @@ pub const WebPreview = struct {
     pub fn deinit(self: *WebPreview) void {
         self.running.store(false, .release);
 
-        // `accept` is blocking and there is no way to cancel it, so wake it with
-        // a connection of our own. The loop then sees the cleared flag and
-        // returns instead of waiting for a real client. Same shape as the wake
-        // pipe the signal handler uses.
-        if (self.task != null) {
-            // `.timeout` left at `.none` deliberately: it is unimplemented in Zig
-            // 0.16 and panics if set — the reason `bounded_connect.zig` exists.
-            // Connecting to our own listening socket needs no deadline anyway.
-            if (net.IpAddress.connect(&self.address, self.io, .{ .mode = .stream })) |stream| {
-                stream.close(self.io);
-            } else |err| {
-                log.debug("Could not wake the preview to stop it: {t}", .{err});
-            }
-        }
-
+        // Cancelling interrupts whatever the loop is blocked in — `accept`, or
+        // the read of a request from a client that has gone quiet — and it
+        // then finds the flag cleared and returns. The flag is still needed:
+        // the request is delivered once, to an error the loop may well have
+        // swallowed.
+        //
+        // This used to wake `accept` with a connection of its own, which had
+        // to queue behind a stalled client for as long as its deadline ran,
+        // and left `await` waiting on a real client if it could not connect.
         if (self.task) |*task| {
-            task.await(self.io);
+            task.cancel(self.io);
             self.task = null;
         }
         self.server.deinit(self.io);
@@ -570,8 +564,27 @@ test "the address is the one being listened on, and stopping does not hang" {
     var preview: WebPreview = undefined;
     try serve(&preview, .{});
 
-    // Asked for port 0, given a real one: `deinit` wakes the accept loop by
-    // connecting to it, and would wait for ever on a connection to port 0.
+    // Asked for port 0, given a real one: the address is what gets logged and
+    // what the tests here connect to.
     try testing.expect(preview.address.ip4.port != 0);
     preview.deinit();
+}
+
+test "stopping does not wait out a client that has gone quiet" {
+    const io = testing.io;
+    var preview: WebPreview = undefined;
+    try serve(&preview, .{});
+
+    // Connected and silent: the server is now inside the read of a request,
+    // which gives such a client `io_timeout_ms` before dropping it.
+    const stream = try net.IpAddress.connect(&preview.address, io, .{ .mode = .stream });
+    defer stream.close(io);
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+
+    const before = std.Io.Timestamp.now(io, .awake).toMilliseconds();
+    preview.deinit();
+    const took = std.Io.Timestamp.now(io, .awake).toMilliseconds() - before;
+
+    // Woken by a connection, the loop finished waiting for this client first.
+    try testing.expect(took < frame_server.io_timeout_ms / 2);
 }

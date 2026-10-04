@@ -1,12 +1,13 @@
 //! A TCP connect that gives up after a deadline.
 //!
 //! `net.IpAddress.ConnectOptions` has a `timeout` field, which is what this
-//! should be. It is not implemented in Zig 0.16: `Io.Threaded.netConnectIpPosix`
-//! panics with "TODO implement netConnectIpPosix with timeout", which only shows
-//! up at runtime. Until that lands, an unbounded connect to a host that drops
-//! SYNs rather than refusing them blocks for the kernel's SYN timeout — roughly
-//! two minutes with the default `tcp_syn_retries=6` — and everything here runs on
-//! the same thread as the render loop.
+//! should be. It is not implemented as of Zig 0.17.0:
+//! `Io.Threaded.netConnectIpPosix` panics with "TODO implement
+//! netConnectIpPosix with timeout", which only shows up at runtime. Until that
+//! lands, an unbounded connect to a host that drops SYNs rather than refusing
+//! them blocks for the kernel's SYN timeout — roughly two minutes with the
+//! default `tcp_syn_retries=6` — and everything here runs on the same thread as
+//! the render loop.
 //!
 //! Delete this module and pass `.timeout` to `IpAddress.connect` once std
 //! implements it.
@@ -126,6 +127,13 @@ fn clearNonBlocking(fd: std.posix.fd_t) Error!void {
 /// send itself return `EAGAIN`. It is sufficient for small writes: TCP reports
 /// writable only while at least a third of the send buffer is free, several
 /// kilobytes, and nothing sent through this is larger than one.
+///
+/// std's `Socket.sendTimeout` is not a replacement as of Zig 0.17.0, tried
+/// against a peer that had stopped reading. On Linux it sends without
+/// blocking, and a packet that only partly fits comes back as
+/// `error.MessageOversize` with its first part already on the wire. On macOS,
+/// where the tests run, it did not return at all. `Io.operateTimeout` with a
+/// `net_write` is this same wait followed by a blocking write.
 pub fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) error{ Timeout, PollFailed }!void {
     var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
     const ready = std.posix.poll(&fds, timeout_ms) catch return error.PollFailed;

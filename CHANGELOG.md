@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Stopping the daemon no longer waits behind a preview client that has gone
+  quiet. The server task is cancelled, which interrupts whatever it is blocked
+  in, instead of being woken with a connection of the daemon's own; that
+  connection had to queue behind the stalled client for up to two seconds, and
+  left the shutdown waiting for a real client if it could not be made.
+
 ## [1.10.3] — 2026-10-04
 
 ### Fixed
