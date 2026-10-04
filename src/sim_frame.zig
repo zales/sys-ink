@@ -10,11 +10,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const display_config = @import("display_config.zig");
-const Renderer = @import("display_renderer.zig").Renderer;
-const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
-
-/// The renderer as the simulators use it: the real one, on a recorder.
-pub const SimRenderer = Renderer(FakeTransport);
+pub const Renderer = @import("display_renderer.zig").Renderer;
 
 pub const width = display_config.DISPLAY_WIDTH;
 pub const height = display_config.DISPLAY_HEIGHT;
@@ -54,9 +50,9 @@ fn wave(t: f64, period: f64) f64 {
 
 /// Draw one frame's worth of synthetic metrics.
 ///
-/// Leaves the renderer ready for `updateDisplay`, which is what applies the
-/// fault overlay and packs the frame.
-pub fn draw(renderer: *SimRenderer, t: f64, uptime_s: u64) void {
+/// Leaves the renderer ready for `packedFrame`, which is what applies the fault
+/// overlay and packs the frame.
+pub fn draw(renderer: *Renderer, t: f64, uptime_s: u64) void {
     renderer.renderCpuLoad(@intFromFloat(15.0 + 70.0 * wave(t, 47.0)));
     renderer.renderCpuTemp(@intFromFloat(42.0 + 12.0 * wave(t, 61.0)));
     renderer.renderMemory(@intFromFloat(35.0 + 25.0 * wave(t, 83.0)));
@@ -120,12 +116,8 @@ test "successive frames differ" {
     // future change cannot quietly make every frame identical.
     const testing = std.testing;
 
-    var transport = FakeTransport.init(testing.allocator);
-    defer transport.deinit();
-
-    var renderer = try SimRenderer.init(testing.allocator, undefined, &transport);
+    var renderer = try Renderer.init(testing.allocator);
     defer renderer.deinit();
-    renderer.epd = SimRenderer.EPD.init(&transport);
     renderer.renderGrid();
 
     var seen = std.AutoHashMap(u64, void).init(testing.allocator);
@@ -134,7 +126,6 @@ test "successive frames differ" {
     var previous: ?u64 = null;
     for (0..30) |t| {
         draw(&renderer, @floatFromInt(t), t);
-        transport.resetLog();
 
         const hash = std.hash.Wyhash.hash(0, renderer.packedFrame());
         try seen.put(hash, {});
@@ -149,12 +140,8 @@ test "successive frames differ" {
 test "the fault overlay is part of the frame it hands over" {
     const testing = std.testing;
 
-    var transport = FakeTransport.init(testing.allocator);
-    defer transport.deinit();
-
-    var renderer = try SimRenderer.init(testing.allocator, undefined, &transport);
+    var renderer = try Renderer.init(testing.allocator);
     defer renderer.deinit();
-    renderer.epd = SimRenderer.EPD.init(&transport);
     renderer.renderGrid();
 
     // A moment inside the fault window and one outside, with the same metrics.

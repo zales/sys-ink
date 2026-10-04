@@ -1,6 +1,6 @@
 .{
     .name = .sys_ink,
-    .version = "1.10.1",
+    .version = "1.10.2",
     .fingerprint = 0x27c5c27c3f59d95b,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{

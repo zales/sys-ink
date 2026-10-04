@@ -9,8 +9,11 @@ const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
 const TrafficMonitor = network_ops.TrafficMonitor;
 const Scheduler = @import("scheduler.zig").Scheduler;
-const DisplayRenderer = @import("display_renderer.zig").DisplayRenderer;
+const Renderer = @import("display_renderer.zig").Renderer;
+const display_config = @import("display_config.zig");
 const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
+const Panel = @import("panel.zig").Panel(EpdConfig);
+const BmpExporter = @import("bmp.zig").BmpExporter;
 const MqttClient = @import("mqtt.zig").MqttClient;
 const MqttConfig = @import("mqtt.zig").MqttConfig;
 const NoticeFifo = @import("notice_fifo.zig").Fifo;
@@ -67,7 +70,9 @@ const App = struct {
     sys: *SystemOps,
     net: *NetworkOps,
     traffic: *TrafficMonitor,
-    renderer: *DisplayRenderer,
+    renderer: *Renderer,
+    panel: *Panel,
+    bmp_exporter: BmpExporter = .init(),
     mqtt: ?*MqttClient = null,
     preview: ?*WebPreview = null,
     notices: ?*NoticeFifo = null,
@@ -300,11 +305,56 @@ const App = struct {
             self.full_refresh_due = false;
         }
 
-        self.renderer.updateDisplay(!full_refresh) catch |err| {
+        if (self.panel.show(self.renderer.panelFrame(), if (full_refresh) .full else .partial)) {
+            self.exportBmp();
+        } else |err| {
             log.warn("Failed to update display: {t}", .{err});
-        };
+        }
 
         self.publishPreview();
+    }
+
+    /// Show the loading screen while the first readings are taken.
+    fn showLoading(self: *App) void {
+        self.renderer.drawLoadingScreen();
+        self.panel.splash(self.renderer.panelFrame()) catch |err| {
+            log.err("Failed to show loading screen: {t}", .{err});
+            return;
+        };
+        self.exportBmp();
+    }
+
+    /// Push the first frame and establish the reference for later partial updates.
+    fn showInitialFrame(self: *App) !void {
+        try self.panel.show(self.renderer.panelFrame(), .full);
+        self.last_full_refresh = self.nowSeconds();
+        self.exportBmp();
+    }
+
+    /// Leave the sleep screen on the glass and the controller in deep sleep.
+    fn showSleepScreen(self: *App) void {
+        log.info("Rendering sleep screen", .{});
+        self.renderer.drawSleepScreen();
+        self.panel.shutdown(self.renderer.panelFrame()) catch |err| {
+            log.err("Failed to show sleep screen: {t}", .{err});
+            return;
+        };
+        self.exportBmp();
+    }
+
+    /// Write the frame on show to the BMP file, if that is turned on.
+    fn exportBmp(self: *App) void {
+        if (!config.Config.export_bmp) return;
+
+        self.bmp_exporter.save(
+            self.io,
+            self.renderer.packedFrame(),
+            display_config.DISPLAY_WIDTH,
+            display_config.DISPLAY_HEIGHT,
+            config.Config.bmp_export_path,
+        ) catch |err| {
+            log.err("Failed to export BMP: {t}", .{err});
+        };
     }
 
     /// Hand the frame just drawn to the preview, if one is running, and the
@@ -502,27 +552,24 @@ pub fn main(init: std.process.Init) !u8 {
     var net_ops = NetworkOps.init(io);
     var traffic_mon = TrafficMonitor.init(io);
 
-    // The transport outlives the renderer, which only borrows it.
-    var epd_config = EpdConfig.init(allocator);
-    defer epd_config.moduleExit();
-
-    var renderer = DisplayRenderer.init(allocator, io, &epd_config) catch |err| {
+    var renderer = Renderer.init(allocator) catch |err| {
         log.err("Failed to initialize display: {t}", .{err});
-        log.err("Check GPIO/SPI permissions", .{});
         return 1;
     };
     defer renderer.deinit();
 
+    // The transport outlives the panel, which only borrows it.
+    var epd_config = EpdConfig.init(allocator);
+    defer epd_config.moduleExit();
+
+    var panel = Panel.init(&epd_config, .{ .sleep_between_updates = config.Config.panel_sleep });
+
     log.info("Initializing display", .{});
-    renderer.startup() catch |err| {
+    panel.startup() catch |err| {
         log.err("Failed to start display: {t}", .{err});
+        log.err("Check GPIO/SPI permissions", .{});
         return 1;
     };
-
-    renderer.showLoading() catch |err| {
-        log.err("Failed to show loading screen: {t}", .{err});
-    };
-    renderer.renderGrid();
 
     var app = App{
         .io = io,
@@ -530,7 +577,11 @@ pub fn main(init: std.process.Init) !u8 {
         .net = &net_ops,
         .traffic = &traffic_mon,
         .renderer = &renderer,
+        .panel = &panel,
     };
+
+    app.showLoading();
+    renderer.renderGrid();
 
     var mqtt_config = MqttConfig.load(init);
     mqtt_config.notices_enabled = config.Config.notify_enabled;
@@ -585,8 +636,7 @@ pub fn main(init: std.process.Init) !u8 {
     scheduler.runAll();
 
     // Seeds the RAM that later partial updates diff against.
-    try renderer.showInitialFrame();
-    app.last_full_refresh = app.nowSeconds();
+    try app.showInitialFrame();
 
     // Bound and started here, at its final address: `start` hands the runtime a
     // pointer to it, so it must not move afterwards.
@@ -629,9 +679,7 @@ pub fn main(init: std.process.Init) !u8 {
     runLoop(&scheduler, &app);
 
     log.info("Shutting down gracefully", .{});
-    renderer.goToSleep() catch |err| {
-        log.err("Failed to show sleep screen: {t}", .{err});
-    };
+    app.showSleepScreen();
 
     return 0;
 }

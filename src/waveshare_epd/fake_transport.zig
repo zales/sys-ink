@@ -2,12 +2,12 @@
 //! real hardware.
 //!
 //! Written for tests, but it lives in a normal source file so the driver's own
-//! tests, the renderer's, and the simulators can share it.
+//! tests and the panel's can share it.
 //!
 //! The log is unbounded, and every SPI write is copied onto the heap — a frame
-//! is a few kilobytes, so anything that renders in a loop must call `resetLog`
-//! or grow without limit. Tests finish before that matters; the simulators found
-//! it the hard way.
+//! is a few kilobytes, so anything that sends frames in a loop must call
+//! `resetLog` or grow without limit. Tests finish before that matters; the
+//! simulators, which once ran on this, found it the hard way.
 
 const std = @import("std");
 const testing = std.testing;

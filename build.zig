@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
     const golden_step = b.step("golden", "Regenerate the golden reference frame");
     golden_step.dependOn(&run_golden.step);
 
-    // Desktop simulator: the real renderer against the fake transport, showing
+    // Desktop simulator: the real renderer with no panel behind it, showing
     // what the panel would show. A native window where there is one, and an
     // HTTP-served preview everywhere else.
     //
