@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.3] — 2026-10-04
+
+### Fixed
+- With a cable and Wi-Fi both connected, the panel showed the Wi-Fi address
+  wherever the Ethernet port is not called `eth0`: `end0` on Debian and Ubuntu
+  images for the Pi 5, `enp*` on most other machines. Interfaces are now ranked
+  by what they are — hardware on a cable, then Wi-Fi, then bridges and
+  tunnels — instead of by two names. Nothing changes where the port is `eth0`.
+- The exported BMP is replaced in one step rather than emptied and rewritten,
+  so a web server reading `BMP_EXPORT_PATH` no longer catches an empty or
+  half-written image as the panel changes. Where the directory cannot be
+  written to, the file is still written in place.
+- Network rates were worked out over an interval rounded to whole seconds,
+  which misread them by up to a second's worth of traffic: 3% at the default
+  `INTERVAL_FAST=30`, 10% at `INTERVAL_FAST=10`. The interval is now measured
+  in milliseconds. Affects the panel and the MQTT rates alike.
+
 ## [1.10.2] — 2026-10-04
 
 ### Changed
@@ -428,6 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.10.3]: https://github.com/zales/sys-ink/releases/tag/v1.10.3
 [1.10.2]: https://github.com/zales/sys-ink/releases/tag/v1.10.2
 [1.10.1]: https://github.com/zales/sys-ink/releases/tag/v1.10.1
 [1.10.0]: https://github.com/zales/sys-ink/releases/tag/v1.10.0

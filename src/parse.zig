@@ -135,6 +135,31 @@ pub fn wirelessSignal(content: []const u8, interface: []const u8) ?i32 {
     return null;
 }
 
+/// Where an interface stands when several carry an address. Earlier wins.
+pub const InterfaceRank = enum(u8) {
+    /// Hardware on a cable.
+    wired,
+    wireless,
+    /// Nothing behind it but software: a bridge, a veth pair, a tunnel.
+    virtual,
+};
+
+/// Rank `name`, given whether hardware backs it.
+///
+/// By what the interface is, not by one spelling of its name. The same
+/// Ethernet port is `eth0` under Raspberry Pi OS and `end0` or `enp1s0` under
+/// predictable names, and ranking only the first as wired put Wi-Fi ahead of
+/// the cable on every machine that uses the others. `wl` is the kernel's and
+/// udev's prefix for wireless interfaces.
+///
+/// Whether there is hardware cannot be read off the name, so the caller says.
+/// A Docker bridge carries an address too, and "anything that is not Wi-Fi"
+/// would rank it above the Wi-Fi the machine is actually reached on.
+pub fn interfaceRank(name: []const u8, has_device: bool) InterfaceRank {
+    if (!has_device) return .virtual;
+    return if (std.mem.startsWith(u8, name, "wl")) .wireless else .wired;
+}
+
 pub const NetTotals = struct { rx_bytes: u64, tx_bytes: u64 };
 
 /// One interface line of /proc/net/dev.
@@ -220,6 +245,16 @@ pub fn aptUpgradableCount(stdout: []const u8) u32 {
         count += 1;
     }
     return count;
+}
+
+/// Rate of `bytes` moved over `interval_ms`, which must be positive.
+///
+/// The interval is in milliseconds because it is never a whole number of
+/// seconds: the loop that samples wakes a fraction earlier or later each time.
+/// Counted in seconds, that fraction was charged to the rate — up to a tenth
+/// of it on a ten-second cycle.
+pub fn bytesPerSecond(bytes: u64, interval_ms: i64) f64 {
+    return @as(f64, @floatFromInt(bytes)) * 1000.0 / @as(f64, @floatFromInt(interval_ms));
 }
 
 pub const Scaled = struct { value: f64, unit: []const u8 };
@@ -467,6 +502,33 @@ test "wirelessSignal does not match on a name prefix" {
     // "wlan0" is a prefix of "wlan01" but must not match.
     try testing.expectEqual(@as(?i32, null), wirelessSignal(content, "wlan0"));
     try testing.expectEqual(@as(?i32, -55), wirelessSignal(content, "wlan01"));
+}
+
+test "a cable outranks Wi-Fi whatever the port is called" {
+    // Raspberry Pi OS, Debian on a Pi 5, a PCI card, a USB adapter.
+    for ([_][]const u8{ "eth0", "end0", "enp1s0", "enx00e04c680001" }) |name| {
+        try testing.expectEqual(InterfaceRank.wired, interfaceRank(name, true));
+    }
+    try testing.expectEqual(InterfaceRank.wireless, interfaceRank("wlan0", true));
+    try testing.expectEqual(InterfaceRank.wireless, interfaceRank("wlp2s0", true));
+
+    try testing.expect(@backingInt(InterfaceRank.wired) < @backingInt(InterfaceRank.wireless));
+}
+
+test "an interface with no hardware behind it ranks below Wi-Fi" {
+    // Each of these carries an address on a Docker host, and none of them is
+    // how the machine is reached.
+    for ([_][]const u8{ "docker0", "br-2a6139cb95a1", "veth847c067", "wg0" }) |name| {
+        try testing.expectEqual(InterfaceRank.virtual, interfaceRank(name, false));
+    }
+    try testing.expect(@backingInt(InterfaceRank.wireless) < @backingInt(InterfaceRank.virtual));
+}
+
+test "a rate is taken over the interval as measured, not one rounded to seconds" {
+    try testing.expectEqual(@as(f64, 1000), bytesPerSecond(10_000, 10_000));
+    // 10.9 s used to count as 10, and the same traffic read 9% high.
+    try testing.expectEqual(@as(f64, 1000), bytesPerSecond(10_900, 10_900));
+    try testing.expectEqual(@as(f64, 2000), bytesPerSecond(1_000, 500));
 }
 
 test "netDevTotals sums interfaces and skips loopback" {
