@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- With a cable and Wi-Fi both connected, the panel showed the Wi-Fi address
+  wherever the Ethernet port is not called `eth0`: `end0` on Debian and Ubuntu
+  images for the Pi 5, `enp*` on most other machines. Interfaces are now ranked
+  by what they are — hardware on a cable, then Wi-Fi, then bridges and
+  tunnels — instead of by two names. Nothing changes where the port is `eth0`.
+
 ## [1.10.2] — 2026-10-04
 
 ### Changed

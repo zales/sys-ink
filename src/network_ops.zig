@@ -102,7 +102,8 @@ pub const NetworkOps = struct {
         return self.last_signal;
     }
 
-    /// IPv4 address of the first usable interface, preferring eth0 then wlan0.
+    /// IPv4 address of the interface the machine is reached on: a cable before
+    /// Wi-Fi, and either before anything with no hardware behind it.
     ///
     /// One walk of the interface list rather than one per candidate. This used
     /// to call `getifaddrs` up to three times — once for eth0, once for wlan0,
@@ -118,9 +119,8 @@ pub const NetworkOps = struct {
         if (c.getifaddrs(&ifap) != 0) return error.GetifaddrsFailed;
         defer c.freeifaddrs(ifap);
 
-        // Lower rank wins; `no_match` means nothing usable has been seen yet.
-        const no_match = std.math.maxInt(u8);
-        var best_rank: u8 = no_match;
+        // Null means nothing usable has been seen yet.
+        var best_rank: ?parse.InterfaceRank = null;
         var best_len: usize = 0;
         var best_wired = false;
 
@@ -129,18 +129,17 @@ pub const NetworkOps = struct {
             const name = std.mem.span(ifa.ifa_name);
             if (std.mem.eql(u8, name, "lo")) continue;
 
-            const rank: u8 = if (std.mem.eql(u8, name, "eth0"))
-                0
-            else if (std.mem.eql(u8, name, "wlan0"))
-                1
-            else
-                2;
-
-            // Ties go to the earlier entry, matching the old first-match order.
-            if (rank >= best_rank) continue;
-
+            // Before ranking: the list holds an entry per address family, and
+            // only the IPv4 one is worth a look into sysfs.
             const addr = ifa.ifa_addr orelse continue;
             if (addr.*.sa_family != c.AF_INET) continue;
+
+            const rank = parse.interfaceRank(name, hasDevice(self.io, name));
+
+            // Ties go to the earlier entry, matching the old first-match order.
+            if (best_rank) |best| {
+                if (@backingInt(rank) >= @backingInt(best)) continue;
+            }
 
             const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr));
             // inet_ntoa's buffer is static and reused, so copy it out now.
@@ -152,10 +151,10 @@ pub const NetworkOps = struct {
             best_len = ip.len;
             best_wired = !std.mem.startsWith(u8, name, "wl");
 
-            if (rank == 0) break; // nothing outranks eth0
+            if (rank == .wired) break; // nothing outranks a cable
         }
 
-        if (best_rank == no_match) return null;
+        if (best_rank == null) return null;
 
         // Kept for MQTT, which publishes the address the panel is showing rather
         // than walking the interface list a second time.
@@ -166,6 +165,15 @@ pub const NetworkOps = struct {
         return buf[0..best_len];
     }
 };
+
+/// Whether hardware backs the interface, which shows as a `device` link in
+/// sysfs. Bridges, veth pairs and tunnels have none.
+fn hasDevice(io: std.Io, name: []const u8) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.mem.print(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    return true;
+}
 
 /// Traffic monitor for tracking network traffic
 pub const TrafficMonitor = struct {
@@ -250,19 +258,15 @@ pub const TrafficMonitor = struct {
         return self.currentResult();
     }
 
-    /// Accepts interfaces backed by hardware, which have a `device` link in
-    /// sysfs. Bridges, veth pairs and tunnels have none, and each of them
-    /// carries bytes a physical interface also counts: container traffic
-    /// crosses a veth, the Docker bridge and eth0, and summing all three
-    /// reported it three times over.
+    /// Accepts interfaces backed by hardware. Bridges, veth pairs and tunnels
+    /// are not, and each of them carries bytes a physical interface also
+    /// counts: container traffic crosses a veth, the Docker bridge and eth0,
+    /// and summing all three reported it three times over.
     const Physical = struct {
         io: std.Io,
 
         pub fn counts(self: Physical, name: []const u8) bool {
-            var path_buf: [64]u8 = undefined;
-            const path = std.mem.print(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
-            std.Io.Dir.accessAbsolute(self.io, path, .{}) catch return false;
-            return true;
+            return hasDevice(self.io, name);
         }
     };
 
