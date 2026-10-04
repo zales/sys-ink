@@ -22,11 +22,13 @@ const std = @import("std");
 /// Error code carried by a raw syscall return, or `.SUCCESS`.
 ///
 /// Kernel convention: values in [-4095, -1] are negated error codes, anything
-/// else is a successful result.
+/// else is a successful result. That is what `std.os.linux.errno` reads, and
+/// it is std's own here rather than a copy of it. It keeps a name in this
+/// module so that a call site reaches for this and not for `std.posix.errno`,
+/// and takes only what a raw syscall returns; the tests below hold std to the
+/// convention.
 pub fn errno(rc: usize) std.os.linux.E {
-    const signed: isize = @bitCast(rc);
-    const code = if (signed > -4096 and signed < 0) -signed else 0;
-    return @fromBackingInt(@intCast(code));
+    return std.os.linux.errno(rc);
 }
 
 /// Whether a raw syscall succeeded.
