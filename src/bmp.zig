@@ -25,25 +25,55 @@ pub const BmpExporter = struct {
             if (hash == last) return;
         }
 
-        const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch |err| blk: {
+        var written = path;
+        writeFile(io, path, buffer, width, height) catch |err| {
             // A read-only or missing directory is a common misconfiguration;
             // fall back to /tmp rather than losing the export entirely.
             if (std.mem.startsWith(u8, path, "/tmp")) return err;
 
             const fallback = "/tmp/sys-ink.bmp";
-            log.warn("Failed to create {s}: {t}, falling back to {s}", .{ path, err, fallback });
-            break :blk try std.Io.Dir.createFileAbsolute(io, fallback, .{});
+            log.warn("Failed to write {s}: {t}, falling back to {s}", .{ path, err, fallback });
+            try writeFile(io, fallback, buffer, width, height);
+            written = fallback;
         };
-        defer file.close(io);
-
-        try writeBmp(io, file, buffer, width, height);
 
         // Only remember the frame once it actually reached disk, so a failed
         // write does not suppress the next identical export.
         self.last_hash = hash;
-        log.debug("BMP exported to {s}", .{path});
+        log.debug("BMP exported to {s}", .{written});
     }
 };
+
+/// Put the image at `path` so that a reader finds the old frame or the new
+/// one, never part of one.
+///
+/// The export exists to be read by something else — a web server pointed at
+/// its directory — and written in place it was empty for a moment and cut
+/// short for another, every time the panel changed. Built beside the
+/// destination under a name of its own and renamed over it, the file changes
+/// in a single step.
+///
+/// That takes a directory the daemon may create in and a destination that can
+/// be replaced, which a file bind-mounted into a container cannot. Where
+/// either is missing the image is written in place, as it always was.
+fn writeFile(io: std.Io, path: []const u8, buffer: []const u8, width: u32, height: u32) !void {
+    replaceFile(io, path, buffer, width, height) catch |err| {
+        log.debug("Cannot replace {s} in one step: {t}; writing in place", .{ path, err });
+
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer file.close(io);
+        try writeBmp(io, file, buffer, width, height);
+    };
+}
+
+fn replaceFile(io: std.Io, path: []const u8, buffer: []const u8, width: u32, height: u32) !void {
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+    // Removes the temporary file if the rename below was never reached.
+    defer atomic.deinit(io);
+
+    try writeBmp(io, atomic.file, buffer, width, height);
+    try atomic.replace(io);
+}
 
 /// Build the 62-byte BITMAPINFOHEADER BMP header for a 1-bit image.
 pub fn buildHeader(width: u32, height: u32) [header_len]u8 {
@@ -215,6 +245,48 @@ test "serialize matches what the file writer produces" {
         packRow(row[0..stride], &frame, y, src_row_bytes);
         try testing.expectEqualSlices(u8, row[0..stride], bytes[header_len + y * stride ..][0..stride]);
     }
+}
+
+test "an export replaces the file instead of rewriting it" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/panel.bmp", .{dir_buf[0..dir_len]});
+
+    const width = 16;
+    const height = 2;
+    const first: [4]u8 = @splat(0xFF);
+    const second: [4]u8 = @splat(0x00);
+
+    var exporter = BmpExporter.init();
+    try exporter.save(testing.io, &first, width, height, path);
+
+    // Someone reading the export, caught with it open as the next frame lands.
+    const reader = try tmp.dir.openFile(testing.io, "panel.bmp", .{});
+    defer reader.close(testing.io);
+
+    try exporter.save(testing.io, &second, width, height, path);
+
+    // Written in place, the file under the reader would by now be the second
+    // frame, and for a moment before that an empty one.
+    var expected_buf: [byteSize(width, height)]u8 = undefined;
+    var held: [byteSize(width, height) + 1]u8 = undefined;
+    const held_len = try reader.readPositionalAll(testing.io, &held, 0);
+    try testing.expectEqualSlices(u8, try serialize(&expected_buf, &first, width, height), held[0..held_len]);
+
+    // The name leads to the new frame.
+    var current: [byteSize(width, height) + 1]u8 = undefined;
+    const now = try tmp.dir.readFile(testing.io, "panel.bmp", &current);
+    try testing.expectEqualSlices(u8, try serialize(&expected_buf, &second, width, height), now);
+
+    // And the file it was built in is gone.
+    var entries: usize = 0;
+    var it = tmp.dir.iterate();
+    while (try it.next(testing.io)) |_| entries += 1;
+    try testing.expectEqual(@as(usize, 1), entries);
 }
 
 test "serialize rejects a destination that is too small" {

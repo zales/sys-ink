@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   images for the Pi 5, `enp*` on most other machines. Interfaces are now ranked
   by what they are — hardware on a cable, then Wi-Fi, then bridges and
   tunnels — instead of by two names. Nothing changes where the port is `eth0`.
+- The exported BMP is replaced in one step rather than emptied and rewritten,
+  so a web server reading `BMP_EXPORT_PATH` no longer catches an empty or
+  half-written image as the panel changes. Where the directory cannot be
+  written to, the file is still written in place.
 
 ## [1.10.2] — 2026-10-04
 
