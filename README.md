@@ -741,8 +741,9 @@ how, and what to check if your entity IDs differ.
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently, in 1.8.0, the Home Assistant discovery identity following
-`MQTT_CLIENT_ID`, which matters only if you changed it from the default.
+top — most recently, in 1.10.1, Zig 0.17.0 for building from source, and in
+1.8.0 the Home Assistant discovery identity following `MQTT_CLIENT_ID`, which
+matters only if you changed it from the default.
 
 ## License
 

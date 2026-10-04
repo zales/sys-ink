@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
-| Unreleased | Requires Zig 0.17.0 to build, and network access on the first build to fetch the translate-c package. | Only affects building from source. `-Doptimize=ReleaseSafe` still works, as a deprecated spelling of `-Doptimize=safe`. |
+| 1.10.1 | Requires Zig 0.17.0 to build, and network access on the first build to fetch the translate-c package. | Only affects building from source. `-Doptimize=ReleaseSafe` still works, as a deprecated spelling of `-Doptimize=safe`. |
 | 1.8.0 | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
 | 1.8.0 | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
 | 1.5.0 | Network rates became decimal: `kB` now means 1000 bytes, matching the label. Earlier releases divided by 1024. | Displayed and MQTT-published rates read 2.4% higher for the same throughput. Nothing to do unless you have alerts on absolute values. |
@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+## [1.10.1] — 2026-10-04
 
 ### Changed
 - **Built with Zig 0.17.0.** `@cImport` is gone from the language, so the libc
@@ -416,6 +418,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.10.1]: https://github.com/zales/sys-ink/releases/tag/v1.10.1
 [1.10.0]: https://github.com/zales/sys-ink/releases/tag/v1.10.0
 [1.9.0]: https://github.com/zales/sys-ink/releases/tag/v1.9.0
 [1.8.0]: https://github.com/zales/sys-ink/releases/tag/v1.8.0

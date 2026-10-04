@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: SysInk HTTP API
-  version: 1.10.0
+  version: 1.10.1
   summary: Readings from a SysInk panel, and notices onto it.
   description: |
     Served by the daemon beside the panel preview when `WEB_PREVIEW=true`.
