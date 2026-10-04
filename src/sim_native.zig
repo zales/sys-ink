@@ -1,8 +1,8 @@
 //! Native macOS window showing the rendered panel.
 //!
-//! The renderer is generic over its transport, so the whole drawing path runs on
-//! a development machine against the recorder. This puts the resulting frame in
-//! an NSWindow and refreshes it, with no server and no browser in between.
+//! The renderer needs no panel, so the whole drawing path runs on a development
+//! machine as it is. This puts the resulting frame in an NSWindow and refreshes
+//! it, with no server and no browser in between.
 //!
 //!     zig build sim
 //!
@@ -19,7 +19,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sim_frame = @import("sim_frame.zig");
-const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
 
 comptime {
     if (builtin.target.os.tag != .macos) {
@@ -108,12 +107,8 @@ pub fn main(init: std.process.Init) !u8 {
     const setup_pool = newAutoreleasePool();
     defer _ = send(Msg.Void, setup_pool, "drain", .{});
 
-    var transport = FakeTransport.init(allocator);
-    defer transport.deinit();
-
-    var renderer = try sim_frame.SimRenderer.init(allocator, io, &transport);
+    var renderer = try sim_frame.Renderer.init(allocator);
     defer renderer.deinit();
-    try renderer.startup();
     renderer.renderGrid();
 
     const view_width = sim_frame.width * scale;
@@ -169,10 +164,6 @@ pub fn main(init: std.process.Init) !u8 {
         const now = std.Io.Timestamp.now(io, .awake);
         const seconds = now.toSeconds();
         sim_frame.draw(&renderer, @floatFromInt(seconds), @intCast(seconds - started));
-        // The transport is a recorder with an unbounded log: without this it
-        // keeps a heap copy of every frame ever sent.
-        transport.resetLog();
-        try renderer.updateDisplay(true);
 
         sim_frame.expand(renderer.packedFrame(), pixels, scale);
 

@@ -58,9 +58,10 @@ You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_6
 ### Tests
 
 Parsing, layout, rendering, the panel driver, the MQTT protocol and the HTTP
-API's request reading, routing and token check are covered by unit tests that run on any host — the driver and renderer are generic over
-their transport, so their command sequences are checked against a recorder
-rather than a panel:
+API's request reading, routing and token check are covered by unit tests that run on any host — the renderer needs no hardware at all, and
+the driver and the panel state machine above it are generic over their
+transport, so their command sequences are checked against a recorder rather
+than a panel:
 
 ```bash
 zig build test --summary all
@@ -90,9 +91,9 @@ zig build golden
 ### Panel simulator
 
 The daemon itself only runs on Linux, but the whole rendering path is host-
-independent: the renderer is generic over its transport, which is what the
-golden test already relies on. The simulator drives that same path against the
-recorder and shows the result, so layout work needs no hardware:
+independent: the renderer only produces frames and never touches the panel,
+which is what the golden test already relies on. The simulator runs that same
+renderer and shows the result, so layout work needs no hardware:
 
 ```bash
 zig build sim
@@ -128,6 +129,9 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/scheduler.zig`: Monotonic-clock task scheduler for periodic updates.
 - `src/parse.zig`: I/O-free parsers for procfs/sysfs and command output (unit tested).
 - `src/display_renderer.zig`: High-level rendering logic (text, icons, fault overlay).
+  Produces frames; knows nothing of the hardware.
+- `src/panel.zig`: Puts frames on the glass: partial or full refresh, deep
+  sleep between updates, and the reference frame partial updates diff against.
 - `src/display_config.zig`: Layout constants and configuration.
 - `src/graphics.zig`: Bitmap drawing primitives and text rendering.
 - `src/font_data.zig`: Generated static glyph tables.
@@ -145,7 +149,8 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging.
 - `src/waveshare_epd/`: Low-level driver for the e-Paper display, generic over its
-  transport; `fake_transport.zig` is the recorder the tests drive it with.
+  transport; `fake_transport.zig` is the recorder the tests drive it and
+  `src/panel.zig` with.
 - `src/syscall.zig`: Interpreting raw Linux syscall returns (see the module comment).
 - `src/tests.zig`, `src/golden_gen.zig`: test root and the golden-frame generator.
 - `src/web_preview.zig`: optional HTTP view of the current frame and the API,

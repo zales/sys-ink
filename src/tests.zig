@@ -9,9 +9,9 @@
 //! need no hardware: their tests run against a real pipe and a real loopback
 //! socket, on Linux — which is where CI runs — and are left out elsewhere.
 //!
-//! The panel driver and the renderer are here despite talking to hardware: both
-//! are generic over the transport, so command sequences and the rendered frame
-//! are asserted against a recorder.
+//! The panel driver and the state machine above it are here despite talking to
+//! hardware: both are generic over the transport, so their command sequences
+//! are asserted against a recorder. The renderer needs neither.
 
 const builtin = @import("builtin");
 
@@ -27,6 +27,7 @@ test {
     _ = @import("bmp.zig");
     _ = @import("mqtt.zig");
     _ = @import("waveshare_epd/epd2in9.zig");
+    _ = @import("panel.zig");
     _ = @import("display_renderer.zig");
     _ = @import("sim_frame.zig");
     _ = @import("frame_server.zig");

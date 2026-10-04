@@ -1,7 +1,7 @@
 //! Panel simulator served over HTTP, for hosts without a native window.
 //!
 //! Runs the exact rendering path the daemon runs — same renderer, same fonts,
-//! same layout constants, same fault overlay — against the fake transport, and
+//! same layout constants, same fault overlay — with no panel behind it, and
 //! serves the frame as a BMP with a small page that refreshes it. What gets
 //! drawn lives in `sim_frame.zig`; on macOS `sim_native.zig` shows the same
 //! thing in a real window.
@@ -13,7 +13,6 @@ const std = @import("std");
 const sim_frame = @import("sim_frame.zig");
 const bmp = @import("bmp.zig");
 const frame_server = @import("frame_server.zig");
-const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
 
 const port = 8390;
 
@@ -21,12 +20,8 @@ pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    var transport = FakeTransport.init(allocator);
-    defer transport.deinit();
-
-    var renderer = try sim_frame.SimRenderer.init(allocator, io, &transport);
+    var renderer = try sim_frame.Renderer.init(allocator);
     defer renderer.deinit();
-    try renderer.startup();
     renderer.renderGrid();
 
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
@@ -48,14 +43,6 @@ pub fn main(init: std.process.Init) !u8 {
             .frame => {
                 const now = std.Io.Timestamp.now(io, .awake).toSeconds();
                 sim_frame.draw(&renderer, @floatFromInt(now), @intCast(now - started));
-
-                // The transport is a recorder with an unbounded log: without this
-                // it keeps a heap copy of every frame ever sent.
-                transport.resetLog();
-                renderer.updateDisplay(true) catch {
-                    frame_server.respond(stream, io, "500 Internal Server Error", "text/plain", "render failed\n");
-                    continue;
-                };
 
                 // Straight from the renderer's packed frame: no file, no allocation.
                 frame_server.respondFrame(stream, io, &image, renderer.packedFrame(), sim_frame.width, sim_frame.height);

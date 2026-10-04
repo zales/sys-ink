@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The renderer no longer drives the panel. Deciding between a partial and a
+  full refresh, parking the controller in deep sleep and restoring the
+  reference frame on waking moved to the new `src/panel.zig`; the renderer only
+  produces frames, and is no longer generic over a transport. The simulators
+  and the golden frame run it as it is, without a recorder standing in for
+  hardware. What reaches the panel is unchanged, byte for byte.
+
 ## [1.10.1] — 2026-10-04
 
 ### Changed

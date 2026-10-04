@@ -1,16 +1,11 @@
 const std = @import("std");
-const epd2in9 = @import("waveshare_epd/epd2in9.zig");
-const Frame = epd2in9.Frame;
-const EpdConfig = @import("waveshare_epd/epdconfig.zig").EpdConfig;
+const Frame = @import("waveshare_epd/epd2in9.zig").Frame;
 const display_config = @import("display_config.zig");
 const config = @import("config.zig");
 const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
-const BmpExporter = @import("bmp.zig").BmpExporter;
 const notice_text = @import("notice.zig");
-
-const log = std.log.scoped(.display);
 
 /// Bytes per hardware row after the 90° rotation.
 const hw_bytes_per_row = display_config.DISPLAY_HEIGHT / 8;
@@ -23,872 +18,665 @@ comptime {
     std.debug.assert(@sizeOf(Frame) == hw_bytes_per_row * display_config.DISPLAY_WIDTH);
 }
 
-/// Drives the panel from a Bitmap, parameterised by the transport underneath so
-/// tests can render and drive the whole state machine without hardware.
-/// `DisplayRenderer` below is the production instance.
-pub fn Renderer(comptime Transport: type) type {
-    return struct {
-        const Self = @This();
-        /// Public so a caller that constructs a renderer at its final address can
-        /// re-point `epd`, which holds a pointer to the transport.
-        pub const EPD = epd2in9.Epd(Transport);
+/// Draws what the panel shows and hands it over as a frame.
+///
+/// It knows nothing of the panel beyond the format of that frame: no transport
+/// and no I/O. Getting the frame onto the glass is `panel.zig`'s business, which
+/// is what lets the tests, the golden frame and the simulators run this on any
+/// host with nothing standing in for the hardware.
+pub const Renderer = struct {
+    const Self = @This();
 
-        bitmap: Bitmap,
-        /// The notice screen, drawn apart from the dashboard so that the
-        /// dashboard's slots keep updating underneath it and reappear intact
-        /// once it is dismissed.
-        notice: Bitmap,
-        /// Whether the panel shows `notice` rather than `bitmap`.
-        notice_shown: bool = false,
-        epd: EPD,
-        epd_buffer: *Frame,
-        last_epd_buffer: *Frame,
-        /// Scratch buffer for BMP export, kept around so exporting does not allocate.
-        bmp_buffer: []u8,
-        has_last_epd_buffer: bool = false,
-        /// True while the panel controller sits in deep sleep.
-        panel_asleep: bool = false,
-        /// Draws the status bar inverted, signalling a hardware fault. Driven by the
-        /// daemon as the OR of every fault source (under-voltage, NVMe SMART), so
-        /// the bar clears only when all of them have.
-        warn_fault: bool = false,
-        /// Set when an update failed partway through, leaving the panel content
-        /// unknown. The next update must be a full refresh, because a partial one
-        /// would diff against a reference that no longer matches the glass.
-        panel_state_unknown: bool = false,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        bmp_exporter: BmpExporter,
-        grid_cached: bool = false,
+    bitmap: Bitmap,
+    /// The notice screen, drawn apart from the dashboard so that the
+    /// dashboard's slots keep updating underneath it and reappear intact
+    /// once it is dismissed.
+    notice: Bitmap,
+    /// Whether the panel shows `notice` rather than `bitmap`.
+    notice_shown: bool = false,
+    /// The frame as `panelFrame` hands it over: 128x296 portrait, 4736 bytes.
+    panel_buffer: *Frame,
+    /// The frame as `packedFrame` hands it over. Both are kept around so
+    /// that producing a frame does not allocate.
+    bmp_buffer: []u8,
+    /// Draws the status bar inverted, signalling a hardware fault. Driven by the
+    /// daemon as the OR of every fault source (under-voltage, NVMe SMART), so
+    /// the bar clears only when all of them have.
+    warn_fault: bool = false,
+    allocator: std.mem.Allocator,
+    grid_cached: bool = false,
 
-        /// `transport` is borrowed, not owned: the caller outlives the renderer and
-        /// is responsible for tearing it down. It used to be heap-allocated here
-        /// purely because this function returns by value and EPD holds a pointer to
-        /// it, which would have dangled.
-        pub fn init(allocator: std.mem.Allocator, io: std.Io, transport: *Transport) !Self {
-            var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
-            errdefer bitmap.deinit();
-            var notice = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
-            errdefer notice.deinit();
+    pub fn init(allocator: std.mem.Allocator) !Self {
+        var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        errdefer bitmap.deinit();
+        var notice = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        errdefer notice.deinit();
 
-            // Buffers for EPD (128x296 portrait = 4736 bytes each)
-            const epd_buffer = try allocator.create(Frame);
-            errdefer allocator.destroy(epd_buffer);
-            const last_epd_buffer = try allocator.create(Frame);
-            errdefer allocator.destroy(last_epd_buffer);
+        const panel_buffer = try allocator.create(Frame);
+        errdefer allocator.destroy(panel_buffer);
 
-            const bmp_row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
-            const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
+        const bmp_row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
+        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
 
-            return .{
-                .bitmap = bitmap,
-                .notice = notice,
-                .epd = EPD.init(transport),
-                .epd_buffer = epd_buffer,
-                .last_epd_buffer = last_epd_buffer,
-                .bmp_buffer = bmp_buffer,
-                .allocator = allocator,
-                .io = io,
-                .bmp_exporter = BmpExporter.init(),
-            };
+        return .{
+            .bitmap = bitmap,
+            .notice = notice,
+            .panel_buffer = panel_buffer,
+            .bmp_buffer = bmp_buffer,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.bitmap.deinit();
+        self.notice.deinit();
+        self.allocator.free(self.bmp_buffer);
+        self.allocator.destroy(self.panel_buffer);
+    }
+
+    /// Draw the transient loading screen, shown while metrics initialize.
+    pub fn drawLoadingScreen(self: *Self) void {
+        self.drawSplash("Loading...", .White);
+    }
+
+    /// Draw the sleep screen, the last thing the panel shows.
+    pub fn drawSleepScreen(self: *Self) void {
+        self.drawSplash("Sleeping...", .Black);
+    }
+
+    /// Draw the full-screen splash used by the loading and sleep screens.
+    /// `background` is the page colour; text and rules are drawn inverted to it.
+    ///
+    /// A splash takes over the whole screen. It comes up in place of a
+    /// notice, and it has no status bar, so the fault warning is dropped
+    /// along with it; the daemon sets that again with its next reading.
+    fn drawSplash(self: *Self, subtitle: []const u8, background: Graphics.Color) void {
+        const ink: Graphics.Color = if (background == .White) .Black else .White;
+
+        self.notice_shown = false;
+        self.warn_fault = false;
+
+        self.bitmap.clear(background);
+        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, ink);
+        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, subtitle, .Ubuntu14, ink);
+    }
+
+    /// Render grid layout
+    pub fn renderGrid(self: *Self) void {
+        if (self.grid_cached) return;
+
+        self.bitmap.clear(.White);
+
+        // Draw vertical divider lines
+        self.bitmap.drawLine(display_config.VERTICAL_LINE_1, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_1, display_config.HORIZONTAL_LINE_MAIN, .Black);
+        self.bitmap.drawLine(display_config.VERTICAL_LINE_2, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_2, display_config.HORIZONTAL_LINE_MAIN, .Black);
+
+        // Draw main horizontal divider
+        self.bitmap.drawLine(0, display_config.HORIZONTAL_LINE_MAIN, display_config.DISPLAY_WIDTH, display_config.HORIZONTAL_LINE_MAIN, .Black);
+
+        // CPU section
+        self.bitmap.drawLine(26, display_config.CPU_LINE_Y, 99, display_config.CPU_LINE_Y, .Black);
+        self.bitmap.drawTextFont(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, .Black);
+        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, .Black);
+        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
+
+        // APT section
+        self.bitmap.drawTextFont(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, .Black);
+        self.bitmap.drawLine(226, display_config.APT_LINE_Y, 248, display_config.APT_LINE_Y, .Black);
+
+        // NET section
+        self.bitmap.drawTextFont(display_config.NET_LABEL_X, display_config.NET_LABEL_Y, "net", .Ubuntu14, .Black);
+        self.bitmap.drawLine(display_config.NET_LINE_X, display_config.NET_LINE_Y, display_config.NET_LINE_X, display_config.HORIZONTAL_LINE_MAIN, .Black);
+        self.bitmap.drawLine(272, display_config.NET_LINE_Y, display_config.DISPLAY_WIDTH, display_config.NET_LINE_Y, .Black);
+
+        // MEM section
+        self.bitmap.drawTextFont(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, .Black);
+        self.bitmap.drawLine(38, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, .Black);
+
+        // Disk section
+        self.bitmap.drawTextFont(display_config.DISK_LABEL_X, display_config.DISK_LABEL_Y, "disk", .Ubuntu14, .Black);
+        self.bitmap.drawLine(130, display_config.DISK_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.DISK_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
+        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
+
+        // FAN section
+        self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
+        // Stops short of the "rpm" that renderFanSpeed draws at its end.
+        self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.FAN_LINE_END_X, display_config.FAN_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
+
+        // Traffic section
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_LABEL_X, display_config.TRAFFIC_DOWN_LABEL_Y, "down", .Ubuntu14, .Black);
+        self.bitmap.drawLine(242, display_config.TRAFFIC_DOWN_LINE_Y, 261, display_config.TRAFFIC_DOWN_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_ICON_X, display_config.TRAFFIC_DOWN_ICON_Y, display_config.ICON_DOWNLOAD, .Material24, .Black);
+
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_LABEL_X, display_config.TRAFFIC_UP_LABEL_Y, "up", .Ubuntu14, .Black);
+        self.bitmap.drawLine(222, display_config.TRAFFIC_UP_LINE_Y, 261, display_config.TRAFFIC_UP_LINE_Y, .Black);
+        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_ICON_X, display_config.TRAFFIC_UP_ICON_Y, display_config.ICON_UPLOAD, .Material24, .Black);
+
+        // Status bar icons
+        self.bitmap.drawTextFont(display_config.IP_ICON_X, display_config.IP_ICON_Y, display_config.ICON_NETWORK, .Material14, .Black);
+        self.bitmap.drawTextFont(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, .Black);
+
+        self.grid_cached = true;
+    }
+
+    /// Simple unified text rendering in a defined area with optional inversion
+    fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
+        // Clear the area
+        self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
+
+        // Draw text
+        self.bitmap.drawTextFont(text_x, text_y, text, font, .Black);
+
+        // Invert if critical
+        if (invert) {
+            self.bitmap.invertRect(area_x, area_y, area_w, area_h);
+        }
+    }
+
+    /// Show or clear the hardware-fault warning: the status bar is drawn inverted.
+    pub fn setFaultWarning(self: *Self, active: bool) void {
+        self.warn_fault = active;
+    }
+
+    /// Put a notice on the panel in place of the dashboard, from the next
+    /// update until `clearNotice`.
+    ///
+    /// The fonts cover ASCII only, so the text is folded to it first, and it
+    /// is set in the largest font it fits. What does not fit even the
+    /// smallest is cut off with an ellipsis.
+    pub fn showNotice(self: *Self, text: []const u8) void {
+        const b = &self.notice;
+        b.clear(.White);
+
+        b.drawTextFont(display_config.NOTICE_LABEL_X, display_config.NOTICE_LABEL_Y, display_config.NOTICE_LABEL, .Ubuntu14, .Black);
+        const rule_x: i32 = @intCast(display_config.NOTICE_LABEL_X + b.measureText(display_config.NOTICE_LABEL, .Ubuntu14) + 3);
+        b.drawLine(rule_x, display_config.NOTICE_LINE_Y, display_config.DISPLAY_WIDTH - 1, display_config.NOTICE_LINE_Y, .Black);
+
+        var folded_buf: [notice_text.max_len]u8 = undefined;
+        const folded = notice_text.foldToAscii(&folded_buf, text);
+
+        var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+        var last_buf: [notice_text.max_len + 3]u8 = undefined;
+        const layout = self.layoutNotice(folded, &lines, &last_buf);
+
+        // The block is centred vertically in the body, left-aligned.
+        const line_h = b.getLineHeight(layout.font);
+        const block_h = line_h * @as(u32, @intCast(layout.count));
+        var baseline: i32 = display_config.NOTICE_BODY_Y +
+            @as(i32, @intCast((display_config.NOTICE_BODY_H - block_h) / 2)) +
+            b.getFontAscent(layout.font);
+
+        for (lines[0..layout.count]) |line| {
+            b.drawTextFont(display_config.NOTICE_BODY_X, baseline, line, layout.font, .Black);
+            baseline += @intCast(line_h);
         }
 
-        pub fn deinit(self: *Self) void {
-            self.bitmap.deinit();
-            self.notice.deinit();
-            self.allocator.free(self.bmp_buffer);
-            self.allocator.destroy(self.last_epd_buffer);
-            self.allocator.destroy(self.epd_buffer);
+        self.notice_shown = true;
+    }
+
+    /// Go back to the dashboard.
+    pub fn clearNotice(self: *Self) void {
+        self.notice_shown = false;
+    }
+
+    const NoticeLayout = struct {
+        font: FontType,
+        count: usize,
+    };
+
+    /// Wrap `text` into `lines` in the largest notice font that holds all of
+    /// it. Failing that, the smallest font's lines as far as they go, the last
+    /// rebuilt in `last_buf` to end in an ellipsis.
+    fn layoutNotice(self: *Self, text: []const u8, lines: *[display_config.NOTICE_MAX_LINES][]const u8, last_buf: []u8) NoticeLayout {
+        const b = &self.notice;
+        const width = display_config.NOTICE_BODY_W;
+
+        var max: usize = 0;
+        for (display_config.NOTICE_FONTS) |font| {
+            max = @min(lines.len, display_config.NOTICE_BODY_H / b.getLineHeight(font));
+            const needed = b.wrapText(text, font, width, lines[0..max]);
+            if (needed <= max) return .{ .font = font, .count = needed };
         }
 
-        /// Initialize display
-        pub fn startup(self: *Self) !void {
-            try self.epd.initDisplay();
-            try self.epd.clear(0xFF);
+        // The loop left the smallest font's lines in place.
+        const font = display_config.NOTICE_FONTS[display_config.NOTICE_FONTS.len - 1];
+        const ellipsis = "...";
+
+        var last = lines[max - 1];
+        while (true) {
+            last = std.mem.trimEnd(u8, last, " ");
+            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
+            // A whole codepoint at a time: the degree sign survives folding
+            // and is two bytes, and half of it would eat the ellipsis.
+            var cut = last.len - 1;
+            while (cut > 0 and last[cut] & 0xC0 == 0x80) cut -= 1;
+            last = last[0..cut];
         }
+        @memcpy(last_buf[0..last.len], last);
+        @memcpy(last_buf[last.len..][0..ellipsis.len], ellipsis);
+        lines[max - 1] = last_buf[0 .. last.len + ellipsis.len];
 
-        /// Show a transient loading screen while metrics initialize
-        pub fn showLoading(self: *Self) !void {
-            self.notice_shown = false;
-            self.drawSplash("Loading...", .White);
+        return .{ .font = font, .count = max };
+    }
 
-            self.convertTo1Bit(self.epd_buffer);
-            try self.epd.display(self.epd_buffer);
+    /// What the panel shows: the notice while there is one, else the dashboard.
+    fn frameBitmap(self: *Self) *Bitmap {
+        return if (self.notice_shown) &self.notice else &self.bitmap;
+    }
 
-            self.exportBmp() catch |err| {
-                log.err("Failed to export loading BMP: {t}", .{err});
-            };
-        }
+    /// On whatever is shown: a notice can stay up for a day, and a hardware
+    /// fault must not wait that long to be seen.
+    fn invertStatusBar(self: *Self) void {
+        self.frameBitmap().invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
+    }
 
-        /// Draw the full-screen splash used by the loading and sleep screens.
-        /// `background` is the page colour; text and rules are drawn inverted to it.
-        fn drawSplash(self: *Self, subtitle: []const u8, background: Graphics.Color) void {
-            const ink: Graphics.Color = if (background == .White) .Black else .White;
+    /// Toggle the fault overlay on the frame being shown. Its own inverse, so a
+    /// paired call restores it.
+    ///
+    /// Not drawn into the layout, because the status bar's three slots are each
+    /// redrawn by their own scheduled task and any of them would erase part of it.
+    /// Call it around everything that reads the bitmap — the panel's frame and
+    /// the unrotated one both — or the preview disagrees with the glass.
+    fn toggleFaultOverlay(self: *Self) void {
+        if (self.warn_fault) self.invertStatusBar();
+    }
 
-            self.bitmap.clear(background);
-            self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, ink);
-            self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, ink);
-            self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, ink);
-            self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, subtitle, .Ubuntu14, ink);
-        }
+    /// The current frame in the panel's own format, fault overlay included:
+    /// rotated 90° and packed to 1 bit. Borrowed: valid until the next call.
+    pub fn panelFrame(self: *Self) *const Frame {
+        if (display_config.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
 
-        /// Render grid layout
-        pub fn renderGrid(self: *Self) void {
-            if (self.grid_cached) return;
+        self.toggleFaultOverlay();
+        defer self.toggleFaultOverlay();
 
-            self.bitmap.clear(.White);
+        self.convertTo1Bit(self.panel_buffer);
+        return self.panel_buffer;
+    }
 
-            // Draw vertical divider lines
-            self.bitmap.drawLine(display_config.VERTICAL_LINE_1, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_1, display_config.HORIZONTAL_LINE_MAIN, .Black);
-            self.bitmap.drawLine(display_config.VERTICAL_LINE_2, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_2, display_config.HORIZONTAL_LINE_MAIN, .Black);
+    /// The same frame the right way up, for whoever shows it rather than
+    /// sending it to the panel: the web preview, the BMP export and the
+    /// simulators. Borrowed: valid until the next call.
+    pub fn packedFrame(self: *Self) []const u8 {
+        if (display_config.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
 
-            // Draw main horizontal divider
-            self.bitmap.drawLine(0, display_config.HORIZONTAL_LINE_MAIN, display_config.DISPLAY_WIDTH, display_config.HORIZONTAL_LINE_MAIN, .Black);
+        self.toggleFaultOverlay();
+        defer self.toggleFaultOverlay();
 
-            // CPU section
-            self.bitmap.drawLine(26, display_config.CPU_LINE_Y, 99, display_config.CPU_LINE_Y, .Black);
-            self.bitmap.drawTextFont(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, .Black);
-            self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, .Black);
-            self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
+        self.packBmpBuffer();
+        return self.bmp_buffer;
+    }
 
-            // APT section
-            self.bitmap.drawTextFont(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, .Black);
-            self.bitmap.drawLine(226, display_config.APT_LINE_Y, 248, display_config.APT_LINE_Y, .Black);
+    fn drawTextAreaFrames(self: *Self) void {
+        const color: Graphics.Color = .Black;
 
-            // NET section
-            self.bitmap.drawTextFont(display_config.NET_LABEL_X, display_config.NET_LABEL_Y, "net", .Ubuntu14, .Black);
-            self.bitmap.drawLine(display_config.NET_LINE_X, display_config.NET_LINE_Y, display_config.NET_LINE_X, display_config.HORIZONTAL_LINE_MAIN, .Black);
-            self.bitmap.drawLine(272, display_config.NET_LINE_Y, display_config.DISPLAY_WIDTH, display_config.NET_LINE_Y, .Black);
+        // CPU
+        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
+        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
 
-            // MEM section
-            self.bitmap.drawTextFont(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, .Black);
-            self.bitmap.drawLine(38, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
-            self.bitmap.drawTextFont(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, .Black);
+        // MEM
+        self.bitmap.drawRect(display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, color);
 
-            // Disk section
-            self.bitmap.drawTextFont(display_config.DISK_LABEL_X, display_config.DISK_LABEL_Y, "disk", .Ubuntu14, .Black);
-            self.bitmap.drawLine(130, display_config.DISK_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.DISK_LINE_Y, .Black);
-            self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
-            self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
+        // Disk
+        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
+        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
 
-            // FAN section
-            self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
-            // Stops short of the "rpm" that renderFanSpeed draws at its end.
-            self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.FAN_LINE_END_X, display_config.FAN_LINE_Y, .Black);
-            self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
+        // FAN
+        const ascent_fan = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.drawRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent_fan, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, color);
 
-            // Traffic section
-            self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_LABEL_X, display_config.TRAFFIC_DOWN_LABEL_Y, "down", .Ubuntu14, .Black);
-            self.bitmap.drawLine(242, display_config.TRAFFIC_DOWN_LINE_Y, 261, display_config.TRAFFIC_DOWN_LINE_Y, .Black);
-            self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_ICON_X, display_config.TRAFFIC_DOWN_ICON_Y, display_config.ICON_DOWNLOAD, .Material24, .Black);
+        // APT
+        const ascent_apt = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.drawRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent_apt, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, color);
 
-            self.bitmap.drawTextFont(display_config.TRAFFIC_UP_LABEL_X, display_config.TRAFFIC_UP_LABEL_Y, "up", .Ubuntu14, .Black);
-            self.bitmap.drawLine(222, display_config.TRAFFIC_UP_LINE_Y, 261, display_config.TRAFFIC_UP_LINE_Y, .Black);
-            self.bitmap.drawTextFont(display_config.TRAFFIC_UP_ICON_X, display_config.TRAFFIC_UP_ICON_Y, display_config.ICON_UPLOAD, .Material24, .Black);
+        // NET icon/state
+        const ascent_net = self.bitmap.getFontAscent(.Material24);
+        self.bitmap.drawRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent_net, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, color);
 
-            // Status bar icons
-            self.bitmap.drawTextFont(display_config.IP_ICON_X, display_config.IP_ICON_Y, display_config.ICON_NETWORK, .Material14, .Black);
-            self.bitmap.drawTextFont(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, .Black);
+        // IP
+        self.bitmap.drawRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, color);
 
-            self.grid_cached = true;
-        }
+        // UPTIME
+        self.bitmap.drawRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, color);
 
-        /// Simple unified text rendering in a defined area with optional inversion
-        fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
-            // Clear the area
-            self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
+        // SIGNAL
+        self.bitmap.drawRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
 
-            // Draw text
-            self.bitmap.drawTextFont(text_x, text_y, text, font, .Black);
+        // Traffic down
+        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
+        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
 
-            // Invert if critical
-            if (invert) {
-                self.bitmap.invertRect(area_x, area_y, area_w, area_h);
+        // Traffic up
+        self.bitmap.drawRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
+        self.bitmap.drawRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
+    }
+
+    /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
+    /// clockwise. One hardware row comes from one logical column, so each output
+    /// byte is assembled in a register and stored once.
+    fn convertTo1Bit(self: *Self, output: *Frame) void {
+        // One hardware row is packed from one logical column, so the panel's
+        // short side has to be exactly the bitmap's height. `output` carries its
+        // own length in its type.
+        const src = self.frameBitmap();
+        std.debug.assert(src.height == hw_bytes_per_row * 8);
+
+        const width = src.width;
+
+        var hw_y: u32 = 0;
+        while (hw_y < width) : (hw_y += 1) {
+            const src_x = (width - 1) - hw_y;
+            const row = output[hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
+
+            for (row, 0..) |*out_byte, byte_idx| {
+                // 1 = white, 0 = black, MSB first.
+                var bits: u8 = 0;
+                for (0..8) |b| {
+                    const src_y = byte_idx * 8 + b;
+                    if (src.data[src_y * src.stride + src_x] >= 128) {
+                        bits |= @as(u8, 0x80) >> @intCast(b);
+                    }
+                }
+                out_byte.* = bits;
             }
         }
+    }
 
-        /// Show or clear the hardware-fault warning: the status bar is drawn inverted.
-        pub fn setFaultWarning(self: *Self, active: bool) void {
-            self.warn_fault = active;
-        }
+    /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
+    fn packBmpBuffer(self: *Self) void {
+        const src = self.frameBitmap();
+        const width = src.width;
+        const height = src.height;
+        const row_bytes = @divCeil(width, 8);
 
-        /// Put a notice on the panel in place of the dashboard, from the next
-        /// update until `clearNotice`.
-        ///
-        /// The fonts cover ASCII only, so the text is folded to it first, and it
-        /// is set in the largest font it fits. What does not fit even the
-        /// smallest is cut off with an ellipsis.
-        pub fn showNotice(self: *Self, text: []const u8) void {
-            const b = &self.notice;
-            b.clear(.White);
+        // Pack to 1-bit without rotation, into the preallocated scratch buffer.
+        var y: u32 = 0;
+        while (y < height) : (y += 1) {
+            const src_row = src.data[y * src.stride ..][0..width];
+            const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
 
-            b.drawTextFont(display_config.NOTICE_LABEL_X, display_config.NOTICE_LABEL_Y, display_config.NOTICE_LABEL, .Ubuntu14, .Black);
-            const rule_x: i32 = @intCast(display_config.NOTICE_LABEL_X + b.measureText(display_config.NOTICE_LABEL, .Ubuntu14) + 3);
-            b.drawLine(rule_x, display_config.NOTICE_LINE_Y, display_config.DISPLAY_WIDTH - 1, display_config.NOTICE_LINE_Y, .Black);
-
-            var folded_buf: [notice_text.max_len]u8 = undefined;
-            const folded = notice_text.foldToAscii(&folded_buf, text);
-
-            var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
-            var last_buf: [notice_text.max_len + 3]u8 = undefined;
-            const layout = self.layoutNotice(folded, &lines, &last_buf);
-
-            // The block is centred vertically in the body, left-aligned.
-            const line_h = b.getLineHeight(layout.font);
-            const block_h = line_h * @as(u32, @intCast(layout.count));
-            var baseline: i32 = display_config.NOTICE_BODY_Y +
-                @as(i32, @intCast((display_config.NOTICE_BODY_H - block_h) / 2)) +
-                b.getFontAscent(layout.font);
-
-            for (lines[0..layout.count]) |line| {
-                b.drawTextFont(display_config.NOTICE_BODY_X, baseline, line, layout.font, .Black);
-                baseline += @intCast(line_h);
+            for (dst_row, 0..) |*out_byte, byte_idx| {
+                var bits: u8 = 0;
+                for (0..8) |b| {
+                    const x = byte_idx * 8 + b;
+                    if (x >= width or src_row[x] >= 128) {
+                        bits |= @as(u8, 0x80) >> @intCast(b);
+                    }
+                }
+                out_byte.* = bits;
             }
-
-            self.notice_shown = true;
         }
+    }
 
-        /// Go back to the dashboard.
-        pub fn clearNotice(self: *Self) void {
-            self.notice_shown = false;
-        }
+    // Each reading has a slot of its own, drawn by its own call, so a sensor
+    // that fails leaves only its own slot stale. Load and temperature used to
+    // be drawn together, and a machine without a thermal zone never showed its
+    // load at all.
 
-        const NoticeLayout = struct {
-            font: FontType,
-            count: usize,
+    /// Render CPU load
+    pub fn renderCpuLoad(self: *Self, load: u8) void {
+        const is_critical = load >= config.Config.threshold_cpu_critical;
+
+        var buf: [16]u8 = undefined;
+        const text = std.mem.print(&buf, "{d}%", .{load}) catch "?";
+        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+    }
+
+    /// Render CPU temperature
+    pub fn renderCpuTemp(self: *Self, temp: u32) void {
+        const is_critical = temp >= config.Config.threshold_temp_critical;
+
+        var buf: [16]u8 = undefined;
+        const text = std.mem.print(&buf, "{d}°C", .{temp}) catch "?";
+        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+    }
+
+    /// Render memory usage
+    pub fn renderMemory(self: *Self, usage: u8) void {
+        const is_critical = usage >= config.Config.threshold_mem_critical;
+
+        var buf: [16]u8 = undefined;
+        const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
+        self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
+    }
+
+    /// Render root filesystem usage
+    pub fn renderDiskUsage(self: *Self, usage: u8) void {
+        const is_critical = usage >= config.Config.threshold_disk_critical;
+
+        var buf: [16]u8 = undefined;
+        const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
+        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+    }
+
+    /// Render disk temperature. Null means the hardware has no sensor, shown
+    /// as a dash: "0°C" claimed a reading nobody took.
+    pub fn renderDiskTemp(self: *Self, temp: ?u32) void {
+        const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
+
+        var buf: [16]u8 = undefined;
+        const text = if (temp) |t| std.mem.print(&buf, "{d}°C", .{t}) catch "?" else "-";
+        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+    }
+
+    /// Render fan speed. Null means there is no fan, shown as a dash; a fan
+    /// that is present and stopped still reads 0. The unit is in the header.
+    pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
+        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+
+        var buf: [16]u8 = undefined;
+        const text = if (rpm) |r| std.mem.print(&buf, "{d}", .{r}) catch "?" else "-";
+        self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
+
+        // The unit sits in the header, as it does for traffic, and is drawn
+        // here rather than with the grid for the same reason traffic's is:
+        // the "p" descends into the value's clear area, which erases it.
+        self.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+    }
+
+    /// Render IP address
+    pub fn renderIpAddress(self: *Self, ip: []const u8) void {
+        self.bitmap.fillRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
+
+        const display_ip = if (ip.len > 15) ip[0..15] else ip;
+        self.bitmap.drawTextFont(display_config.IP_VALUE_X, display_config.IP_VALUE_Y, display_ip, .Ubuntu14, .Black);
+    }
+
+    /// Render uptime.
+    ///
+    /// The slot runs to the right edge of the panel, where overflow is clipped
+    /// mid-glyph, so pick the most detailed form that fits its 84px:
+    /// "11d 12h 20m" (83px) up to 99 days, then the compact "123d 23:59" (70px),
+    /// which still carries minutes. Only truly absurd uptimes lose them.
+    pub fn renderUptime(self: *Self, days: u32, hours: u32, minutes: u32) void {
+        self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
+
+        var buf = display_config.UptimeBuffers{};
+        const candidates = display_config.uptimeCandidates(&buf, days, hours, minutes);
+
+        const text = self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
+        self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
+    }
+
+    /// Render signal strength.
+    ///
+    /// "-40 dBm" fits; the three-digit "-100 dBm" does not, so the unit is
+    /// dropped at that end of the range rather than clipping the number. -100
+    /// dBm is effectively no signal, where the exact unit matters least.
+    pub fn renderSignalStrength(self: *Self, signal: ?i32) void {
+        self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+
+        const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
+        self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);
+
+        var with_unit: [16]u8 = undefined;
+        var bare: [16]u8 = undefined;
+
+        const text = if (signal) |s| blk: {
+            const candidates = [_][]const u8{
+                std.mem.print(&with_unit, "{d} dBm", .{s}) catch "?",
+                std.mem.print(&bare, "{d}", .{s}) catch "?",
+            };
+            break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.SIGNAL_VALUE_MAX_W);
+        } else "N/A";
+
+        self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
+    }
+
+    /// Show the machine as wired in the signal slot.
+    ///
+    /// On a cable there is no Wi-Fi reading, and the crossed-out Wi-Fi icon
+    /// with "N/A" that used to fill the slot read as a fault.
+    pub fn renderWired(self: *Self) void {
+        self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
+        self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, display_config.ICON_ETHERNET, .Material14, .Black);
+        self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
+    }
+
+    /// Render network traffic
+    pub fn renderTraffic(self: *Self, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
+        self.renderTrafficRow(
+            download_speed,
+            download_unit,
+            display_config.TRAFFIC_DOWN_VALUE_X,
+            display_config.TRAFFIC_DOWN_VALUE_Y,
+            display_config.TRAFFIC_DOWN_AREA_Y,
+            display_config.TRAFFIC_DOWN_UNIT_X,
+            display_config.TRAFFIC_DOWN_UNIT_Y,
+            display_config.TRAFFIC_DOWN_UNIT_AREA_Y,
+        );
+        self.renderTrafficRow(
+            upload_speed,
+            upload_unit,
+            display_config.TRAFFIC_UP_VALUE_X,
+            display_config.TRAFFIC_UP_VALUE_Y,
+            display_config.TRAFFIC_UP_AREA_Y,
+            display_config.TRAFFIC_UP_UNIT_X,
+            display_config.TRAFFIC_UP_UNIT_Y,
+            display_config.TRAFFIC_UP_UNIT_AREA_Y,
+        );
+    }
+
+    fn renderTrafficRow(
+        self: *Self,
+        speed: f64,
+        unit: []const u8,
+        value_x: i32,
+        value_y: i32,
+        value_area_y: i32,
+        unit_x: i32,
+        unit_y: i32,
+        unit_area_y: i32,
+    ) void {
+        self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+
+        // scaleBytes keeps the value under 1000, so two decimals always fit.
+        // The ladder is a guard against that changing, since this slot ends at
+        // the right edge of the panel where overflow is clipped mid-glyph.
+        var two_dp: [32]u8 = undefined;
+        var one_dp: [32]u8 = undefined;
+        var no_dp: [32]u8 = undefined;
+        const candidates = [_][]const u8{
+            std.mem.print(&two_dp, "{d:.2}", .{speed}) catch "?",
+            std.mem.print(&one_dp, "{d:.1}", .{speed}) catch "?",
+            std.mem.print(&no_dp, "{d:.0}", .{speed}) catch "?",
+        };
+        const value_text = self.bitmap.fitText(&candidates, .Ubuntu20, display_config.TEXT_AREA_TRAFFIC_VALUE.width);
+        self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
+
+        var unit_buf: [32]u8 = undefined;
+        const unit_text = std.mem.print(&unit_buf, "{s}/s", .{unit}) catch "?";
+        self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
+    }
+
+    /// Render APT updates count. `null` means the background check has not
+    /// reported yet — show a dash rather than the "all up to date" tick, which
+    /// would claim more than is known.
+    pub fn renderAptUpdates(self: *Self, count: ?u32) void {
+        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
+        self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
+
+        const known = count orelse {
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, "-", .Ubuntu24, .Black);
+            return;
         };
 
-        /// Wrap `text` into `lines` in the largest notice font that holds all of
-        /// it. Failing that, the smallest font's lines as far as they go, the last
-        /// rebuilt in `last_buf` to end in an ellipsis.
-        fn layoutNotice(self: *Self, text: []const u8, lines: *[display_config.NOTICE_MAX_LINES][]const u8, last_buf: []u8) NoticeLayout {
-            const b = &self.notice;
-            const width = display_config.NOTICE_BODY_W;
-
-            var max: usize = 0;
-            for (display_config.NOTICE_FONTS) |font| {
-                max = @min(lines.len, display_config.NOTICE_BODY_H / b.getLineHeight(font));
-                const needed = b.wrapText(text, font, width, lines[0..max]);
-                if (needed <= max) return .{ .font = font, .count = needed };
-            }
-
-            // The loop left the smallest font's lines in place.
-            const font = display_config.NOTICE_FONTS[display_config.NOTICE_FONTS.len - 1];
-            const ellipsis = "...";
-
-            var last = lines[max - 1];
-            while (true) {
-                last = std.mem.trimEnd(u8, last, " ");
-                if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
-                // A whole codepoint at a time: the degree sign survives folding
-                // and is two bytes, and half of it would eat the ellipsis.
-                var cut = last.len - 1;
-                while (cut > 0 and last[cut] & 0xC0 == 0x80) cut -= 1;
-                last = last[0..cut];
-            }
-            @memcpy(last_buf[0..last.len], last);
-            @memcpy(last_buf[last.len..][0..ellipsis.len], ellipsis);
-            lines[max - 1] = last_buf[0 .. last.len + ellipsis.len];
-
-            return .{ .font = font, .count = max };
-        }
-
-        /// What the panel shows: the notice while there is one, else the dashboard.
-        fn frameBitmap(self: *Self) *Bitmap {
-            return if (self.notice_shown) &self.notice else &self.bitmap;
-        }
-
-        /// On whatever is shown: a notice can stay up for a day, and a hardware
-        /// fault must not wait that long to be seen.
-        fn invertStatusBar(self: *Self) void {
-            self.frameBitmap().invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
-        }
-
-        /// Toggle the fault overlay on the frame being shown. Its own inverse, so a
-        /// paired call restores it.
-        ///
-        /// Not drawn into the layout, because the status bar's three slots are each
-        /// redrawn by their own scheduled task and any of them would erase part of it.
-        /// Call it around everything that reads the bitmap — the panel conversion and
-        /// the BMP export both — or the preview disagrees with the glass.
-        fn toggleFaultOverlay(self: *Self) void {
-            if (self.warn_fault) self.invertStatusBar();
-        }
-
-        /// The current frame packed to 1 bit, fault overlay included.
-        ///
-        /// For callers that want to show the frame rather than write it — the
-        /// simulators — so they do not have to turn the BMP export on and read the
-        /// file back just to get at the pixels. Borrowed: valid until the next
-        /// render.
-        pub fn packedFrame(self: *Self) []const u8 {
-            self.toggleFaultOverlay();
-            defer self.toggleFaultOverlay();
-
-            self.packBmpBuffer();
-            return self.bmp_buffer;
-        }
-
-        /// Push the first frame and establish the reference for later partial updates.
-        pub fn showInitialFrame(self: *Self) !void {
-            self.toggleFaultOverlay();
-            defer self.toggleFaultOverlay();
-
-            self.convertTo1Bit(self.epd_buffer);
-            try self.epd.displayBase(self.epd_buffer);
-            self.rememberCurrentFrame();
-            self.parkPanel();
-
-            self.exportBmp() catch |err| {
-                log.err("Failed to export initial BMP: {t}", .{err});
-            };
-        }
-
-        /// Update display
-        pub fn updateDisplay(self: *Self, partial_requested: bool) !void {
-            if (display_config.DEBUG_TEXT_AREAS) {
-                self.drawTextAreaFrames();
-            }
-
-            // Held for the whole function, so the BMP export on every exit path below
-            // sees the same overlay the panel does.
-            self.toggleFaultOverlay();
-            defer self.toggleFaultOverlay();
-
-            // Convert Bitmap to 1-bit
-            self.convertTo1Bit(self.epd_buffer);
-
-            log.debug("updateDisplay: START (partial requested={})", .{partial_requested});
-
-            // Skip unchanged frames only on partial updates. A full refresh must always go
-            // through to clear ghosting/artifacts accumulated by partial updates, and so
-            // must any update while the glass contents are in doubt.
-            // A skipped frame also leaves a sleeping panel undisturbed.
-            const unchanged = self.has_last_epd_buffer and std.mem.eql(u8, self.epd_buffer, self.last_epd_buffer);
-            if (partial_requested and unchanged and !self.panel_state_unknown) {
-                log.debug("updateDisplay: skipped unchanged partial frame", .{});
-                self.exportBmp() catch |err| {
-                    log.err("Failed to export BMP: {t}", .{err});
-                };
-                return;
-            }
-
-            try self.wakePanel();
-
-            // Decided only after waking: restoring the reference frame can itself
-            // fail, and that rules a partial update out.
-            const partial = partial_requested and !self.panel_state_unknown;
-
-            {
-                // Any failure below leaves the glass in an unknown state.
-                errdefer self.panel_state_unknown = true;
-
-                if (partial) {
-                    try self.epd.displayPartial(self.epd_buffer);
-                } else {
-                    // displayBase, not display: it refreshes fully *and* rewrites the
-                    // reference RAM, keeping later partial updates diffing against
-                    // what is actually on the glass.
-                    try self.epd.displayBase(self.epd_buffer);
-                }
-            }
-
-            self.rememberCurrentFrame();
-            self.panel_state_unknown = false;
-            self.parkPanel();
-
-            log.debug("updateDisplay: EPD done (partial={})", .{partial});
-
-            self.exportBmp() catch |err| {
-                log.err("Failed to export BMP: {t}", .{err});
-            };
-        }
-
-        /// Bring the controller out of deep sleep, if it is in it.
-        ///
-        /// Deep sleep drops the reference frame that partial updates diff against,
-        /// so it has to be restored from the frame we know is on the glass — before
-        /// the partial sequence powers the analog stage up, or the write is ignored.
-        fn wakePanel(self: *Self) !void {
-            if (!self.panel_asleep) return;
-
-            log.debug("panel: waking from deep sleep", .{});
-            try self.epd.reInit();
-            if (self.has_last_epd_buffer) {
-                self.epd.primeBase(self.last_epd_buffer) catch |err| {
-                    // Without a reference a partial update would smear, so fall back
-                    // to a full refresh instead.
-                    log.warn("Failed to restore panel reference frame: {t}", .{err});
-                    self.panel_state_unknown = true;
-                };
-            } else {
-                self.panel_state_unknown = true;
-            }
-
-            self.panel_asleep = false;
-        }
-
-        /// Park the controller in deep sleep until the next visible update.
-        fn parkPanel(self: *Self) void {
-            if (!config.Config.panel_sleep or self.panel_asleep) return;
-
-            self.epd.sleep() catch |err| {
-                log.warn("Failed to park panel in deep sleep: {t}", .{err});
-                return;
-            };
-            self.panel_asleep = true;
-            log.debug("panel: parked in deep sleep", .{});
-        }
-
-        pub fn rememberCurrentFrame(self: *Self) void {
-            @memcpy(self.last_epd_buffer, self.epd_buffer);
-            self.has_last_epd_buffer = true;
-        }
-
-        fn drawTextAreaFrames(self: *Self) void {
-            const color: Graphics.Color = .Black;
-
-            // CPU
-            self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
-            self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
-
-            // MEM
-            self.bitmap.drawRect(display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, color);
-
-            // Disk
-            self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
-            self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
-
-            // FAN
-            const ascent_fan = self.bitmap.getFontAscent(.Ubuntu24);
-            self.bitmap.drawRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent_fan, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, color);
-
-            // APT
-            const ascent_apt = self.bitmap.getFontAscent(.Ubuntu24);
-            self.bitmap.drawRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent_apt, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, color);
-
-            // NET icon/state
-            const ascent_net = self.bitmap.getFontAscent(.Material24);
-            self.bitmap.drawRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent_net, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, color);
-
-            // IP
-            self.bitmap.drawRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, color);
-
-            // UPTIME
-            self.bitmap.drawRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, color);
-
-            // SIGNAL
-            self.bitmap.drawRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
-
-            // Traffic down
-            self.bitmap.drawRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
-            self.bitmap.drawRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
-
-            // Traffic up
-            self.bitmap.drawRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
-            self.bitmap.drawRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
-        }
-
-        /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
-        /// clockwise. One hardware row comes from one logical column, so each output
-        /// byte is assembled in a register and stored once.
-        pub fn convertTo1Bit(self: *Self, output: *Frame) void {
-            // One hardware row is packed from one logical column, so the panel's
-            // short side has to be exactly the bitmap's height. `output` carries its
-            // own length in its type.
-            const src = self.frameBitmap();
-            std.debug.assert(src.height == hw_bytes_per_row * 8);
-
-            const width = src.width;
-
-            var hw_y: u32 = 0;
-            while (hw_y < width) : (hw_y += 1) {
-                const src_x = (width - 1) - hw_y;
-                const row = output[hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
-
-                for (row, 0..) |*out_byte, byte_idx| {
-                    // 1 = white, 0 = black, MSB first.
-                    var bits: u8 = 0;
-                    for (0..8) |b| {
-                        const src_y = byte_idx * 8 + b;
-                        if (src.data[src_y * src.stride + src_x] >= 128) {
-                            bits |= @as(u8, 0x80) >> @intCast(b);
-                        }
-                    }
-                    out_byte.* = bits;
-                }
-            }
-        }
-
-        /// Export as BMP
-        pub fn exportBmp(self: *Self) !void {
-            if (!config.Config.export_bmp) return;
-
-            self.packBmpBuffer();
-            try self.bmp_exporter.save(self.io, self.bmp_buffer, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT, config.Config.bmp_export_path);
-        }
-
-        /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
-        fn packBmpBuffer(self: *Self) void {
-            const src = self.frameBitmap();
-            const width = src.width;
-            const height = src.height;
-            const row_bytes = @divCeil(width, 8);
-
-            // Pack to 1-bit without rotation, into the preallocated scratch buffer.
-            var y: u32 = 0;
-            while (y < height) : (y += 1) {
-                const src_row = src.data[y * src.stride ..][0..width];
-                const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
-
-                for (dst_row, 0..) |*out_byte, byte_idx| {
-                    var bits: u8 = 0;
-                    for (0..8) |b| {
-                        const x = byte_idx * 8 + b;
-                        if (x >= width or src_row[x] >= 128) {
-                            bits |= @as(u8, 0x80) >> @intCast(b);
-                        }
-                    }
-                    out_byte.* = bits;
-                }
-            }
-        }
-
-        // Each reading has a slot of its own, drawn by its own call, so a sensor
-        // that fails leaves only its own slot stale. Load and temperature used to
-        // be drawn together, and a machine without a thermal zone never showed its
-        // load at all.
-
-        /// Render CPU load
-        pub fn renderCpuLoad(self: *Self, load: u8) void {
-            const is_critical = load >= config.Config.threshold_cpu_critical;
-
+        if (known == 0) {
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
+        } else {
             var buf: [16]u8 = undefined;
-            const text = std.mem.print(&buf, "{d}%", .{load}) catch "?";
-            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+            const label = self.aptLabel(&buf, known);
+            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, label.text, label.font, .Black);
         }
+    }
 
-        /// Render CPU temperature
-        pub fn renderCpuTemp(self: *Self, temp: u32) void {
-            const is_critical = temp >= config.Config.threshold_temp_critical;
+    /// Fonts the APT count steps down through, largest first.
+    ///
+    /// Three digits are 42px at the size one and two use, against a 35px
+    /// slot, and a freshly flashed image is routinely hundreds of packages
+    /// behind. The overflow crossed the divider at x=249 and, lying outside
+    /// the area this slot clears, stayed on the panel after the count shrank.
+    const apt_fonts = [_]FontType{ .Ubuntu24, .Ubuntu20, .Ubuntu14 };
 
-            var buf: [16]u8 = undefined;
-            const text = std.mem.print(&buf, "{d}°C", .{temp}) catch "?";
-            self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+    const AptLabel = struct { text: []const u8, font: FontType };
+
+    /// The count in the largest font it fits, or a capped "999+" once no
+    /// font holds it. Same baseline in every font, so smaller ones sit on
+    /// the same line.
+    fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
+        const width = display_config.TEXT_AREA_APT.width;
+        const text = std.mem.print(buf, "{d}", .{count}) catch "?";
+
+        for (apt_fonts) |font| {
+            if (self.bitmap.measureText(text, font) <= width) return .{ .text = text, .font = font };
         }
+        return .{ .text = "999+", .font = .Ubuntu14 };
+    }
 
-        /// Render memory usage
-        pub fn renderMemory(self: *Self, usage: u8) void {
-            const is_critical = usage >= config.Config.threshold_mem_critical;
+    /// Render internet connection status
+    pub fn renderInternetStatus(self: *Self, connected: bool) void {
+        const ascent = self.bitmap.getFontAscent(.Material24);
+        self.bitmap.fillRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
 
-            var buf: [16]u8 = undefined;
-            const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
-            self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
-        }
+        const icon = if (connected) display_config.ICON_WIFI_OK else display_config.ICON_WIFI_OFF;
+        self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
+    }
 
-        /// Render root filesystem usage
-        pub fn renderDiskUsage(self: *Self, usage: u8) void {
-            const is_critical = usage >= config.Config.threshold_disk_critical;
-
-            var buf: [16]u8 = undefined;
-            const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
-            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
-        }
-
-        /// Render disk temperature. Null means the hardware has no sensor, shown
-        /// as a dash: "0°C" claimed a reading nobody took.
-        pub fn renderDiskTemp(self: *Self, temp: ?u32) void {
-            const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
-
-            var buf: [16]u8 = undefined;
-            const text = if (temp) |t| std.mem.print(&buf, "{d}°C", .{t}) catch "?" else "-";
-            self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
-        }
-
-        /// Render fan speed. Null means there is no fan, shown as a dash; a fan
-        /// that is present and stopped still reads 0. The unit is in the header.
-        pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
-            const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-            self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
-
-            var buf: [16]u8 = undefined;
-            const text = if (rpm) |r| std.mem.print(&buf, "{d}", .{r}) catch "?" else "-";
-            self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
-
-            // The unit sits in the header, as it does for traffic, and is drawn
-            // here rather than with the grid for the same reason traffic's is:
-            // the "p" descends into the value's clear area, which erases it.
-            self.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
-        }
-
-        /// Render IP address
-        pub fn renderIpAddress(self: *Self, ip: []const u8) void {
-            self.bitmap.fillRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
-
-            const display_ip = if (ip.len > 15) ip[0..15] else ip;
-            self.bitmap.drawTextFont(display_config.IP_VALUE_X, display_config.IP_VALUE_Y, display_ip, .Ubuntu14, .Black);
-        }
-
-        /// Render uptime.
-        ///
-        /// The slot runs to the right edge of the panel, where overflow is clipped
-        /// mid-glyph, so pick the most detailed form that fits its 84px:
-        /// "11d 12h 20m" (83px) up to 99 days, then the compact "123d 23:59" (70px),
-        /// which still carries minutes. Only truly absurd uptimes lose them.
-        pub fn renderUptime(self: *Self, days: u32, hours: u32, minutes: u32) void {
-            self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
-
-            var buf = display_config.UptimeBuffers{};
-            const candidates = display_config.uptimeCandidates(&buf, days, hours, minutes);
-
-            const text = self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
-            self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
-        }
-
-        /// Render signal strength.
-        ///
-        /// "-40 dBm" fits; the three-digit "-100 dBm" does not, so the unit is
-        /// dropped at that end of the range rather than clipping the number. -100
-        /// dBm is effectively no signal, where the exact unit matters least.
-        pub fn renderSignalStrength(self: *Self, signal: ?i32) void {
-            self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
-
-            const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
-            self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);
-
-            var with_unit: [16]u8 = undefined;
-            var bare: [16]u8 = undefined;
-
-            const text = if (signal) |s| blk: {
-                const candidates = [_][]const u8{
-                    std.mem.print(&with_unit, "{d} dBm", .{s}) catch "?",
-                    std.mem.print(&bare, "{d}", .{s}) catch "?",
-                };
-                break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.SIGNAL_VALUE_MAX_W);
-            } else "N/A";
-
-            self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
-        }
-
-        /// Show the machine as wired in the signal slot.
-        ///
-        /// On a cable there is no Wi-Fi reading, and the crossed-out Wi-Fi icon
-        /// with "N/A" that used to fill the slot read as a fault.
-        pub fn renderWired(self: *Self) void {
-            self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
-            self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, display_config.ICON_ETHERNET, .Material14, .Black);
-            self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
-        }
-
-        /// Render network traffic
-        pub fn renderTraffic(self: *Self, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
-            self.renderTrafficRow(
-                download_speed,
-                download_unit,
-                display_config.TRAFFIC_DOWN_VALUE_X,
-                display_config.TRAFFIC_DOWN_VALUE_Y,
-                display_config.TRAFFIC_DOWN_AREA_Y,
-                display_config.TRAFFIC_DOWN_UNIT_X,
-                display_config.TRAFFIC_DOWN_UNIT_Y,
-                display_config.TRAFFIC_DOWN_UNIT_AREA_Y,
-            );
-            self.renderTrafficRow(
-                upload_speed,
-                upload_unit,
-                display_config.TRAFFIC_UP_VALUE_X,
-                display_config.TRAFFIC_UP_VALUE_Y,
-                display_config.TRAFFIC_UP_AREA_Y,
-                display_config.TRAFFIC_UP_UNIT_X,
-                display_config.TRAFFIC_UP_UNIT_Y,
-                display_config.TRAFFIC_UP_UNIT_AREA_Y,
-            );
-        }
-
-        fn renderTrafficRow(
-            self: *Self,
-            speed: f64,
-            unit: []const u8,
-            value_x: i32,
-            value_y: i32,
-            value_area_y: i32,
-            unit_x: i32,
-            unit_y: i32,
-            unit_area_y: i32,
-        ) void {
-            self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-            self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
-
-            // scaleBytes keeps the value under 1000, so two decimals always fit.
-            // The ladder is a guard against that changing, since this slot ends at
-            // the right edge of the panel where overflow is clipped mid-glyph.
-            var two_dp: [32]u8 = undefined;
-            var one_dp: [32]u8 = undefined;
-            var no_dp: [32]u8 = undefined;
-            const candidates = [_][]const u8{
-                std.mem.print(&two_dp, "{d:.2}", .{speed}) catch "?",
-                std.mem.print(&one_dp, "{d:.1}", .{speed}) catch "?",
-                std.mem.print(&no_dp, "{d:.0}", .{speed}) catch "?",
-            };
-            const value_text = self.bitmap.fitText(&candidates, .Ubuntu20, display_config.TEXT_AREA_TRAFFIC_VALUE.width);
-            self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
-
-            var unit_buf: [32]u8 = undefined;
-            const unit_text = std.mem.print(&unit_buf, "{s}/s", .{unit}) catch "?";
-            self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
-        }
-
-        /// Render APT updates count. `null` means the background check has not
-        /// reported yet — show a dash rather than the "all up to date" tick, which
-        /// would claim more than is known.
-        pub fn renderAptUpdates(self: *Self, count: ?u32) void {
-            const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-            self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
-
-            const known = count orelse {
-                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, "-", .Ubuntu24, .Black);
-                return;
-            };
-
-            if (known == 0) {
-                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
-            } else {
-                var buf: [16]u8 = undefined;
-                const label = self.aptLabel(&buf, known);
-                self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, label.text, label.font, .Black);
-            }
-        }
-
-        /// Fonts the APT count steps down through, largest first.
-        ///
-        /// Three digits are 42px at the size one and two use, against a 35px
-        /// slot, and a freshly flashed image is routinely hundreds of packages
-        /// behind. The overflow crossed the divider at x=249 and, lying outside
-        /// the area this slot clears, stayed on the panel after the count shrank.
-        const apt_fonts = [_]FontType{ .Ubuntu24, .Ubuntu20, .Ubuntu14 };
-
-        const AptLabel = struct { text: []const u8, font: FontType };
-
-        /// The count in the largest font it fits, or a capped "999+" once no
-        /// font holds it. Same baseline in every font, so smaller ones sit on
-        /// the same line.
-        fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
-            const width = display_config.TEXT_AREA_APT.width;
-            const text = std.mem.print(buf, "{d}", .{count}) catch "?";
-
-            for (apt_fonts) |font| {
-                if (self.bitmap.measureText(text, font) <= width) return .{ .text = text, .font = font };
-            }
-            return .{ .text = "999+", .font = .Ubuntu14 };
-        }
-
-        /// Render internet connection status
-        pub fn renderInternetStatus(self: *Self, connected: bool) void {
-            const ascent = self.bitmap.getFontAscent(.Material24);
-            self.bitmap.fillRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
-
-            const icon = if (connected) display_config.ICON_WIFI_OK else display_config.ICON_WIFI_OFF;
-            self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
-        }
-
-        /// Draw a fixed screen with hard-coded values, for the golden reference
-        /// frame. Lives here rather than in the test so that `zig build golden` and
-        /// the test that checks against its output cannot drift apart.
-        pub fn drawReferenceScreen(self: *Self) void {
-            self.renderGrid();
-            self.renderCpuLoad(42);
-            self.renderCpuTemp(51);
-            self.renderMemory(28);
-            self.renderDiskUsage(84);
-            self.renderDiskTemp(33);
-            self.renderFanSpeed(543);
-            self.renderTraffic(999.99, "kB", 3.01, "B");
-            self.renderAptUpdates(35);
-            self.renderInternetStatus(true);
-            self.renderIpAddress("192.168.1.231");
-            self.renderUptime(11, 22, 47);
-            self.renderWired();
-        }
-
-        /// Draw the sleep screen, then park the panel in deep sleep.
-        pub fn goToSleep(self: *Self) !void {
-            log.info("Rendering sleep screen", .{});
-
-            // Re-initialize display to ensure Full LUT is loaded (needed after partial
-            // updates) and to wake the controller if it was parked between refreshes.
-            self.epd.reInit() catch |err| {
-                log.err("Failed to re-init display for sleep: {t}", .{err});
-            };
-            self.panel_asleep = false;
-
-            self.notice_shown = false;
-            self.drawSplash("Sleeping...", .Black);
-            self.convertTo1Bit(self.epd_buffer);
-
-            // displayBase also resets the base RAM used by partial updates.
-            try self.epd.displayBase(self.epd_buffer);
-            self.rememberCurrentFrame();
-
-            // Unconditional, unlike parkPanel: Waveshare requires deep sleep before
-            // power is cut, whatever PANEL_SLEEP is set to.
-            self.epd.sleep() catch |err| {
-                log.err("Failed to put panel into deep sleep: {t}", .{err});
-            };
-            self.panel_asleep = true;
-
-            log.info("Display parked in deep sleep", .{});
-
-            self.exportBmp() catch |err| {
-                log.err("Failed to export sleep screen BMP: {t}", .{err});
-            };
-        }
-    };
-}
-
-/// The renderer as used in production.
-pub const DisplayRenderer = Renderer(EpdConfig);
+    /// Draw a fixed screen with hard-coded values, for the golden reference
+    /// frame. Lives here rather than in the test so that `zig build golden` and
+    /// the test that checks against its output cannot drift apart.
+    pub fn drawReferenceScreen(self: *Self) void {
+        self.renderGrid();
+        self.renderCpuLoad(42);
+        self.renderCpuTemp(51);
+        self.renderMemory(28);
+        self.renderDiskUsage(84);
+        self.renderDiskTemp(33);
+        self.renderFanSpeed(543);
+        self.renderTraffic(999.99, "kB", 3.01, "B");
+        self.renderAptUpdates(35);
+        self.renderInternetStatus(true);
+        self.renderIpAddress("192.168.1.231");
+        self.renderUptime(11, 22, 47);
+        self.renderWired();
+    }
+};
 
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 
 const testing = std.testing;
-const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
-
-const TestRenderer = Renderer(FakeTransport);
 
 /// Path of the reference frame, relative to this file.
 const golden_path = "testdata/golden_main.bin";
 const golden_frame = @embedFile(golden_path);
-
-/// A renderer wired to a recorder instead of a panel.
-const Harness = struct {
-    transport: FakeTransport,
-    renderer: TestRenderer,
-
-    fn init() !Harness {
-        var h: Harness = .{
-            .transport = FakeTransport.init(testing.allocator),
-            .renderer = undefined,
-        };
-        h.renderer = try TestRenderer.init(testing.allocator, undefined, &h.transport);
-        return h;
-    }
-
-    /// Must be called on the final address; `renderer.epd` holds a pointer to
-    /// `transport`, so the struct cannot be moved after this.
-    fn wire(self: *Harness) void {
-        self.renderer.epd = TestRenderer.EPD.init(&self.transport);
-    }
-
-    fn deinit(self: *Harness) void {
-        self.renderer.deinit();
-        self.transport.deinit();
-    }
-
-    fn drawReferenceScreen(self: *Harness) void {
-        self.renderer.drawReferenceScreen();
-    }
-};
 
 test "the rendered screen matches the checked-in reference" {
     // A golden-image test: it pins the entire layout at once, so a coordinate,
@@ -900,13 +688,11 @@ test "the rendered screen matches the checked-in reference" {
     // To regenerate after an intentional layout change:
     //     zig build golden
     // then look at the diff before committing it.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.convertTo1Bit(h.renderer.epd_buffer);
-    const actual: []const u8 = h.renderer.epd_buffer;
+    r.drawReferenceScreen();
+    const actual: []const u8 = r.panelFrame();
 
     if (!std.mem.eql(u8, golden_frame, actual)) {
         var differing_rows: usize = 0;
@@ -931,130 +717,115 @@ test "the rendered screen matches the checked-in reference" {
 test "rendering is deterministic" {
     // The golden test is only meaningful if the same inputs always produce the
     // same frame.
-    var a = try Harness.init();
-    a.wire();
+    var a = try Renderer.init(testing.allocator);
     defer a.deinit();
-    var b = try Harness.init();
-    b.wire();
+    var b = try Renderer.init(testing.allocator);
     defer b.deinit();
 
     a.drawReferenceScreen();
     b.drawReferenceScreen();
-    a.renderer.convertTo1Bit(a.renderer.epd_buffer);
-    b.renderer.convertTo1Bit(b.renderer.epd_buffer);
 
-    try testing.expectEqualSlices(u8, a.renderer.epd_buffer, b.renderer.epd_buffer);
+    try testing.expectEqualSlices(u8, a.panelFrame(), b.panelFrame());
 }
 
 test "the APT count fits its slot however large it gets" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
     const width = display_config.TEXT_AREA_APT.width;
     var count: u32 = 1;
     while (count < 200_000) : (count = count * 3 / 2 + 1) {
         var buf: [16]u8 = undefined;
-        const label = h.renderer.aptLabel(&buf, count);
-        try testing.expect(h.renderer.bitmap.measureText(label.text, label.font) <= width);
+        const label = r.aptLabel(&buf, count);
+        try testing.expect(r.bitmap.measureText(label.text, label.font) <= width);
     }
 
     // Two digits keep the size they always had, which is what the golden frame
     // pins; three step down rather than crossing the divider.
     var buf: [16]u8 = undefined;
-    try testing.expectEqual(FontType.Ubuntu24, h.renderer.aptLabel(&buf, 99).font);
-    try testing.expect(h.renderer.aptLabel(&buf, 150).font != .Ubuntu24);
-    try testing.expectEqualStrings("150", h.renderer.aptLabel(&buf, 150).text);
+    try testing.expectEqual(FontType.Ubuntu24, r.aptLabel(&buf, 99).font);
+    try testing.expect(r.aptLabel(&buf, 150).font != .Ubuntu24);
+    try testing.expectEqualStrings("150", r.aptLabel(&buf, 150).text);
 }
 
 test "a shrinking APT count leaves nothing behind outside its slot" {
     // The visible form of the overflow: pixels right of the slot that the
     // three-digit count drew and the two-digit one never cleared.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    r.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(before);
 
-    h.renderer.renderAptUpdates(888);
-    h.renderer.renderAptUpdates(35);
+    r.renderAptUpdates(888);
+    r.renderAptUpdates(35);
 
-    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+    try testing.expectEqualSlices(u8, before, r.bitmap.data);
 }
 
 test "shrinking traffic and fan readings leave nothing behind" {
     // Every slot a reading draws into must be cleared in full before the next
     // one, or a wider reading leaves pixels behind a narrower one.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    const before = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    r.drawReferenceScreen();
+    const before = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(before);
 
-    h.renderer.renderTraffic(7.18, "MB", 118.0, "MB");
-    h.renderer.renderFanSpeed(8200);
-    h.renderer.renderTraffic(999.99, "kB", 3.01, "B");
-    h.renderer.renderFanSpeed(543);
+    r.renderTraffic(7.18, "MB", 118.0, "MB");
+    r.renderFanSpeed(8200);
+    r.renderTraffic(999.99, "kB", 3.01, "B");
+    r.renderFanSpeed(543);
 
-    try testing.expectEqualSlices(u8, before, h.renderer.bitmap.data);
+    try testing.expectEqualSlices(u8, before, r.bitmap.data);
 }
 
 test "a missing sensor is drawn as a dash, not as zero" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.renderer.renderDiskTemp(0);
-    h.renderer.renderFanSpeed(0);
-    const zero = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    r.renderDiskTemp(0);
+    r.renderFanSpeed(0);
+    const zero = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(zero);
 
-    h.renderer.renderDiskTemp(null);
-    h.renderer.renderFanSpeed(null);
-    try testing.expect(!std.mem.eql(u8, zero, h.renderer.bitmap.data));
+    r.renderDiskTemp(null);
+    r.renderFanSpeed(null);
+    try testing.expect(!std.mem.eql(u8, zero, r.bitmap.data));
 
     // And the dash is exactly what it says, drawn where the reading would be.
-    var expected = try Harness.init();
-    expected.wire();
+    var expected = try Renderer.init(testing.allocator);
     defer expected.deinit();
-    expected.renderer.renderDiskTemp(0);
-    expected.renderer.renderFanSpeed(0);
-    const r = &expected.renderer;
-    r.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
-    r.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
-    const fan_ascent = r.bitmap.getFontAscent(.Ubuntu24);
-    r.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
-    r.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
-    r.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
-    try testing.expectEqualSlices(u8, r.bitmap.data, h.renderer.bitmap.data);
+    expected.renderDiskTemp(0);
+    expected.renderFanSpeed(0);
+    expected.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
+    expected.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
+    const fan_ascent = expected.bitmap.getFontAscent(.Ubuntu24);
+    expected.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
+    expected.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    expected.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+    try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
 }
 
 // --- under-voltage warning ---------------------------------------------------
 
 /// Rows of the unrotated BMP buffer covering the status bar.
-fn statusBarRows(r: *TestRenderer) []const u8 {
+fn statusBarRows(r: *Renderer) []const u8 {
     const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     return r.bmp_buffer[display_config.STATUS_BAR_Y * row_bytes ..];
 }
 
 test "the warning inverts the status bar in the frame sent to the panel" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-    const clean: Frame = h.renderer.epd_buffer.*;
+    r.drawReferenceScreen();
+    const clean: Frame = r.panelFrame().*;
 
-    h.renderer.setFaultWarning(true);
-    try h.renderer.updateDisplay(false);
-
-    try testing.expect(!std.mem.eql(u8, &clean, h.renderer.epd_buffer));
+    r.setFaultWarning(true);
+    try testing.expect(!std.mem.eql(u8, &clean, r.panelFrame()));
 }
 
 test "the warning reaches the BMP preview too" {
@@ -1062,21 +833,20 @@ test "the warning reaches the BMP preview too" {
     // conversion, so the exported preview showed a clean status bar while the
     // glass showed an inverted one. A preview that disagrees with the device is
     // worse than no preview.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.packBmpBuffer();
-    const clean = try testing.allocator.dupe(u8, statusBarRows(&h.renderer));
+    r.drawReferenceScreen();
+    r.packBmpBuffer();
+    const clean = try testing.allocator.dupe(u8, statusBarRows(&r));
     defer testing.allocator.free(clean);
 
-    h.renderer.setFaultWarning(true);
-    h.renderer.toggleFaultOverlay();
-    h.renderer.packBmpBuffer();
-    h.renderer.toggleFaultOverlay();
+    r.setFaultWarning(true);
+    r.toggleFaultOverlay();
+    r.packBmpBuffer();
+    r.toggleFaultOverlay();
 
-    const warned = statusBarRows(&h.renderer);
+    const warned = statusBarRows(&r);
     try testing.expect(!std.mem.eql(u8, clean, warned));
 
     // Every bit of the bar flips, so the rows are the exact complement.
@@ -1087,131 +857,115 @@ test "the warning does not leak into the bitmap" {
     // The status bar's slots are each redrawn by their own task, so an inversion
     // left behind would be partially erased and the frame would come out half
     // inverted. toggleFaultOverlay relies on invertRect being its own inverse.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    const pristine = try testing.allocator.dupe(u8, h.renderer.bitmap.data);
+    r.drawReferenceScreen();
+    const pristine = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(pristine);
 
-    h.renderer.setFaultWarning(true);
-    try h.renderer.showInitialFrame();
+    r.setFaultWarning(true);
+    _ = r.panelFrame();
+    _ = r.packedFrame();
 
-    try testing.expectEqualSlices(u8, pristine, h.renderer.bitmap.data);
+    try testing.expectEqualSlices(u8, pristine, r.bitmap.data);
 }
 
 test "repeated refreshes with the warning on are stable" {
     // An inversion that accumulated would alternate the bar between normal and
     // inverted on every refresh.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    h.renderer.setFaultWarning(true);
+    r.drawReferenceScreen();
+    r.setFaultWarning(true);
 
-    try h.renderer.showInitialFrame();
-    const first: Frame = h.renderer.epd_buffer.*;
-    try h.renderer.updateDisplay(false);
-
-    try testing.expectEqualSlices(u8, &first, h.renderer.epd_buffer);
+    const first: Frame = r.panelFrame().*;
+    try testing.expectEqualSlices(u8, &first, r.panelFrame());
 }
 
 test "the warning leaves everything above the status bar alone" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.packBmpBuffer();
+    r.drawReferenceScreen();
+    r.packBmpBuffer();
     const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     const above_len = display_config.STATUS_BAR_Y * row_bytes;
-    const clean_above = try testing.allocator.dupe(u8, h.renderer.bmp_buffer[0..above_len]);
+    const clean_above = try testing.allocator.dupe(u8, r.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
 
-    h.renderer.setFaultWarning(true);
-    h.renderer.toggleFaultOverlay();
-    h.renderer.packBmpBuffer();
-    h.renderer.toggleFaultOverlay();
+    r.setFaultWarning(true);
+    r.toggleFaultOverlay();
+    r.packBmpBuffer();
+    r.toggleFaultOverlay();
 
-    try testing.expectEqualSlices(u8, clean_above, h.renderer.bmp_buffer[0..above_len]);
+    try testing.expectEqualSlices(u8, clean_above, r.bmp_buffer[0..above_len]);
 }
 
 test "a notice replaces the dashboard and clearing it brings the dashboard back intact" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    const dashboard = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    r.drawReferenceScreen();
+    const dashboard = try testing.allocator.dupe(u8, r.packedFrame());
     defer testing.allocator.free(dashboard);
 
-    h.renderer.showNotice("Pračka dokončila praní");
-    try testing.expect(!std.mem.eql(u8, dashboard, h.renderer.packedFrame()));
+    r.showNotice("Pračka dokončila praní");
+    try testing.expect(!std.mem.eql(u8, dashboard, r.packedFrame()));
 
-    h.renderer.clearNotice();
-    try testing.expectEqualSlices(u8, dashboard, h.renderer.packedFrame());
+    r.clearNotice();
+    try testing.expectEqualSlices(u8, dashboard, r.packedFrame());
 }
 
 test "the dashboard keeps updating underneath a notice" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.showNotice("hello");
-    const shown = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    r.drawReferenceScreen();
+    r.showNotice("hello");
+    const shown = try testing.allocator.dupe(u8, r.packedFrame());
     defer testing.allocator.free(shown);
 
     // A reading lands while the notice is up: the panel does not change...
-    h.renderer.renderCpuLoad(99);
-    try testing.expectEqualSlices(u8, shown, h.renderer.packedFrame());
+    r.renderCpuLoad(99);
+    try testing.expectEqualSlices(u8, shown, r.packedFrame());
 
     // ...and the dashboard it returns to has it.
-    h.renderer.clearNotice();
-    var expected = try Harness.init();
-    expected.wire();
+    r.clearNotice();
+    var expected = try Renderer.init(testing.allocator);
     defer expected.deinit();
     expected.drawReferenceScreen();
-    expected.renderer.renderCpuLoad(99);
-    try testing.expectEqualSlices(u8, expected.renderer.packedFrame(), h.renderer.packedFrame());
+    expected.renderCpuLoad(99);
+    try testing.expectEqualSlices(u8, expected.packedFrame(), r.packedFrame());
 }
 
-test "a notice reaches the panel through the normal update" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+test "a notice reaches the panel's frame, and holds still while it is up" {
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    config.Config.panel_sleep = false;
-    defer config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
+    r.drawReferenceScreen();
+    const dashboard: Frame = r.panelFrame().*;
 
-    h.renderer.showNotice("hello");
-    h.transport.resetLog();
-    try h.renderer.updateDisplay(true);
-    try testing.expect(h.transport.events.items.len > 0);
+    r.showNotice("hello");
+    const shown: Frame = r.panelFrame().*;
+    try testing.expect(!std.mem.eql(u8, &dashboard, &shown));
 
-    // Unchanged while it stays up, so idle ticks cost nothing.
-    h.transport.resetLog();
-    try h.renderer.updateDisplay(true);
-    try testing.expectEqual(@as(usize, 0), h.transport.events.items.len);
+    // Unchanged while it stays up, which is what lets the panel skip idle ticks.
+    try testing.expectEqualSlices(u8, &shown, r.panelFrame());
 }
 
 test "a hardware fault shows over a notice too" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.showNotice("Deploy running");
-    const quiet = try testing.allocator.dupe(u8, h.renderer.packedFrame());
+    r.drawReferenceScreen();
+    r.showNotice("Deploy running");
+    const quiet = try testing.allocator.dupe(u8, r.packedFrame());
     defer testing.allocator.free(quiet);
 
-    h.renderer.setFaultWarning(true);
-    const faulted = h.renderer.packedFrame();
+    r.setFaultWarning(true);
+    const faulted = r.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
     const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
@@ -1220,14 +974,13 @@ test "a hardware fault shows over a notice too" {
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
 
     // And the overlay is not left behind in the notice itself.
-    h.renderer.setFaultWarning(false);
-    try testing.expectEqualSlices(u8, quiet, h.renderer.packedFrame());
+    r.setFaultWarning(false);
+    try testing.expectEqualSlices(u8, quiet, r.packedFrame());
 }
 
 test "the ellipsis never splits the degree sign" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
     var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
@@ -1241,7 +994,7 @@ test "the ellipsis never splits the degree sign" {
     for (0..8) |shift| {
         @memset(buf[0..shift], 'x');
         @memcpy(buf[shift..][0..body.len], body);
-        const layout = h.renderer.layoutNotice(buf[0 .. shift + body.len], &lines, &last_buf);
+        const layout = r.layoutNotice(buf[0 .. shift + body.len], &lines, &last_buf);
 
         const last = lines[layout.count - 1];
         try testing.expect(std.mem.endsWith(u8, last, "..."));
@@ -1250,55 +1003,70 @@ test "the ellipsis never splits the degree sign" {
 }
 
 test "the sleep screen takes over from a notice" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.showNotice("hello");
-    try h.renderer.goToSleep();
+    r.drawReferenceScreen();
+    r.showNotice("hello");
+    r.drawSleepScreen();
 
-    try testing.expect(!h.renderer.notice_shown);
+    try testing.expect(!r.notice_shown);
     // The splash is drawn white on black: a notice would be mostly white.
     var black: usize = 0;
-    for (h.renderer.bitmap.data) |px| black += @intFromBool(px == 0);
-    try testing.expect(black > h.renderer.bitmap.data.len / 2);
+    for (r.bitmap.data) |px| black += @intFromBool(px == 0);
+    try testing.expect(black > r.bitmap.data.len / 2);
+}
+
+test "the sleep screen carries no fault overlay" {
+    // It has no status bar to invert: the overlay would cut a white strip
+    // across the bottom of a black page.
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    r.setFaultWarning(true);
+    r.drawSleepScreen();
+
+    var expected = try Renderer.init(testing.allocator);
+    defer expected.deinit();
+    expected.drawSleepScreen();
+
+    try testing.expectEqualSlices(u8, expected.panelFrame(), r.panelFrame());
+    try testing.expectEqualSlices(u8, expected.packedFrame(), r.packedFrame());
 }
 
 test "a short notice gets the largest font, a longer one steps down" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
     var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
 
-    const short = h.renderer.layoutNotice("Backup done", &lines, &last_buf);
+    const short = r.layoutNotice("Backup done", &lines, &last_buf);
     try testing.expectEqual(FontType.Ubuntu34, short.font);
     try testing.expectEqual(@as(usize, 1), short.count);
 
-    const longer = h.renderer.layoutNotice(
+    const longer = r.layoutNotice(
         "The nightly backup finished in 14 minutes and copied 2.3 GB to the NAS",
         &lines,
         &last_buf,
     );
     try testing.expect(longer.font != .Ubuntu34);
     for (lines[0..longer.count]) |line| {
-        try testing.expect(h.renderer.notice.measureText(line, longer.font) <= display_config.NOTICE_BODY_W);
+        try testing.expect(r.notice.measureText(line, longer.font) <= display_config.NOTICE_BODY_W);
     }
 }
 
 test "the lengths the Hermes skill promises hold" {
     // examples/hermes/sysink-panel/SKILL.md tells an agent what fits; keep it true.
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
     var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
 
     // About 30 characters: the largest font.
-    try testing.expectEqual(FontType.Ubuntu34, h.renderer.layoutNotice("Backup finished, disk is fine.", &lines, &last_buf).font);
+    try testing.expectEqual(FontType.Ubuntu34, r.layoutNotice("Backup finished, disk is fine.", &lines, &last_buf).font);
 
     // About 250: all of it, in the smallest.
     const sentence = "Nightly backup of the NAS finished with warnings. ";
@@ -1306,14 +1074,13 @@ test "the lengths the Hermes skill promises hold" {
         const copies: [6][sentence.len]u8 = @splat(sentence.*);
         break :long @ptrCast(&copies);
     };
-    const layout = h.renderer.layoutNotice(long[0..250], &lines, &last_buf);
+    const layout = r.layoutNotice(long[0..250], &lines, &last_buf);
     try testing.expect(!std.mem.endsWith(u8, lines[layout.count - 1], "..."));
 }
 
 test "a notice too long for the smallest font ends in an ellipsis within the body" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
     const long: *const [100 * 5]u8 = comptime long: {
         const words: [100][5]u8 = @splat("word ".*);
@@ -1321,166 +1088,29 @@ test "a notice too long for the smallest font ends in an ellipsis within the bod
     };
     var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
-    const layout = h.renderer.layoutNotice(long, &lines, &last_buf);
+    const layout = r.layoutNotice(long, &lines, &last_buf);
 
     try testing.expectEqual(FontType.Ubuntu14, layout.font);
     const last = lines[layout.count - 1];
     try testing.expect(std.mem.endsWith(u8, last, "..."));
-    try testing.expect(h.renderer.notice.measureText(last, .Ubuntu14) <= display_config.NOTICE_BODY_W);
+    try testing.expect(r.notice.measureText(last, .Ubuntu14) <= display_config.NOTICE_BODY_W);
     // And the block fits the body height.
-    try testing.expect(layout.count * h.renderer.notice.getLineHeight(.Ubuntu14) <= display_config.NOTICE_BODY_H);
+    try testing.expect(layout.count * r.notice.getLineHeight(.Ubuntu14) <= display_config.NOTICE_BODY_H);
 }
 
 test "no warning means no overlay at all" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
 
-    h.drawReferenceScreen();
-    h.renderer.packBmpBuffer();
-    const clean = try testing.allocator.dupe(u8, h.renderer.bmp_buffer);
+    r.drawReferenceScreen();
+    r.packBmpBuffer();
+    const clean = try testing.allocator.dupe(u8, r.bmp_buffer);
     defer testing.allocator.free(clean);
 
-    h.renderer.setFaultWarning(false);
-    h.renderer.toggleFaultOverlay();
-    h.renderer.packBmpBuffer();
-    h.renderer.toggleFaultOverlay();
+    r.setFaultWarning(false);
+    r.toggleFaultOverlay();
+    r.packBmpBuffer();
+    r.toggleFaultOverlay();
 
-    try testing.expectEqualSlices(u8, clean, h.renderer.bmp_buffer);
-}
-
-// --- panel power state machine ----------------------------------------------
-
-test "an unchanged frame leaves a sleeping panel alone" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-    try testing.expect(h.renderer.panel_asleep);
-
-    h.transport.resetLog();
-    try h.renderer.updateDisplay(true);
-
-    // The whole point of parking the panel: an idle cycle costs nothing.
-    try testing.expectEqual(@as(usize, 0), h.transport.events.items.len);
-    try testing.expect(h.renderer.panel_asleep);
-}
-
-test "a changed frame wakes the panel, restores the reference and parks it again" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-
-    h.transport.resetLog();
-    h.renderer.renderCpuLoad(99); // change the frame
-    try h.renderer.updateDisplay(true);
-
-    // Reference frame restored before the partial update, or it would smear.
-    try testing.expect(h.transport.sentCommand(0x26));
-    try testing.expect(h.transport.sentCommand(0x24));
-    // Partial waveform, not the full one. The last 0x22 is the one that selects
-    // it; the first powers the analog stage up.
-    try testing.expectEqualSlices(u8, &.{0x0F}, h.transport.lastArgsAfter(0x22).?);
-    // Deep sleep mode 1 on the way out.
-    try testing.expectEqualSlices(u8, &.{0x01}, h.transport.argsAfter(0x10).?);
-    try testing.expect(h.renderer.panel_asleep);
-}
-
-test "PANEL_SLEEP=false keeps the controller powered" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    config.Config.panel_sleep = false;
-    defer config.Config.panel_sleep = true;
-
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-
-    try testing.expect(!h.renderer.panel_asleep);
-    try testing.expect(!h.transport.sentCommand(0x10)); // never told to sleep
-}
-
-test "a full refresh rewrites the reference bank" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-
-    h.transport.resetLog();
-    h.renderer.renderCpuLoad(1);
-    try h.renderer.updateDisplay(false);
-
-    // displayBase, not display: leaving the reference stale would make the
-    // following partial updates diff against something that is not on the glass.
-    try testing.expect(h.transport.sentCommand(0x26));
-    try testing.expectEqualSlices(u8, &.{0xC7}, h.transport.argsAfter(0x22).?);
-}
-
-test "a failed update forces the next one to be a full refresh" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    // Awake throughout, so the failure lands in the update itself rather than in
-    // the wake that precedes it.
-    config.Config.panel_sleep = false;
-    defer config.Config.panel_sleep = true;
-
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-
-    // Panel stops releasing BUSY, so the update dies partway through and the
-    // glass no longer matches the reference frame.
-    h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50);
-    try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
-    try testing.expect(h.renderer.panel_state_unknown);
-
-    // A partial update would now smear, so it must be promoted to a full one.
-    h.transport.busy_reads_remaining = 0;
-    h.transport.resetLog();
-    try h.renderer.updateDisplay(true);
-
-    try testing.expectEqualSlices(u8, &.{0xC7}, h.transport.lastArgsAfter(0x22).?);
-    try testing.expect(!h.renderer.panel_state_unknown);
-}
-
-test "a failed wake leaves the panel marked asleep and the glass trusted" {
-    var h = try Harness.init();
-    h.wire();
-    defer h.deinit();
-
-    config.Config.panel_sleep = true;
-    h.drawReferenceScreen();
-    try h.renderer.showInitialFrame();
-    try testing.expect(h.renderer.panel_asleep);
-
-    // reInit fails, so the wake never completes.
-    h.transport.busy_reads_remaining = std.math.maxInt(u32);
-    h.renderer.renderCpuLoad(50);
-    try testing.expectError(error.EpdBusyTimeout, h.renderer.updateDisplay(true));
-
-    // reInit drives nothing, so the glass still matches the reference and the
-    // next update may still be partial. The panel stays marked asleep, which is
-    // what makes the next attempt retry the wake.
-    try testing.expect(!h.renderer.panel_state_unknown);
-    try testing.expect(h.renderer.panel_asleep);
-
-    // And it does recover on its own once the panel responds again.
-    h.transport.busy_reads_remaining = 0;
-    h.transport.resetLog();
-    try h.renderer.updateDisplay(true);
-    try testing.expect(h.transport.sentCommand(0x26)); // reference restored
-    try testing.expect(h.renderer.panel_asleep);
+    try testing.expectEqualSlices(u8, clean, r.bmp_buffer);
 }

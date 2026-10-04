@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const Renderer = @import("display_renderer.zig").Renderer;
-const FakeTransport = @import("waveshare_epd/fake_transport.zig").FakeTransport;
 
 const output_path = "src/testdata/golden_main.bin";
 
@@ -14,19 +13,16 @@ pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    var transport = FakeTransport.init(allocator);
-    defer transport.deinit();
-
-    var renderer = try Renderer(FakeTransport).init(allocator, io, &transport);
+    var renderer = try Renderer.init(allocator);
     defer renderer.deinit();
 
     renderer.drawReferenceScreen();
-    renderer.convertTo1Bit(renderer.epd_buffer);
+    const frame = renderer.panelFrame();
 
     var dir = try std.Io.Dir.cwd().openDir(io, "src/testdata", .{});
     defer dir.close(io);
-    try dir.writeFile(io, .{ .sub_path = "golden_main.bin", .data = renderer.epd_buffer });
+    try dir.writeFile(io, .{ .sub_path = "golden_main.bin", .data = frame });
 
-    std.debug.print("wrote {s} ({d} bytes)\n", .{ output_path, renderer.epd_buffer.len });
+    std.debug.print("wrote {s} ({d} bytes)\n", .{ output_path, frame.len });
     return 0;
 }

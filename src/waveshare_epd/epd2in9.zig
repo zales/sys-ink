@@ -1,5 +1,4 @@
 const std = @import("std");
-const EpdConfig = @import("epdconfig.zig").EpdConfig;
 
 const log = std.log.scoped(.epd);
 
@@ -102,7 +101,8 @@ const WS_20_30 = [_]u8{
 };
 
 /// The panel driver, parameterised by its transport so tests can substitute a
-/// recorder for the real SPI/GPIO path. `EPD` below is the production instance.
+/// recorder for the real SPI/GPIO path. The daemon instantiates it on
+/// `EpdConfig`, through `panel.zig`.
 ///
 /// The contract is checked at comptime, so a transport missing a declaration
 /// fails with a direct message instead of an error deep inside a call.
@@ -483,9 +483,6 @@ fn verifyTransport(comptime T: type) void {
         );
     }
 }
-
-/// The driver as used in production.
-pub const EPD = Epd(EpdConfig);
 
 // ----------------------------------------------------------------------------
 // Tests
