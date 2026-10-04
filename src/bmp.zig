@@ -83,7 +83,7 @@ pub fn buildHeader(width: u32, height: u32) [header_len]u8 {
 
 /// BMP rows are padded to a 4-byte boundary.
 pub fn rowStride(width: u32) u32 {
-    return ((width + 31) / 32) * 4;
+    return @divCeil(width, 32) * 4;
 }
 
 /// Bytes a serialised 1-bit BMP of these dimensions occupies.
@@ -121,7 +121,7 @@ pub fn serialize(dest: []u8, buffer: []const u8, width: u32, height: u32) error{
 
     dest[0..header_len].* = buildHeader(width, height);
 
-    const src_row_bytes = (width + 7) / 8;
+    const src_row_bytes = @divCeil(width, 8);
     for (0..height) |y| {
         packRow(dest[header_len + y * stride ..][0..stride], buffer, y, src_row_bytes);
     }
@@ -133,7 +133,7 @@ fn writeBmp(io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, heigh
     const stride = rowStride(width);
     if (stride > max_stride) return error.ImageTooWide;
 
-    const src_row_bytes = (width + 7) / 8;
+    const src_row_bytes = @divCeil(width, 8);
 
     var write_buf: [4096]u8 = undefined;
     var writer = file.writer(io, &write_buf);
@@ -198,7 +198,7 @@ test "serialize matches what the file writer produces" {
     // path grows its own idea of polarity or padding, the bytes diverge.
     const width = 296;
     const height = 128;
-    const src_row_bytes = (width + 7) / 8;
+    const src_row_bytes = @divCeil(width, 8);
 
     var frame: [src_row_bytes * height]u8 = undefined;
     for (&frame, 0..) |*b, i| b.* = @truncate(i * 31 + 7);

@@ -191,7 +191,7 @@ pub const Bitmap = struct {
             // read anyway, because release builds have no bounds checks and an
             // overrun here would be silent.
             const bits_needed = @as(usize, glyph.width) * @as(usize, glyph.height);
-            std.debug.assert(glyph.data.len >= (bits_needed + 7) / 8);
+            std.debug.assert(glyph.data.len >= @divCeil(bits_needed, 8));
             const available_bits = glyph.data.len * 8;
 
             var bit: usize = 0;
@@ -541,7 +541,7 @@ test "every glyph carries enough data for its own dimensions" {
     for (fonts) |font| {
         for (font.glyphs) |glyph| {
             const bits = @as(usize, glyph.width) * @as(usize, glyph.height);
-            try testing.expect(glyph.data.len >= (bits + 7) / 8);
+            try testing.expect(glyph.data.len >= @divCeil(bits, 8));
             glyphs_checked += 1;
         }
     }

@@ -77,7 +77,7 @@ pub fn Renderer(comptime Transport: type) type {
             const last_epd_buffer = try allocator.create(Frame);
             errdefer allocator.destroy(last_epd_buffer);
 
-            const bmp_row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+            const bmp_row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
             const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
 
             return .{
@@ -533,7 +533,7 @@ pub fn Renderer(comptime Transport: type) type {
             const src = self.frameBitmap();
             const width = src.width;
             const height = src.height;
-            const row_bytes = (width + 7) / 8;
+            const row_bytes = @divCeil(width, 8);
 
             // Pack to 1-bit without rotation, into the preallocated scratch buffer.
             var y: u32 = 0;
@@ -1037,7 +1037,7 @@ test "a missing sensor is drawn as a dash, not as zero" {
 
 /// Rows of the unrotated BMP buffer covering the status bar.
 fn statusBarRows(r: *TestRenderer) []const u8 {
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     return r.bmp_buffer[display_config.STATUS_BAR_Y * row_bytes ..];
 }
 
@@ -1126,7 +1126,7 @@ test "the warning leaves everything above the status bar alone" {
 
     h.drawReferenceScreen();
     h.renderer.packBmpBuffer();
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     const above_len = display_config.STATUS_BAR_Y * row_bytes;
     const clean_above = try testing.allocator.dupe(u8, h.renderer.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
@@ -1214,7 +1214,7 @@ test "a hardware fault shows over a notice too" {
     const faulted = h.renderer.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     const bar_start = display_config.STATUS_BAR_Y * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);

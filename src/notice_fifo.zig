@@ -327,5 +327,5 @@ test "a sender that never stops is read a pipeful at a time" {
         try testing.expect(fifo.receive() != null);
     }
     // Every call but the last stopped at its budget with more still waiting.
-    try testing.expectEqual((written + max_drain - 1) / max_drain, calls);
+    try testing.expectEqual(@divCeil(written, max_drain), calls);
 }

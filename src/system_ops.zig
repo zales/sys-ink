@@ -217,7 +217,7 @@ pub const SystemOps = struct {
         }
 
         // Round up, as df does, so the two agree rather than differing by one.
-        const percent = (100 * used + usable - 1) / usable;
+        const percent = @divCeil(100 * used, usable);
         self.last_disk_usage = @intCast(@min(100, percent));
         return self.last_disk_usage;
     }

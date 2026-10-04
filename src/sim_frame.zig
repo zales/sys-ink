@@ -19,7 +19,7 @@ pub const SimRenderer = Renderer(FakeTransport);
 pub const width = display_config.DISPLAY_WIDTH;
 pub const height = display_config.DISPLAY_HEIGHT;
 /// Row stride of the renderer's 1-bit frame, matching `packBmpBuffer`.
-pub const row_bytes = (width + 7) / 8;
+pub const row_bytes = @divCeil(width, 8);
 
 /// Fault overlay on for 6 s out of every 30.
 pub fn faultActive(t: f64) bool {

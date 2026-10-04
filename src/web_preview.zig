@@ -43,7 +43,7 @@ const log = std.log.scoped(.preview);
 
 const width = display_config.DISPLAY_WIDTH;
 const height = display_config.DISPLAY_HEIGHT;
-const frame_bytes = ((width + 7) / 8) * height;
+const frame_bytes = @divCeil(width, 8) * height;
 
 pub const WebPreview = struct {
     io: std.Io,
