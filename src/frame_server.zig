@@ -34,11 +34,15 @@ pub const accept_backoff_ms = 250;
 /// backoff; the caller should simply go round again. `running` is checked by the
 /// caller, not here.
 ///
+/// Null at once when the task was cancelled: that is the caller being stopped,
+/// not a failure, and the backoff would only hold its shutdown up.
+///
 /// The deadline that keeps a stalled peer from taking the loop down lives in
 /// `readRequest`, not here — see the note there for why it cannot be a socket
 /// option.
 pub fn accept(server: *net.Server, io: std.Io) ?net.Stream {
     return server.accept(io) catch |err| {
+        if (err == error.Canceled) return null;
         log.debug("Preview accept failed: {t}", .{err});
         std.Io.sleep(io, .fromMilliseconds(accept_backoff_ms), .awake) catch {};
         return null;
