@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
 
 jobs:
   test:
@@ -25,7 +25,7 @@ jobs:
 
       # The mode releases are built in, where the optimiser has had its say.
       - name: Unit tests, optimised as released
-        run: zig build test -Doptimize=ReleaseSafe --summary all
+        run: zig build test -Doptimize=safe --summary all
 
       - name: Type-check Linux-only modules
         run: zig build check

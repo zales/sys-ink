@@ -190,13 +190,13 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// Send command byte
         fn sendCommand(self: *Self, command: Command) !void {
             try self.config.digitalWrite(Transport.DC_PIN, 0);
-            try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
+            try self.config.spiWrite(&[_]u8{@backingInt(command)});
         }
 
         /// Send a command followed by its arguments, as two framed transfers.
         fn sendCommandArgs(self: *Self, command: Command, args: []const u8) !void {
             try self.config.digitalWrite(Transport.DC_PIN, 0);
-            try self.config.spiWrite(&[_]u8{@intFromEnum(command)});
+            try self.config.spiWrite(&[_]u8{@backingInt(command)});
 
             if (args.len > 0) {
                 try self.config.digitalWrite(Transport.DC_PIN, 1);
@@ -304,7 +304,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Select what the next MASTER_ACTIVATION will do.
         fn setDisplayUpdate(self: *Self, mode: DisplayUpdate) !void {
-            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@intFromEnum(mode)});
+            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@backingInt(mode)});
         }
 
         /// Drive a full refresh: every pixel is repainted with the full waveform,

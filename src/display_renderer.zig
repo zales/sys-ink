@@ -77,7 +77,7 @@ pub fn Renderer(comptime Transport: type) type {
             const last_epd_buffer = try allocator.create(Frame);
             errdefer allocator.destroy(last_epd_buffer);
 
-            const bmp_row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+            const bmp_row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
             const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
 
             return .{
@@ -533,7 +533,7 @@ pub fn Renderer(comptime Transport: type) type {
             const src = self.frameBitmap();
             const width = src.width;
             const height = src.height;
-            const row_bytes = (width + 7) / 8;
+            const row_bytes = @divCeil(width, 8);
 
             // Pack to 1-bit without rotation, into the preallocated scratch buffer.
             var y: u32 = 0;
@@ -564,7 +564,7 @@ pub fn Renderer(comptime Transport: type) type {
             const is_critical = load >= config.Config.threshold_cpu_critical;
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}%", .{load}) catch "?";
+            const text = std.mem.print(&buf, "{d}%", .{load}) catch "?";
             self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
         }
 
@@ -573,7 +573,7 @@ pub fn Renderer(comptime Transport: type) type {
             const is_critical = temp >= config.Config.threshold_temp_critical;
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}°C", .{temp}) catch "?";
+            const text = std.mem.print(&buf, "{d}°C", .{temp}) catch "?";
             self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
         }
 
@@ -582,7 +582,7 @@ pub fn Renderer(comptime Transport: type) type {
             const is_critical = usage >= config.Config.threshold_mem_critical;
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
+            const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
             self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
         }
 
@@ -591,7 +591,7 @@ pub fn Renderer(comptime Transport: type) type {
             const is_critical = usage >= config.Config.threshold_disk_critical;
 
             var buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}%", .{usage}) catch "?";
+            const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
             self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
@@ -601,7 +601,7 @@ pub fn Renderer(comptime Transport: type) type {
             const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
 
             var buf: [16]u8 = undefined;
-            const text = if (temp) |t| std.fmt.bufPrint(&buf, "{d}°C", .{t}) catch "?" else "-";
+            const text = if (temp) |t| std.mem.print(&buf, "{d}°C", .{t}) catch "?" else "-";
             self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
         }
 
@@ -612,7 +612,7 @@ pub fn Renderer(comptime Transport: type) type {
             self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
             var buf: [16]u8 = undefined;
-            const text = if (rpm) |r| std.fmt.bufPrint(&buf, "{d}", .{r}) catch "?" else "-";
+            const text = if (rpm) |r| std.mem.print(&buf, "{d}", .{r}) catch "?" else "-";
             self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
 
             // The unit sits in the header, as it does for traffic, and is drawn
@@ -661,8 +661,8 @@ pub fn Renderer(comptime Transport: type) type {
 
             const text = if (signal) |s| blk: {
                 const candidates = [_][]const u8{
-                    std.fmt.bufPrint(&with_unit, "{d} dBm", .{s}) catch "?",
-                    std.fmt.bufPrint(&bare, "{d}", .{s}) catch "?",
+                    std.mem.print(&with_unit, "{d} dBm", .{s}) catch "?",
+                    std.mem.print(&bare, "{d}", .{s}) catch "?",
                 };
                 break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.SIGNAL_VALUE_MAX_W);
             } else "N/A";
@@ -725,15 +725,15 @@ pub fn Renderer(comptime Transport: type) type {
             var one_dp: [32]u8 = undefined;
             var no_dp: [32]u8 = undefined;
             const candidates = [_][]const u8{
-                std.fmt.bufPrint(&two_dp, "{d:.2}", .{speed}) catch "?",
-                std.fmt.bufPrint(&one_dp, "{d:.1}", .{speed}) catch "?",
-                std.fmt.bufPrint(&no_dp, "{d:.0}", .{speed}) catch "?",
+                std.mem.print(&two_dp, "{d:.2}", .{speed}) catch "?",
+                std.mem.print(&one_dp, "{d:.1}", .{speed}) catch "?",
+                std.mem.print(&no_dp, "{d:.0}", .{speed}) catch "?",
             };
             const value_text = self.bitmap.fitText(&candidates, .Ubuntu20, display_config.TEXT_AREA_TRAFFIC_VALUE.width);
             self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
 
             var unit_buf: [32]u8 = undefined;
-            const unit_text = std.fmt.bufPrint(&unit_buf, "{s}/s", .{unit}) catch "?";
+            const unit_text = std.mem.print(&unit_buf, "{s}/s", .{unit}) catch "?";
             self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
         }
 
@@ -773,7 +773,7 @@ pub fn Renderer(comptime Transport: type) type {
         /// the same line.
         fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
             const width = display_config.TEXT_AREA_APT.width;
-            const text = std.fmt.bufPrint(buf, "{d}", .{count}) catch "?";
+            const text = std.mem.print(buf, "{d}", .{count}) catch "?";
 
             for (apt_fonts) |font| {
                 if (self.bitmap.measureText(text, font) <= width) return .{ .text = text, .font = font };
@@ -1037,7 +1037,7 @@ test "a missing sensor is drawn as a dash, not as zero" {
 
 /// Rows of the unrotated BMP buffer covering the status bar.
 fn statusBarRows(r: *TestRenderer) []const u8 {
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     return r.bmp_buffer[display_config.STATUS_BAR_Y * row_bytes ..];
 }
 
@@ -1126,7 +1126,7 @@ test "the warning leaves everything above the status bar alone" {
 
     h.drawReferenceScreen();
     h.renderer.packBmpBuffer();
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     const above_len = display_config.STATUS_BAR_Y * row_bytes;
     const clean_above = try testing.allocator.dupe(u8, h.renderer.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
@@ -1214,7 +1214,7 @@ test "a hardware fault shows over a notice too" {
     const faulted = h.renderer.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
-    const row_bytes = (display_config.DISPLAY_WIDTH + 7) / 8;
+    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
     const bar_start = display_config.STATUS_BAR_Y * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
@@ -1233,7 +1233,10 @@ test "the ellipsis never splits the degree sign" {
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
     // Folded text keeps the degree sign as two bytes. Shifting the text a
     // character at a time moves the cut across it, whatever the font metrics.
-    const body = "\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}\u{B0}" ** 80;
+    const body: *const [640 * 2]u8 = comptime body: {
+        const signs: [640][2]u8 = @splat("\u{B0}".*);
+        break :body @ptrCast(&signs);
+    };
     var buf: [8 + body.len]u8 = undefined;
     for (0..8) |shift| {
         @memset(buf[0..shift], 'x');
@@ -1298,7 +1301,11 @@ test "the lengths the Hermes skill promises hold" {
     try testing.expectEqual(FontType.Ubuntu34, h.renderer.layoutNotice("Backup finished, disk is fine.", &lines, &last_buf).font);
 
     // About 250: all of it, in the smallest.
-    const long = "Nightly backup of the NAS finished with warnings. " ** 6;
+    const sentence = "Nightly backup of the NAS finished with warnings. ";
+    const long: *const [6 * sentence.len]u8 = comptime long: {
+        const copies: [6][sentence.len]u8 = @splat(sentence.*);
+        break :long @ptrCast(&copies);
+    };
     const layout = h.renderer.layoutNotice(long[0..250], &lines, &last_buf);
     try testing.expect(!std.mem.endsWith(u8, lines[layout.count - 1], "..."));
 }
@@ -1308,7 +1315,10 @@ test "a notice too long for the smallest font ends in an ellipsis within the bod
     h.wire();
     defer h.deinit();
 
-    const long = "word " ** 100;
+    const long: *const [100 * 5]u8 = comptime long: {
+        const words: [100][5]u8 = @splat("word ".*);
+        break :long @ptrCast(&words);
+    };
     var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
     const layout = h.renderer.layoutNotice(long, &lines, &last_buf);

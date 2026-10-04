@@ -191,7 +191,7 @@ pub const Bitmap = struct {
             // read anyway, because release builds have no bounds checks and an
             // overrun here would be silent.
             const bits_needed = @as(usize, glyph.width) * @as(usize, glyph.height);
-            std.debug.assert(glyph.data.len >= (bits_needed + 7) / 8);
+            std.debug.assert(glyph.data.len >= @divCeil(bits_needed, 8));
             const available_bits = glyph.data.len * 8;
 
             var bit: usize = 0;
@@ -541,7 +541,7 @@ test "every glyph carries enough data for its own dimensions" {
     for (fonts) |font| {
         for (font.glyphs) |glyph| {
             const bits = @as(usize, glyph.width) * @as(usize, glyph.height);
-            try testing.expect(glyph.data.len >= (bits + 7) / 8);
+            try testing.expect(glyph.data.len >= @divCeil(bits, 8));
             glyphs_checked += 1;
         }
     }
@@ -666,8 +666,8 @@ test "signal reading fits its slot across the whole dBm range" {
         var with_unit: [16]u8 = undefined;
         var bare: [16]u8 = undefined;
         const candidates = [_][]const u8{
-            try std.fmt.bufPrint(&with_unit, "{d} dBm", .{s}),
-            try std.fmt.bufPrint(&bare, "{d}", .{s}),
+            try std.mem.print(&with_unit, "{d} dBm", .{s}),
+            try std.mem.print(&bare, "{d}", .{s}),
         };
         const chosen = bmp.fitText(&candidates, .Ubuntu14, dc.SIGNAL_VALUE_MAX_W);
         try testing.expect(bmp.measureText(chosen, .Ubuntu14) <= dc.SIGNAL_VALUE_MAX_W);
@@ -676,7 +676,7 @@ test "signal reading fits its slot across the whole dBm range" {
     // Two-digit readings keep the unit; only the three-digit extreme drops it.
     var b1: [16]u8 = undefined;
     var b2: [16]u8 = undefined;
-    const normal = [_][]const u8{ try std.fmt.bufPrint(&b1, "{d} dBm", .{@as(i32, -40)}), try std.fmt.bufPrint(&b2, "{d}", .{@as(i32, -40)}) };
+    const normal = [_][]const u8{ try std.mem.print(&b1, "{d} dBm", .{@as(i32, -40)}), try std.mem.print(&b2, "{d}", .{@as(i32, -40)}) };
     try testing.expectEqualStrings("-40 dBm", bmp.fitText(&normal, .Ubuntu14, dc.SIGNAL_VALUE_MAX_W));
 }
 
@@ -733,11 +733,11 @@ test "traffic values fit their slot across the whole range" {
         const scaled = parse.scaleBytes(rate);
 
         var buf: [32]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{d:.2}", .{scaled.value});
+        const text = try std.mem.print(&buf, "{d:.2}", .{scaled.value});
         try testing.expect(bmp.measureText(text, .Ubuntu20) <= slot);
 
         var unit_buf: [32]u8 = undefined;
-        const unit = try std.fmt.bufPrint(&unit_buf, "{s}/s", .{scaled.unit});
+        const unit = try std.mem.print(&unit_buf, "{s}/s", .{scaled.unit});
         try testing.expect(bmp.measureText(unit, .Ubuntu14) <= dc.TEXT_AREA_TRAFFIC_UNIT.width);
     }
 }

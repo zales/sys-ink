@@ -33,7 +33,7 @@ test {
     _ = @import("http_request.zig");
     _ = @import("api.zig");
 
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         _ = @import("notice_fifo.zig");
         _ = @import("web_preview.zig");
     }

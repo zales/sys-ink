@@ -5,13 +5,7 @@ const net = std.Io.net;
 
 const builtin = @import("builtin");
 
-const c = @cImport({
-    @cInclude("netdb.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("netinet/tcp.h");
-});
+const c = @import("c"); // src/c.h
 
 const log = std.log.scoped(.mqtt);
 
@@ -69,7 +63,7 @@ const payload_online = "online";
 const payload_offline = "offline";
 
 fn availabilityTopic(buf: []u8, topic_prefix: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ topic_prefix, availability_suffix });
+    return std.mem.print(buf, "{s}/{s}", .{ topic_prefix, availability_suffix });
 }
 
 /// Topic, under the topic prefix, that notices are published to. See
@@ -176,7 +170,7 @@ pub const MqttClient = struct {
             .discovery_enabled = cfg.discovery_enabled,
             .notices_enabled = cfg.notices_enabled,
         };
-        if (std.fmt.bufPrint(&self.notify_topic_buf, "{s}/{s}", .{ cfg.topic_prefix, notify_suffix })) |topic| {
+        if (std.mem.print(&self.notify_topic_buf, "{s}/{s}", .{ cfg.topic_prefix, notify_suffix })) |topic| {
             self.notify_topic_len = topic.len;
         } else |_| {
             log.warn("MQTT_TOPIC_PREFIX too long; notices over MQTT disabled", .{});
@@ -276,7 +270,7 @@ pub const MqttClient = struct {
     /// Probes run while the connection is idle; unacknowledged data is capped
     /// by TCP_USER_TIMEOUT instead, since publishes every cycle keep it busy.
     fn detectDeadPeer(handle: net.Socket.Handle) void {
-        if (builtin.os.tag != .linux) return;
+        if (builtin.target.os.tag != .linux) return;
 
         const options = [_]struct { level: c_int, name: c_int, value: c_int }{
             .{ .level = c.SOL_SOCKET, .name = c.SO_KEEPALIVE, .value = 1 },
@@ -350,7 +344,7 @@ pub const MqttClient = struct {
     /// copied into `notice_buf`, if it was one.
     fn handlePacket(self: *Self, packet: Packet) ?usize {
         switch (packet.kind()) {
-            @intFromEnum(PacketType.PUBLISH) => {
+            @backingInt(PacketType.PUBLISH) => {
                 const message = parsePublish(packet) catch {
                     log.warn("Malformed PUBLISH from the MQTT broker", .{});
                     return null;
@@ -374,7 +368,7 @@ pub const MqttClient = struct {
                 @memcpy(self.notice_buf[0..message.payload.len], message.payload);
                 return message.payload.len;
             },
-            @intFromEnum(PacketType.SUBACK) => {
+            @backingInt(PacketType.SUBACK) => {
                 // Packet id, then one return code per filter; 0x80 is refusal.
                 if (packet.body.len >= 3 and packet.body[2] == 0x80) {
                     log.warn("MQTT broker refused the subscription to {s}; check its ACL", .{self.notifyTopic()});
@@ -386,7 +380,7 @@ pub const MqttClient = struct {
     }
 
     fn sendPuback(self: *Self, packet_id: u16) void {
-        var packet = [_]u8{ @as(u8, @intFromEnum(PacketType.PUBACK)) << 4, 0x02, 0, 0 };
+        var packet = [_]u8{ @as(u8, @backingInt(PacketType.PUBACK)) << 4, 0x02, 0, 0 };
         std.mem.writeInt(u16, packet[2..4], packet_id, .big);
         self.sendPacket(&packet) catch {};
     }
@@ -455,7 +449,7 @@ pub const MqttClient = struct {
     /// Publish a message under the configured topic prefix.
     pub fn publish(self: *Self, topic: []const u8, payload: []const u8, retain: bool) !void {
         var full_topic_buf: [256]u8 = undefined;
-        const full_topic = std.fmt.bufPrint(&full_topic_buf, "{s}/{s}", .{ self.topic_prefix, topic }) catch
+        const full_topic = std.mem.print(&full_topic_buf, "{s}/{s}", .{ self.topic_prefix, topic }) catch
             return error.TopicTooLong;
 
         return self.publishRaw(full_topic, payload, retain);
@@ -597,7 +591,7 @@ pub const MqttClient = struct {
 
 /// Where Home Assistant looks for `sensor`'s discovery config.
 fn discoveryTopic(buf: []u8, sensor: Sensor, node_id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "homeassistant/{t}/{s}/{s}/config", .{ sensor.component, node_id, sensor.id });
+    return std.mem.print(buf, "homeassistant/{t}/{s}/{s}/config", .{ sensor.component, node_id, sensor.id });
 }
 
 /// Room for the largest discovery payload, with space for a long prefix.
@@ -630,7 +624,7 @@ fn discoveryPayload(buf: []u8, sensor: Sensor, opts: DiscoveryOptions) ![]const 
     const w = &writer;
 
     var state_topic_buf: [320]u8 = undefined;
-    const state_topic = try std.fmt.bufPrint(&state_topic_buf, "{s}/{s}", .{ opts.topic_prefix, sensor.id });
+    const state_topic = try std.mem.print(&state_topic_buf, "{s}/{s}", .{ opts.topic_prefix, sensor.id });
 
     try w.print("{{\"name\":\"{s}\"", .{sensor.name});
     try w.writeAll(",\"state_topic\":");
@@ -667,7 +661,7 @@ const notify_object_id = "panel";
 
 /// Where Home Assistant looks for the notify entity's discovery config.
 fn notifyDiscoveryTopic(buf: []u8, node_id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "homeassistant/notify/{s}/{s}/config", .{ node_id, notify_object_id });
+    return std.mem.print(buf, "homeassistant/notify/{s}/{s}/config", .{ node_id, notify_object_id });
 }
 
 /// Discovery config for a notify entity that sends to the notice topic, so
@@ -680,7 +674,7 @@ fn notifyDiscoveryPayload(buf: []u8, node_id: []const u8, topic_prefix: []const 
     const w = &writer;
 
     var command_topic_buf: [320]u8 = undefined;
-    const command_topic = try std.fmt.bufPrint(&command_topic_buf, "{s}/{s}", .{ topic_prefix, notify_suffix });
+    const command_topic = try std.mem.print(&command_topic_buf, "{s}/{s}", .{ topic_prefix, notify_suffix });
 
     try w.writeAll("{\"name\":\"Panel\",\"command_topic\":");
     try std.json.Stringify.encodeJsonString(command_topic, .{}, w);
@@ -698,7 +692,7 @@ fn notifyDiscoveryPayload(buf: []u8, node_id: []const u8, topic_prefix: []const 
 
 /// Validate a CONNACK packet and map its return code to an error.
 fn interpretConnack(packet: [4]u8) !void {
-    if (packet[0] >> 4 != @intFromEnum(MqttClient.PacketType.CONNACK)) return error.UnexpectedPacket;
+    if (packet[0] >> 4 != @backingInt(MqttClient.PacketType.CONNACK)) return error.UnexpectedPacket;
 
     return switch (packet[3]) {
         0 => {},
@@ -742,7 +736,7 @@ fn buildPublish(buf: []u8, topic: []const u8, payload: []const u8, retain: bool)
     if (5 + remaining_len > buf.len) return error.PayloadTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = (@as(u8, @intFromEnum(MqttClient.PacketType.PUBLISH)) << 4) | @intFromBool(retain);
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.PUBLISH)) << 4) | @intFromBool(retain);
     pos += 1;
 
     pos += encodeRemainingLength(buf[pos..], remaining_len);
@@ -766,7 +760,7 @@ fn buildSubscribe(buf: []u8, packet_id: u16, topic: []const u8) ![]const u8 {
 
     var pos: usize = 0;
     // MQTT-3.8.1-1: the reserved flags of SUBSCRIBE are 0b0010.
-    buf[pos] = (@as(u8, @intFromEnum(MqttClient.PacketType.SUBSCRIBE)) << 4) | 0x02;
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.SUBSCRIBE)) << 4) | 0x02;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
     std.mem.writeInt(u16, buf[pos..][0..2], packet_id, .big);
@@ -932,7 +926,7 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
     if (5 + remaining_len > buf.len) return error.PacketTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = @as(u8, @intFromEnum(MqttClient.PacketType.CONNECT)) << 4;
+    buf[pos] = @as(u8, @backingInt(MqttClient.PacketType.CONNECT)) << 4;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
 
@@ -970,7 +964,7 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
 /// getaddrinfo has internal timeouts but none we control.
 fn resolveHost(host: []const u8) ![4]u8 {
     var host_buf: [256]u8 = undefined;
-    const host_z = std.fmt.bufPrintZ(&host_buf, "{s}", .{host}) catch return error.HostTooLong;
+    const host_z = std.mem.printSentinel(&host_buf, "{s}", .{host}, 0) catch return error.HostTooLong;
 
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
@@ -984,7 +978,7 @@ fn resolveHost(host: []const u8) ![4]u8 {
     const sin: *c.struct_sockaddr_in = @ptrCast(@alignCast(addr_info.ai_addr));
 
     // s_addr is already in network order, which is the octet order we want.
-    return @bitCast(sin.sin_addr.s_addr);
+    return std.mem.toBytes(sin.sin_addr.s_addr);
 }
 
 /// MQTT configuration
@@ -1118,8 +1112,8 @@ test "buildConnect places the will between client id and credentials" {
 
 test "buildConnect rejects an oversized client id" {
     var buf: [32]u8 = undefined;
-    const long_id = "x" ** 64;
-    try testing.expectError(error.PacketTooLarge, buildConnect(&buf, long_id, null, null, null));
+    const long_id: [64]u8 = @splat('x');
+    try testing.expectError(error.PacketTooLarge, buildConnect(&buf, &long_id, null, null, null));
 }
 
 test "interpretConnack accepts success and maps refusals" {
@@ -1203,7 +1197,7 @@ test "nodeId keeps only what a discovery topic accepts" {
     try testing.expectEqualStrings("a-b_c", nodeId(&buf, "a-b_c"));
     try testing.expectEqualStrings("pi_4_home_", nodeId(&buf, "pi/4 home#"));
     try testing.expectEqualStrings(default_node_id, nodeId(&buf, ""));
-    try testing.expectEqual(@as(usize, max_node_id_len), nodeId(&buf, "x" ** 100).len);
+    try testing.expectEqual(@as(usize, max_node_id_len), nodeId(&buf, &@as([100]u8, @splat('x'))).len);
 }
 
 test "every discovery payload is valid JSON carrying expiry and state class" {
@@ -1227,7 +1221,7 @@ test "every discovery payload is valid JSON carrying expiry and state class" {
         try testing.expectEqualStrings("odd\"prefix\\/status", obj.get("availability_topic").?.string);
         var expected_buf: [64]u8 = undefined;
         try testing.expectEqualStrings(
-            try std.fmt.bufPrint(&expected_buf, "odd\"prefix\\/{s}", .{sensor.id}),
+            try std.mem.print(&expected_buf, "odd\"prefix\\/{s}", .{sensor.id}),
             obj.get("state_topic").?.string,
         );
         if (sensor.state_class) |sc| {
@@ -1240,8 +1234,8 @@ test "every discovery payload is valid JSON carrying expiry and state class" {
 
 test "discovery fits the packet with a long topic prefix" {
     var buf: [max_node_id_len]u8 = undefined;
-    const node_id = nodeId(&buf, "x" ** 100);
-    const prefix = "p" ** 100;
+    const node_id = nodeId(&buf, &@as([100]u8, @splat('x')));
+    const prefix: [100]u8 = @splat('p');
 
     for (sensors) |sensor| {
         var topic_buf: [160]u8 = undefined;
@@ -1249,7 +1243,7 @@ test "discovery fits the packet with a long topic prefix" {
         var payload_buf: [discovery_payload_max]u8 = undefined;
         const payload = try discoveryPayload(&payload_buf, sensor, .{
             .node_id = node_id,
-            .topic_prefix = prefix,
+            .topic_prefix = &prefix,
             .expire_after = 90,
         });
         var packet_buf: [MqttClient.max_packet_len]u8 = undefined;
@@ -1284,12 +1278,12 @@ test "the notify entity sends to the notice topic and belongs to the device" {
 
 test "the notify discovery fits the packet with a long topic prefix" {
     var buf: [max_node_id_len]u8 = undefined;
-    const node_id = nodeId(&buf, "x" ** 100);
+    const node_id = nodeId(&buf, &@as([100]u8, @splat('x')));
 
     var topic_buf: [160]u8 = undefined;
     const topic = try notifyDiscoveryTopic(&topic_buf, node_id);
     var payload_buf: [discovery_payload_max]u8 = undefined;
-    const payload = try notifyDiscoveryPayload(&payload_buf, node_id, "p" ** 100);
+    const payload = try notifyDiscoveryPayload(&payload_buf, node_id, &@as([100]u8, @splat('p')));
     var packet_buf: [MqttClient.max_packet_len]u8 = undefined;
     _ = try buildPublish(&packet_buf, topic, payload, true);
 }

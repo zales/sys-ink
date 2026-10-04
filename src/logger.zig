@@ -106,7 +106,7 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(level) > @intFromEnum(config.Config.log_level_std)) return;
+    if (@backingInt(level) > @backingInt(config.Config.log_level_std)) return;
 
     const io = std.Options.debug_io;
     const scope_prefix = comptime if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ";

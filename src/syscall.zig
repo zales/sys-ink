@@ -4,7 +4,7 @@
 //! When the binary links libc — this one does — `std.posix.errno` resolves to
 //! `std.c.errno`, which is:
 //!
-//!     if (rc == -1) @enumFromInt(_errno().*) else .SUCCESS
+//!     if (rc == -1) @fromBackingInt(@intCast(_errno().*)) else .SUCCESS
 //!
 //! That expects the libc convention: return -1, put the code in the `errno`
 //! variable. Calls made through `std.os.linux` are raw syscalls that return
@@ -26,7 +26,7 @@ const std = @import("std");
 pub fn errno(rc: usize) std.os.linux.E {
     const signed: isize = @bitCast(rc);
     const code = if (signed > -4096 and signed < 0) -signed else 0;
-    return @enumFromInt(code);
+    return @fromBackingInt(@intCast(code));
 }
 
 /// Whether a raw syscall succeeded.

@@ -161,22 +161,25 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 
 ### Prerequisites
 
-- [Zig Compiler](https://ziglang.org/download/) 0.16.0
+- [Zig Compiler](https://ziglang.org/download/) 0.17.0
+- Network access on the first build: `zig build` fetches the
+  [translate-c](https://codeberg.org/ziglang/translate-c) package pinned in
+  `build.zig.zon`, which turns the libc headers in `src/c.h` into Zig.
 
 ### Building for Raspberry Pi (AArch64)
 
 To build a statically linked binary for Raspberry Pi:
 
 ```bash
-zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
+zig build -Dtarget=aarch64-linux-musl -Doptimize=safe
 ```
 
 The resulting binary will be located at `zig-out/bin/sys-ink`.
 
-`ReleaseSafe` is what the releases are built with: it keeps the bounds and
-overflow checks in, so a bug in reading something off the network ends the
-daemon — which systemd restarts — instead of corrupting the memory of a
-process that runs as root. `ReleaseSmall` builds too and is about 200 KB
+`safe` (formerly `ReleaseSafe`) is what the releases are built with: it keeps
+the bounds and overflow checks in, so a bug in reading something off the
+network ends the daemon — which systemd restarts — instead of corrupting the
+memory of a process that runs as root. `small` builds too and is about 200 KB
 smaller, without them.
 
 For 32-bit Raspberry Pi OS, name the CPU as well. Zig's default for this
@@ -184,7 +187,7 @@ target is ARMv7, which the Pi Zero, Zero W and Pi 1 cannot run; the ARM1176
 build below runs on every 32-bit Pi:
 
 ```bash
-zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=ReleaseSafe
+zig build -Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s -Doptimize=safe
 ```
 
 ## Installation

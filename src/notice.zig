@@ -292,7 +292,7 @@ test "zero, negative or unreadable durations mean the default" {
     var scratch: [8192]u8 = undefined;
     for ([_][]const u8{ "0", "-5", "0.4", "\"soon\"", "null", "[]" }) |d| {
         var buf: [64]u8 = undefined;
-        const raw = try std.fmt.bufPrint(&buf, "{{\"text\": \"x\", \"duration\": {s}}}", .{d});
+        const raw = try std.mem.print(&buf, "{{\"text\": \"x\", \"duration\": {s}}}", .{d});
         const n = parse(&scratch, raw).?;
         try testing.expectEqualStrings("x", n.text);
         try testing.expectEqual(@as(?u32, null), n.duration);
@@ -309,7 +309,7 @@ test "plain text with nothing visible in it is ignored, not a dismissal" {
 
 test "a long JSON notice fits the scratch the daemon gives it" {
     var scratch: [8192]u8 = undefined;
-    const raw = "{\"text\": \"" ++ "x" ** 2000 ++ "\", \"duration\": 5}";
+    const raw = "{\"text\": \"" ++ @as([2000]u8, @splat('x')) ++ "\", \"duration\": 5}";
     const n = parse(&scratch, raw).?;
     try testing.expectEqual(@as(usize, 2000), n.text.len);
     try testing.expectEqual(@as(?u32, 5), n.duration);

@@ -27,10 +27,21 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
-/// Use the minimal panic handler. The default one pulls ELF/DWARF parsing and
+/// A minimal panic handler. The default one pulls ELF/DWARF parsing and
 /// stack-trace rendering into the binary — roughly 90 KB that can never produce
-/// a useful trace here, because release builds are stripped.
-pub const panic = std.debug.simple_panic;
+/// a useful trace here, because release builds are stripped. Zig 0.17.0's own
+/// minimal one, `std.debug.simple_panic`, does not compile (a regression listed
+/// in its release notes), so this is the same thing by hand.
+pub const panic = std.debug.FullPanic(panicMessage);
+
+fn panicMessage(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = first_trace_addr;
+    const stderr = &std.debug.lockStderr(&.{}).file_writer.interface;
+    stderr.writeAll(msg) catch {};
+    stderr.writeAll("\n") catch {};
+    @trap();
+}
 
 /// Set from the signal handler; read by the main loop.
 var should_exit: std.atomic.Value(bool) = .init(false);
@@ -467,7 +478,7 @@ const App = struct {
     /// abort the remaining sensors.
     fn publishFmt(client: *MqttClient, topic: []const u8, comptime fmt: []const u8, args: anytype) void {
         var buf: [32]u8 = undefined;
-        const payload = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const payload = std.mem.print(&buf, fmt, args) catch return;
         client.publish(topic, payload, false) catch {};
     }
 };
