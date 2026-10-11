@@ -51,9 +51,11 @@ paths:
         `INTERVAL_FAST` seconds, so asking more often returns the same numbers.
 
         `null` means not known — no such sensor on this hardware, or no
-        reading yet — never zero standing in for one. CPU load and
-        temperature, memory and disk usage are always numbers: every machine
-        has them, and a read that fails keeps the previous value.
+        reading yet — never zero standing in for one.
+
+        A reading that could not be refreshed on the latest attempt keeps the
+        value it last had and is named in `stale`, with that value's age.
+        MQTT withholds such a reading; the panel draws it faded.
 
         Names follow the MQTT topics where there is one, except traffic: MQTT
         publishes `traffic_down` and `traffic_up` in kB/s.
@@ -312,23 +314,24 @@ components:
         - undervoltage
         - nvme_fault
         - ssd_wear
+        - stale
       properties:
         cpu_load:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
           maximum: 100
           description: Percent.
         cpu_temp:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
           description: °C.
         memory:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
           maximum: 100
           description: Percent in use.
         disk_usage:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
           maximum: 100
           description: Percent of the root filesystem in use.
@@ -343,6 +346,7 @@ components:
         uptime_minutes:
           type: [integer, "null"]
           minimum: 0
+          description: Null when it could not be read; never stale.
         ip_address:
           type: [string, "null"]
           description: The IPv4 address the panel shows.
@@ -358,10 +362,10 @@ components:
           type: [boolean, "null"]
           description: Result of the last reachability probe; null before the first.
         download_bytes_per_second:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
         upload_bytes_per_second:
-          type: integer
+          type: [integer, "null"]
           minimum: 0
         apt_updates:
           type: [integer, "null"]
@@ -377,12 +381,36 @@ components:
           type: [integer, "null"]
           minimum: 0
           description: Percent of rated life used; may exceed 100.
+        stale:
+          type: object
+          description: |
+            The readings whose latest measurement failed, each with the
+            seconds since the value reported for it was measured. Empty when
+            everything is current. A reading named here is never `null`.
+
+            The APT count is stale when the latest check failed. The uptime,
+            the address, the signal and the reachability probe are never
+            listed: one that cannot be had is `null` at once.
+          additionalProperties: false
+          properties:
+            cpu_load: { $ref: "#/components/schemas/Age" }
+            cpu_temp: { $ref: "#/components/schemas/Age" }
+            memory: { $ref: "#/components/schemas/Age" }
+            disk_usage: { $ref: "#/components/schemas/Age" }
+            disk_temp: { $ref: "#/components/schemas/Age" }
+            fan_speed: { $ref: "#/components/schemas/Age" }
+            download_bytes_per_second: { $ref: "#/components/schemas/Age" }
+            upload_bytes_per_second: { $ref: "#/components/schemas/Age" }
+            apt_updates: { $ref: "#/components/schemas/Age" }
+            undervoltage: { $ref: "#/components/schemas/Age" }
+            nvme_fault: { $ref: "#/components/schemas/Age" }
+            ssd_wear: { $ref: "#/components/schemas/Age" }
       example:
         cpu_load: 12
         cpu_temp: 48
         memory: 31
         disk_usage: 67
-        disk_temp: null
+        disk_temp: 41
         fan_speed: 2100
         uptime_minutes: 4445
         ip_address: 192.168.1.20
@@ -394,4 +422,11 @@ components:
         apt_updates: 3
         undervoltage: false
         nvme_fault: null
-        ssd_wear: 2
+        ssd_wear: null
+        stale:
+          disk_temp: 95
+
+    Age:
+      type: integer
+      minimum: 0
+      description: Seconds since the value was measured.
