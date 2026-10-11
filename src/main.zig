@@ -466,10 +466,11 @@ const App = struct {
         // on every successful (re)connection.
         if (!client.connected) {
             client.connect() catch |err| {
-                if (err == error.BackoffActive) {
-                    log.debug("MQTT reconnect skipped (backoff)", .{});
-                } else {
-                    log.warn("MQTT reconnect failed: {t}", .{err});
+                switch (err) {
+                    error.BackoffActive => log.debug("MQTT reconnect skipped (backoff)", .{}),
+                    // The client has said so itself, and it is not a failure.
+                    error.StillResolving => {},
+                    else => log.warn("MQTT reconnect failed: {t}", .{err}),
                 }
                 return;
             };
@@ -595,8 +596,10 @@ pub fn main(init: std.process.Init) !u8 {
         if (mqtt_client) |*client| {
             // A failure here is not fatal: publishMqttStats retries with backoff,
             // and discovery is republished once the broker comes up.
-            client.connect() catch |err| {
-                log.warn("MQTT connection failed: {t} - will retry later", .{err});
+            client.connect() catch |err| switch (err) {
+                // The first publish, a moment from now, collects the answer.
+                error.StillResolving => {},
+                else => log.warn("MQTT connection failed: {t} - will retry later", .{err}),
             };
             app.mqtt = client;
         }

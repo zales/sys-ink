@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const parse = @import("parse.zig");
 const bounded_connect = @import("bounded_connect.zig");
 const net = std.Io.net;
 
@@ -114,6 +115,8 @@ pub const MqttClient = struct {
     inbound: Inbound = .{},
     /// The latest notice received, kept past the read that found it.
     notice_buf: [Inbound.capacity]u8 = undefined,
+    /// Looks the broker's name up off the main loop.
+    resolver: Resolver = .{},
     /// Storage for `nodeId`'s result; read through `node()`.
     node_id_buf: [max_node_id_len]u8 = undefined,
     node_id_len: usize = 0,
@@ -190,6 +193,7 @@ pub const MqttClient = struct {
 
     pub fn deinit(self: *Self) void {
         self.disconnect();
+        self.resolver.deinit(self.io);
     }
 
     /// Connect to MQTT broker, with exponential backoff between failed attempts.
@@ -209,11 +213,18 @@ pub const MqttClient = struct {
 
         log.info("Connecting to MQTT broker {s}:{d}", .{ self.host, self.port });
 
-        // Resolve hostname via libc getaddrinfo (supports DNS, mDNS, /etc/hosts)
-        const address = resolveHost(self.host) catch |err| {
-            self.recordFailure();
-            log.err("Failed to resolve MQTT broker {s}: {t} (next retry in {d}s)", .{ self.host, err, self.backoffDelay() });
-            return err;
+        const address = self.resolver.resolve(self.io, self.host) catch |err| switch (err) {
+            // Not a failure and nothing to back off from: the lookup is still
+            // running, and the next call collects its answer.
+            error.StillResolving => {
+                log.info("Still resolving MQTT broker {s}; connecting once that is done", .{self.host});
+                return err;
+            },
+            else => {
+                self.recordFailure();
+                log.err("Failed to resolve MQTT broker {s}: {t} (next retry in {d}s)", .{ self.host, err, self.backoffDelay() });
+                return err;
+            },
         };
 
         self.stream = bounded_connect.connectStream(address, self.port, connect_timeout_ms) catch |err| {
@@ -952,6 +963,92 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
     return buf[0..pos];
 }
 
+/// Finds the broker's address without holding the main loop to the lookup.
+///
+/// `getaddrinfo` has no deadline its caller can set. With a nameserver that
+/// does not answer, the resolver runs through its own timeouts and search
+/// domains first — five seconds a name by default, and several names for a
+/// short one — and all of that used to be spent on the thread that draws the
+/// panel and notices the signal to stop.
+///
+/// So a name is looked up on a task of its own. The caller gives it
+/// `wait_ms`, which a working resolver needs a small fraction of, and past
+/// that gets `error.StillResolving` and its loop back; a later call collects
+/// the answer, without waiting, once there is one. One lookup costs the loop
+/// at most that one wait however long it takes.
+///
+/// An address is never looked up, so a broker configured by one involves no
+/// thread at all.
+const Resolver = struct {
+    /// The lookup in flight, or one that has finished and not been collected.
+    task: ?std.Io.Future(void) = null,
+    /// Set by the task once `answer` holds its result.
+    done: std.Io.Event = .unset,
+    /// The name being looked up, for the task to read: the caller's own
+    /// copy may be gone by the time it does.
+    name: [max_name_len + 1]u8 = undefined,
+    answer: LookupError![4]u8 = error.DnsResolutionFailed,
+    /// How long `resolve` waits on a lookup it has just started.
+    wait_ms: u32 = default_wait_ms,
+    /// A seam for the tests, which need a lookup that takes its time.
+    lookup_fn: *const fn (name: [*:0]const u8) LookupError![4]u8 = &lookup,
+
+    /// The same bound as the internet probe, which holds the same loop up
+    /// for the same kind of reason.
+    const default_wait_ms = 1000;
+    const max_name_len = 255;
+
+    const LookupError = error{DnsResolutionFailed};
+    const Error = LookupError || error{ HostTooLong, StillResolving };
+
+    fn resolve(self: *Resolver, io: std.Io, host: []const u8) Error![4]u8 {
+        if (parse.ipv4(host)) |address| return address else |_| {}
+
+        if (self.task == null) {
+            const name = std.mem.printSentinel(&self.name, "{s}", .{host}, 0) catch return error.HostTooLong;
+            self.done.reset();
+
+            self.task = io.concurrent(run, .{ self, io }) catch |err| {
+                // No thread to be had. Looked up here, as it always used to
+                // be, rather than never: a late connection beats none.
+                log.debug("Cannot resolve {s} off the main loop: {t}", .{ host, err });
+                return self.lookup_fn(name.ptr);
+            };
+
+            // Only for a lookup started here. One still running from an
+            // earlier call has had its wait, and is only asked after.
+            self.done.waitTimeout(io, .{
+                .duration = .{ .raw = .fromMilliseconds(self.wait_ms), .clock = .awake },
+            }) catch {};
+        }
+
+        if (!self.done.isSet()) return error.StillResolving;
+        self.reap(io);
+        return self.answer;
+    }
+
+    fn run(self: *Resolver, io: std.Io) void {
+        self.answer = self.lookup_fn(@ptrCast(&self.name));
+        self.done.set(io);
+    }
+
+    /// Release the task's resources. Blocks only while it is still running.
+    fn reap(self: *Resolver, io: std.Io) void {
+        if (self.task) |*task| {
+            task.await(io);
+            self.task = null;
+        }
+    }
+
+    /// Waits for a lookup still in flight, which holds a pointer to this.
+    /// Bounded by the resolver's own timeouts, and reached only after the
+    /// sleep screen is on the panel, so a stuck lookup delays the process
+    /// going away and not the daemon reacting to being told to.
+    fn deinit(self: *Resolver, io: std.Io) void {
+        self.reap(io);
+    }
+};
+
 /// Resolve a hostname to its four IPv4 octets using libc getaddrinfo.
 ///
 /// libc rather than std's resolver on purpose: it follows the system resolver
@@ -961,17 +1058,15 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
 /// DNS query; on a stock Raspberry Pi OS that points at the systemd-resolved
 /// stub (127.0.0.53), and *resolved* does the mDNS part server-side. Verified on
 /// the target host rather than assumed. It is still an unbounded call —
-/// getaddrinfo has internal timeouts but none we control.
-fn resolveHost(host: []const u8) ![4]u8 {
-    var host_buf: [256]u8 = undefined;
-    const host_z = std.mem.printSentinel(&host_buf, "{s}", .{host}, 0) catch return error.HostTooLong;
-
+/// getaddrinfo has internal timeouts but none we control — which is why only
+/// `Resolver` calls it, off the main loop.
+fn lookup(host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
     hints.ai_socktype = c.SOCK_STREAM;
 
     var result: ?*c.struct_addrinfo = null;
-    if (c.getaddrinfo(host_z.ptr, null, &hints, &result) != 0) return error.DnsResolutionFailed;
+    if (c.getaddrinfo(host_z, null, &hints, &result) != 0) return error.DnsResolutionFailed;
     defer c.freeaddrinfo(result);
 
     const addr_info = result orelse return error.DnsResolutionFailed;
@@ -1509,6 +1604,98 @@ test "a PUBLISH with an impossible topic length is ignored and the connection ke
     var pkt_buf: [128]u8 = undefined;
     try lb.send(try notifyPacket(&pkt_buf, "after", false));
     try testing.expectEqualStrings("after", lb.client.receive().?);
+}
+
+test "a broker given by address is never looked up" {
+    // `io` is left undefined on purpose: starting a task or waiting on one
+    // would trip over it.
+    var resolver: Resolver = .{ .lookup_fn = &failingLookup };
+    try testing.expectEqual([4]u8{ 192, 168, 1, 10 }, try resolver.resolve(undefined, "192.168.1.10"));
+    try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, try resolver.resolve(undefined, "127.0.0.1"));
+    try testing.expect(resolver.task == null);
+}
+
+fn failingLookup(_: [*:0]const u8) Resolver.LookupError![4]u8 {
+    return error.DnsResolutionFailed;
+}
+
+/// A lookup that answers only once the test lets it, standing in for a
+/// nameserver that takes its time.
+const SlowLookup = struct {
+    var gate: std.Io.Event = .unset;
+    var calls: std.atomic.Value(u32) = .init(0);
+
+    fn lookup(name: [*:0]const u8) Resolver.LookupError![4]u8 {
+        _ = calls.fetchAdd(1, .monotonic);
+        gate.waitUncancelable(testing.io);
+        if (!std.mem.eql(u8, std.mem.span(name), "broker.example")) return error.DnsResolutionFailed;
+        return .{ 10, 0, 0, 7 };
+    }
+};
+
+test "a slow lookup costs the caller one short wait, and its answer is collected later" {
+    SlowLookup.gate.reset();
+    SlowLookup.calls.store(0, .monotonic);
+
+    var resolver: Resolver = .{ .lookup_fn = &SlowLookup.lookup, .wait_ms = 20 };
+    defer resolver.deinit(testing.io);
+    // Whatever fails below, the task must be let go or deinit waits for ever.
+    defer SlowLookup.gate.set(testing.io);
+
+    // The regression: this call used to return only when the lookup did.
+    try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
+    // Asked again while it runs: the same lookup, not a second one.
+    try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
+    try testing.expect(resolver.task != null);
+
+    SlowLookup.gate.set(testing.io);
+    resolver.task.?.await(testing.io);
+
+    try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolver.resolve(testing.io, "broker.example"));
+    try testing.expectEqual(@as(u32, 1), SlowLookup.calls.load(.monotonic));
+    try testing.expect(resolver.task == null);
+
+    // The answer is used once: the next connect looks the name up afresh.
+    try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolveEventually(&resolver, "broker.example"));
+    try testing.expectEqual(@as(u32, 2), SlowLookup.calls.load(.monotonic));
+}
+
+/// `resolve`, carried on past `StillResolving` to the answer. A lookup that
+/// is quick still has to be scheduled, and on a busy machine the wait can
+/// run out first.
+fn resolveEventually(resolver: *Resolver, host: []const u8) Resolver.Error![4]u8 {
+    while (true) {
+        return resolver.resolve(testing.io, host) catch |err| switch (err) {
+            error.StillResolving => {
+                resolver.task.?.await(testing.io);
+                continue;
+            },
+            else => err,
+        };
+    }
+}
+
+test "a lookup that fails is reported when it finishes" {
+    var resolver: Resolver = .{ .lookup_fn = &failingLookup };
+    defer resolver.deinit(testing.io);
+
+    try testing.expectError(error.DnsResolutionFailed, resolveEventually(&resolver, "nowhere.invalid"));
+    try testing.expect(resolver.task == null);
+}
+
+test "localhost resolves through the system's own resolver" {
+    // The real lookup, on a name that needs no network.
+    var resolver: Resolver = .{};
+    defer resolver.deinit(testing.io);
+
+    try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, try resolveEventually(&resolver, "localhost"));
+}
+
+test "a name too long to look up is refused without starting anything" {
+    var resolver: Resolver = .{ .lookup_fn = &failingLookup };
+    const long: [Resolver.max_name_len + 1]u8 = @splat('a');
+    try testing.expectError(error.HostTooLong, resolver.resolve(undefined, &long));
+    try testing.expect(resolver.task == null);
 }
 
 test "the broker closing the connection is noticed" {
