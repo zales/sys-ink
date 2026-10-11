@@ -143,6 +143,17 @@ pub const MqttClient = struct {
     /// Largest packet we will build. Discovery payloads are the big ones.
     const max_packet_len = 1024;
 
+    /// Most that one `receive` reads before handing back to its caller.
+    ///
+    /// Whatever was waiting when the main loop woke fits in that many times
+    /// over: the broker sends this client notices and little else. Only a
+    /// publisher that never stops can run past it, and one that does must not
+    /// keep the loop from the panel, the other notice sources and the signal
+    /// to stop — which, with no limit here, it did for as long as it kept
+    /// sending. The rest stays in the socket, and poll reports it again. The
+    /// notice pipe has had the same limit, for the same reason.
+    const max_drain = 64 * 1024;
+
     // MQTT Control Packet Types
     const PacketType = enum(u4) {
         CONNECT = 1,
@@ -310,12 +321,23 @@ pub const MqttClient = struct {
     /// Notices a subscription turned up from the retained store are skipped:
     /// they were sent some time ago, perhaps long ago, and showing them again
     /// on every reconnect is not what anyone publishing one meant.
+    ///
+    /// "Whatever" stops at `max_drain`, so this always returns.
     pub fn receive(self: *Self) ?[]const u8 {
-        var latest: ?usize = null;
+        return self.receiveUpTo(max_drain);
+    }
 
-        while (self.socketHandle()) |handle| {
+    /// `receive` with the limit as an argument, so a test can reach it
+    /// without sending 64 KiB.
+    fn receiveUpTo(self: *Self, budget: usize) ?[]const u8 {
+        var latest: ?usize = null;
+        var drained: usize = 0;
+
+        while (drained < budget) {
+            const handle = self.socketHandle() orelse break;
             const space = self.inbound.free();
-            const rc = c.recv(handle, space.ptr, space.len, c.MSG_DONTWAIT);
+            const want = @min(space.len, budget - drained);
+            const rc = c.recv(handle, space.ptr, want, c.MSG_DONTWAIT);
             if (rc < 0) {
                 switch (std.posix.errno(rc)) {
                     .AGAIN => break,
@@ -333,6 +355,7 @@ pub const MqttClient = struct {
                 break;
             }
             self.inbound.commit(@intCast(rc));
+            drained += @intCast(rc);
 
             while (true) {
                 const packet = (self.inbound.next() catch {
@@ -1604,6 +1627,38 @@ test "a PUBLISH with an impossible topic length is ignored and the connection ke
     var pkt_buf: [128]u8 = undefined;
     try lb.send(try notifyPacket(&pkt_buf, "after", false));
     try testing.expectEqualStrings("after", lb.client.receive().?);
+}
+
+test "a publisher that never stops is read a budget at a time, and nothing is lost" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+
+    var pkt_buf: [128]u8 = undefined;
+    const names = [_][]const u8{ "first", "second", "third", "fourth" };
+    var sent: usize = 0;
+    for (names) |name| {
+        const packet = try notifyPacket(&pkt_buf, name, false);
+        try lb.send(packet);
+        sent += packet.len;
+    }
+
+    // A budget of one packet and a bit: every call hands back to its caller
+    // with messages still waiting, where one call used to take them all.
+    const budget = sent / names.len + 4;
+    var calls: usize = 0;
+    var last: [16]u8 = undefined;
+    var last_len: usize = 0;
+    while (calls < 2 * names.len) : (calls += 1) {
+        const notice = lb.client.receiveUpTo(budget) orelse continue;
+        if (calls == 0) try testing.expectEqualStrings("first", notice);
+        @memcpy(last[0..notice.len], notice);
+        last_len = notice.len;
+    }
+
+    // A packet cut in two by the budget is finished by the next call.
+    try testing.expectEqualStrings("fourth", last[0..last_len]);
+    try testing.expect(lb.client.connected);
+    try testing.expect(lb.client.receive() == null);
 }
 
 test "a broker given by address is never looked up" {
