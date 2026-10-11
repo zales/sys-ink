@@ -4,12 +4,14 @@
 //! through their own formatting without anyone driving them: traffic sweeps
 //! several orders of magnitude to visit every unit, the signal reading crosses
 //! the width where it drops its `dBm` suffix, the fault overlay flares
-//! periodically so the inverted status bar can be checked too, and notices of
-//! every length come and go so each font step of their layout shows up.
+//! periodically so the inverted status bar can be checked too, a few readings
+//! go stale now and then so the faded rendering can, and notices of every
+//! length come and go so each font step of their layout shows up.
 
 const std = @import("std");
 const parse = @import("parse.zig");
 const display_config = @import("display_config.zig");
+const Reading = @import("reading.zig").Reading;
 pub const Renderer = @import("display_renderer.zig").Renderer;
 
 pub const width = display_config.DISPLAY_WIDTH;
@@ -21,6 +23,20 @@ pub const row_bytes = @divCeil(width, 8);
 pub fn faultActive(t: f64) bool {
     const phase = @mod(t, 30.0);
     return phase >= 20.0 and phase < 26.0;
+}
+
+/// Some readings stale for 6 s out of every 30, clear of the fault window so
+/// each can be looked at alone.
+pub fn staleActive(t: f64) bool {
+    const phase = @mod(t, 30.0);
+    return phase >= 8.0 and phase < 14.0;
+}
+
+/// `value` as a reading: current, or stale while `stale` holds.
+fn reading(comptime T: type, value: T, stale: bool) Reading(T) {
+    var r: Reading(T) = .of(value);
+    if (stale) r.fail();
+    return r;
 }
 
 /// Samples from one line up to one too long for the panel, with diacritics
@@ -53,26 +69,31 @@ fn wave(t: f64, period: f64) f64 {
 /// Leaves the renderer ready for `packedFrame`, which is what applies the fault
 /// overlay and packs the frame.
 pub fn draw(renderer: *Renderer, t: f64, uptime_s: u64) void {
-    renderer.renderCpuLoad(@intFromFloat(15.0 + 70.0 * wave(t, 47.0)));
-    renderer.renderCpuTemp(@intFromFloat(42.0 + 12.0 * wave(t, 61.0)));
-    renderer.renderMemory(@intFromFloat(35.0 + 25.0 * wave(t, 83.0)));
-    renderer.renderDiskUsage(29);
-    renderer.renderDiskTemp(36);
-    renderer.renderFanSpeed(@as(u32, @intFromFloat(400.0 + 900.0 * wave(t, 53.0))));
+    // One slot of each size the panel fades a reading in goes stale
+    // together: the large digits, the traffic rate and the APT count.
+    const stale = staleActive(t);
+
+    renderer.renderCpuLoad(.of(@intFromFloat(15.0 + 70.0 * wave(t, 47.0))));
+    renderer.renderCpuTemp(.of(@intFromFloat(42.0 + 12.0 * wave(t, 61.0))));
+    renderer.renderMemory(.of(@intFromFloat(35.0 + 25.0 * wave(t, 83.0))));
+    renderer.renderDiskUsage(.of(29));
+    renderer.renderDiskTemp(reading(u32, 36, stale));
+    renderer.renderFanSpeed(.of(@intFromFloat(400.0 + 900.0 * wave(t, 53.0))));
     renderer.renderIpAddress("192.168.1.231");
     renderer.renderSignalStrength(@intFromFloat(-40.0 - 55.0 * wave(t, 71.0)));
 
-    renderer.renderUptime(
-        @intCast(uptime_s / 86_400),
-        @intCast(uptime_s / 3600 % 24),
-        @intCast(uptime_s / 60 % 60),
-    );
+    renderer.renderUptime(.{
+        .days = @intCast(uptime_s / 86_400),
+        .hours = @intCast(uptime_s / 3600 % 24),
+        .minutes = @intCast(uptime_s / 60 % 60),
+    });
 
-    const down = parse.scaleBytes(2_000.0 * std.math.pow(f64, 10.0, 5.0 * wave(t, 97.0)));
-    const up = parse.scaleBytes(1_000.0 * std.math.pow(f64, 10.0, 4.0 * wave(t, 89.0)));
-    renderer.renderTraffic(down.value, down.unit, up.value, up.unit);
+    renderer.renderTraffic(reading(parse.NetRates, .{
+        .rx_bytes_per_sec = 2_000.0 * std.math.pow(f64, 10.0, 5.0 * wave(t, 97.0)),
+        .tx_bytes_per_sec = 1_000.0 * std.math.pow(f64, 10.0, 4.0 * wave(t, 89.0)),
+    }, stale));
 
-    renderer.renderAptUpdates(@intFromFloat(7.0 * wave(t, 131.0)));
+    renderer.renderAptUpdates(reading(u32, @intFromFloat(7.0 * wave(t, 131.0)), stale));
     renderer.renderInternetStatus(wave(t, 149.0) > 0.05);
     renderer.setFaultWarning(faultActive(t));
 

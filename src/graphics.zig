@@ -150,6 +150,25 @@ pub const Bitmap = struct {
         }
     }
 
+    /// Fade whatever is drawn in the rectangle by turning every other pixel
+    /// white, in a checkerboard. On a 1-bit panel that is as close to grey as
+    /// it gets, and it reads the way greyed-out text does anywhere else: still
+    /// legible, visibly not live.
+    ///
+    /// The pattern hangs off the bitmap's own coordinates, not the
+    /// rectangle's, so fading the same area again changes nothing.
+    pub fn fadeRect(self: *Bitmap, x: i32, y: i32, w: u32, h: u32) void {
+        const r = self.clipRect(x, y, w, h) orelse return;
+        const white = colorValue(.White);
+
+        var py = r.y;
+        while (py < r.y + r.h) : (py += 1) {
+            for (self.data[py * self.stride + r.x ..][0..r.w], r.x..) |*px, px_x| {
+                if ((px_x + py) & 1 == 1) px.* = white;
+            }
+        }
+    }
+
     pub fn getFontAscent(_: *Bitmap, font_type: FontType) i32 {
         return @intCast(getFont(font_type).ascent);
     }
@@ -453,6 +472,32 @@ test "invertRect flips only the clipped region" {
     // Inverting twice restores the original.
     bmp.invertRect(-2, -2, 4, 4);
     try testing.expectEqual(@as(u32, 0), countBlack(&bmp));
+}
+
+test "fadeRect knocks out every other pixel and nothing outside the area" {
+    var bmp = try testBitmap(6, 4);
+    defer bmp.deinit();
+    bmp.clear(.Black);
+
+    bmp.fadeRect(1, 1, 4, 2);
+
+    for (0..4) |y| {
+        for (0..6) |x| {
+            const inside = x >= 1 and x < 5 and y >= 1 and y < 3;
+            const faded = inside and (x + y) % 2 == 1;
+            try testing.expectEqual(@as(u8, if (faded) 255 else 0), bmp.data[y * bmp.stride + x]);
+        }
+    }
+
+    // Half of the area exactly, and a second pass finds nothing left to do.
+    const once = try testing.allocator.dupe(u8, bmp.data);
+    defer testing.allocator.free(once);
+    bmp.fadeRect(1, 1, 4, 2);
+    try testing.expectEqualSlices(u8, once, bmp.data);
+
+    // Clipped like the other rectangle operations.
+    bmp.fadeRect(-3, -3, 100, 100);
+    bmp.fadeRect(50, 50, 4, 4);
 }
 
 test "drawLine handles horizontal, vertical and diagonal runs" {

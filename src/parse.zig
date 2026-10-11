@@ -258,6 +258,9 @@ pub fn bytesPerSecond(bytes: u64, interval_ms: i64) f64 {
     return @as(f64, @floatFromInt(bytes)) * 1000.0 / @as(f64, @floatFromInt(interval_ms));
 }
 
+/// Traffic in each direction, summed over the interfaces that count.
+pub const NetRates = struct { rx_bytes_per_sec: f64, tx_bytes_per_sec: f64 };
+
 pub const Scaled = struct { value: f64, unit: []const u8 };
 
 /// Divisor between traffic units.

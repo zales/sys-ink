@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 
 test {
     _ = @import("parse.zig");
+    _ = @import("reading.zig");
     _ = @import("notice.zig");
     _ = @import("syscall.zig");
     _ = @import("bounded_connect.zig");

@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const parse = @import("parse.zig");
+const Reading = @import("reading.zig").Reading;
 const bounded_connect = @import("bounded_connect.zig");
 
 const c = @import("c"); // src/c.h
@@ -92,6 +93,11 @@ pub const NetworkOps = struct {
 
     /// Get WiFi signal strength in dBm from /proc/net/wireless
     pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) ?i32 {
+        // Forgotten before looking, as the address is: a look that finds
+        // nothing, or cannot look at all, must not leave the last reading
+        // behind for MQTT to go on publishing.
+        self.last_signal = null;
+
         const file = std.Io.Dir.openFileAbsolute(self.io, "/proc/net/wireless", .{}) catch return null;
         defer file.close(self.io);
 
@@ -185,36 +191,23 @@ pub const TrafficMonitor = struct {
     last_tx_bytes: ?u64 = null,
     /// Monotonic, in milliseconds.
     last_time: ?i64 = null,
-    last_rx_speed: f64 = 0,
-    last_tx_speed: f64 = 0,
+    /// The rates `getCurrentTraffic` last worked out, in bytes per second, for
+    /// the API and MQTT to report. Stale once the counters cannot be read.
+    rates: Reading(parse.NetRates) = .{},
 
     pub fn init(io: std.Io) TrafficMonitor {
         return .{ .io = io };
     }
 
-    pub const TrafficResult = struct {
-        download_speed: f64,
-        download_unit: []const u8,
-        upload_speed: f64,
-        upload_unit: []const u8,
-    };
-
-    /// Raw traffic result in bytes per second
-    pub const RawTrafficResult = struct {
-        rx_bytes_per_sec: f64,
-        tx_bytes_per_sec: f64,
-    };
-
-    /// Get raw traffic in bytes per second (for MQTT)
-    pub fn getRawTraffic(self: *TrafficMonitor) RawTrafficResult {
-        return .{
-            .rx_bytes_per_sec = self.last_rx_speed,
-            .tx_bytes_per_sec = self.last_tx_speed,
+    /// Current traffic rate, measured against the previous sample.
+    pub fn getCurrentTraffic(self: *TrafficMonitor) !parse.NetRates {
+        return self.sample() catch |err| {
+            self.rates.fail();
+            return err;
         };
     }
 
-    /// Current traffic rate, measured against the previous sample.
-    pub fn getCurrentTraffic(self: *TrafficMonitor) !TrafficResult {
+    fn sample(self: *TrafficMonitor) !parse.NetRates {
         const file = try std.Io.Dir.openFileAbsolute(self.io, "/proc/net/dev", .{});
         defer file.close(self.io);
 
@@ -240,7 +233,8 @@ pub const TrafficMonitor = struct {
         // and report a rate that is quietly too low.
         if (last_rx == null or last_tx == null or last_time == null) {
             self.takeSample(totals, now);
-            return self.currentResult();
+            // Nothing to measure against yet, which reads as no traffic.
+            return self.record(.{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0 }, now);
         }
 
         const interval_ms = now - last_time.?;
@@ -248,7 +242,9 @@ pub const TrafficMonitor = struct {
         // reporting one measured over next to nothing, and leave the baseline
         // untouched so the next real interval still measures against a
         // matching timestamp.
-        if (interval_ms < min_interval_ms) return self.currentResult();
+        if (interval_ms < min_interval_ms) {
+            return self.rates.value orelse .{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0 };
+        }
 
         self.takeSample(totals, now);
 
@@ -256,10 +252,15 @@ pub const TrafficMonitor = struct {
         const rx_diff = totals.rx_bytes -| last_rx.?;
         const tx_diff = totals.tx_bytes -| last_tx.?;
 
-        self.last_rx_speed = parse.bytesPerSecond(rx_diff, interval_ms);
-        self.last_tx_speed = parse.bytesPerSecond(tx_diff, interval_ms);
+        return self.record(.{
+            .rx_bytes_per_sec = parse.bytesPerSecond(rx_diff, interval_ms),
+            .tx_bytes_per_sec = parse.bytesPerSecond(tx_diff, interval_ms),
+        }, now);
+    }
 
-        return self.currentResult();
+    fn record(self: *TrafficMonitor, rates: parse.NetRates, now_ms: i64) parse.NetRates {
+        self.rates.set(rates, @divTrunc(now_ms, 1000));
+        return rates;
     }
 
     /// Accepts interfaces backed by hardware. Bridges, veth pairs and tunnels
@@ -279,17 +280,5 @@ pub const TrafficMonitor = struct {
         self.last_rx_bytes = totals.rx_bytes;
         self.last_tx_bytes = totals.tx_bytes;
         self.last_time = now;
-    }
-
-    fn currentResult(self: *TrafficMonitor) TrafficResult {
-        const download = parse.scaleBytes(self.last_rx_speed);
-        const upload = parse.scaleBytes(self.last_tx_speed);
-
-        return .{
-            .download_speed = download.value,
-            .download_unit = download.unit,
-            .upload_speed = upload.value,
-            .upload_unit = upload.unit,
-        };
     }
 };

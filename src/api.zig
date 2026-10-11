@@ -121,15 +121,19 @@ pub fn authorized(authorization: ?[]const u8, token: []const u8) bool {
 /// Null means not known — no such sensor on this hardware, or no reading yet —
 /// never zero standing in for it. Names follow the MQTT topics where there is
 /// one, so a reading is called the same wherever it is read.
+///
+/// A reading that could not be taken the last time it was tried keeps the
+/// value it had, and is named in `stale` with that value's age. It used to
+/// keep the value with nothing to tell it from one just taken.
 pub const Status = struct {
     /// Percent.
-    cpu_load: u8,
+    cpu_load: ?u8,
     /// °C.
-    cpu_temp: u32,
+    cpu_temp: ?u32,
     /// Percent.
-    memory: u8,
+    memory: ?u8,
     /// Percent.
-    disk_usage: u8,
+    disk_usage: ?u8,
     /// °C.
     disk_temp: ?u32,
     /// RPM.
@@ -141,17 +145,58 @@ pub const Status = struct {
     /// dBm.
     signal_strength: ?i32,
     internet: ?bool,
-    download_bytes_per_second: u64,
-    upload_bytes_per_second: u64,
+    download_bytes_per_second: ?u64,
+    upload_bytes_per_second: ?u64,
     apt_updates: ?u32,
     undervoltage: ?bool,
     nvme_fault: ?bool,
     /// Percent of rated life used; may exceed 100.
     ssd_wear: ?u8,
+    stale: Stale = .{},
 };
 
+/// The readings in a `Status` that are stale, each with the seconds since the
+/// value reported for it was measured.
+///
+/// Written as an object holding only those, so one that is empty says
+/// everything above it is current. The uptime, the address, the signal and
+/// the reachability probe are not here: they are forgotten when they cannot
+/// be had, never kept.
+pub const Stale = struct {
+    cpu_load: ?u64 = null,
+    cpu_temp: ?u64 = null,
+    memory: ?u64 = null,
+    disk_usage: ?u64 = null,
+    disk_temp: ?u64 = null,
+    fan_speed: ?u64 = null,
+    download_bytes_per_second: ?u64 = null,
+    upload_bytes_per_second: ?u64 = null,
+    apt_updates: ?u64 = null,
+    undervoltage: ?u64 = null,
+    nvme_fault: ?u64 = null,
+    ssd_wear: ?u64 = null,
+
+    pub fn jsonStringify(self: Stale, jw: anytype) !void {
+        try jw.beginObject();
+        inline for (@typeInfo(Stale).@"struct".field_names) |name| {
+            if (@field(self, name)) |age| {
+                try jw.objectField(name);
+                try jw.write(age);
+            }
+        }
+        try jw.endObject();
+    }
+};
+
+comptime {
+    // Every name under `stale` is a reading of the same name beside it.
+    for (@typeInfo(Stale).@"struct".field_names) |name| {
+        std.debug.assert(@hasField(Status, name));
+    }
+}
+
 /// Buffer size `writeStatus` needs, with room to spare.
-pub const status_json_max = 1024;
+pub const status_json_max = 2048;
 
 /// `status` as a JSON object, written into `buf`.
 pub fn writeStatus(buf: []u8, status: Status) error{WriteFailed}![]const u8 {
@@ -268,6 +313,47 @@ test "the status is JSON with unknown readings as null" {
     try testing.expect(obj.get("apt_updates").? == .null);
     try testing.expectEqual(false, obj.get("undervoltage").?.bool);
     try testing.expectEqual(@as(usize, @typeInfo(Status).@"struct".field_names.len), obj.count());
+    // Nothing stale: an object with nothing in it, not a missing one.
+    try testing.expectEqual(@as(usize, 0), obj.get("stale").?.object.count());
+}
+
+test "a stale reading keeps its value and is named with its age" {
+    var buf: [status_json_max]u8 = undefined;
+    const json = try writeStatus(&buf, .{
+        .cpu_load = 12,
+        .cpu_temp = 48,
+        .memory = 31,
+        .disk_usage = 67,
+        // The sensor stopped answering a minute and a half ago.
+        .disk_temp = 41,
+        .fan_speed = 2100,
+        .uptime_minutes = 4445,
+        .ip_address = null,
+        .wired = false,
+        .signal_strength = null,
+        .internet = true,
+        // Never measured at all, which is null and not stale.
+        .download_bytes_per_second = null,
+        .upload_bytes_per_second = null,
+        .apt_updates = 3,
+        .undervoltage = false,
+        .nvme_fault = true,
+        .ssd_wear = 3,
+        .stale = .{ .disk_temp = 95, .apt_updates = 21_600 },
+    });
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try testing.expectEqual(@as(i64, 41), obj.get("disk_temp").?.integer);
+    try testing.expect(obj.get("download_bytes_per_second").? == .null);
+
+    const stale = obj.get("stale").?.object;
+    try testing.expectEqual(@as(usize, 2), stale.count());
+    try testing.expectEqual(@as(i64, 95), stale.get("disk_temp").?.integer);
+    try testing.expectEqual(@as(i64, 21_600), stale.get("apt_updates").?.integer);
+    try testing.expect(stale.get("cpu_load") == null);
 }
 
 test "the largest status fits the buffer" {
@@ -290,5 +376,14 @@ test "the largest status fits the buffer" {
         .undervoltage = true,
         .nvme_fault = true,
         .ssd_wear = 255,
+        .stale = everythingStale(),
     });
+}
+
+fn everythingStale() Stale {
+    var stale: Stale = .{};
+    inline for (@typeInfo(Stale).@"struct".field_names) |name| {
+        @field(stale, name) = std.math.maxInt(u64);
+    }
+    return stale;
 }
