@@ -1,7 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
 const parse = @import("parse.zig");
-const syscall = @import("syscall.zig");
 
 // statfs comes from the target libc headers (src/c.h) rather than a
 // hand-rolled struct: fsblkcnt_t is 64-bit even on 32-bit ARM, so an
@@ -64,6 +63,9 @@ pub const SystemOps = struct {
     last_undervoltage: bool = false,
     last_nvme_health: ?parse.NvmeHealth = null,
     last_uptime: ?parse.Uptime = null,
+    /// Set while the SMART command keeps failing, so that is logged when it
+    /// starts rather than on every cycle.
+    nvme_failing: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, parent_env: ?*const std.process.Environ.Map) SystemOps {
         return .{
@@ -358,7 +360,9 @@ pub const SystemOps = struct {
     pub fn getNvmeHealth(self: *SystemOps) ?parse.NvmeHealth {
         const dev = self.nvmeDevPath() orelse return null;
 
-        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return null;
+        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| {
+            return self.nvmeFailed("cannot open {s}: {t}", .{ dev, err });
+        };
         defer _ = std.os.linux.close(fd);
 
         // Zeroed, not undefined: a partially completed command would otherwise
@@ -372,17 +376,39 @@ pub const SystemOps = struct {
         // cdw10: number of dwords minus one in the upper half, log id below.
         cmd.cdw10 = ((page.len / 4 - 1) << 16) | nvme_log_smart;
 
+        // Only a return of zero means the page was written. The kernel's own
+        // failure comes back as an errno and the controller's as its status,
+        // which is positive: taken for success, that left the zeroed page above
+        // to be decoded as a drive with no critical warning.
         const rc = std.os.linux.ioctl(fd, NVME_IOCTL_ADMIN_CMD, @intFromPtr(&cmd));
-        if (!syscall.ok(rc)) {
-            // Node exists but is not a working controller: report nothing rather
-            // than a health struct decoded from a page the kernel never wrote.
-            log.debug("NVMe SMART command failed: {t}", .{syscall.errno(rc)});
-            return null;
+        switch (parse.nvmeCommandResult(rc)) {
+            .completed => {},
+            // Node exists but is not a working controller.
+            .failed => |err| return self.nvmeFailed("the kernel answered {t}", .{err}),
+            .status => |status| return self.nvmeFailed(
+                "the controller answered status 0x{x} (type {d}, code 0x{x}{s})",
+                .{ status.raw, status.codeType(), status.code(), if (status.doNotRetry()) ", do not retry" else "" },
+            ),
         }
 
-        const health = parse.nvmeSmartLog(&page) catch return null;
+        const health = parse.nvmeSmartLog(&page) catch |err| return self.nvmeFailed("{t}", .{err});
+        if (self.nvme_failing) log.info("NVMe SMART page is readable again", .{});
+        self.nvme_failing = false;
         self.last_nvme_health = health;
         return health;
+    }
+
+    /// The SMART page could not be had this time. Says so once per run of
+    /// failures: this is asked every cycle, and a warning each time would have
+    /// journald drop the lines that matter.
+    fn nvmeFailed(self: *SystemOps, comptime reason: []const u8, args: anytype) ?parse.NvmeHealth {
+        if (self.nvme_failing) {
+            log.debug("NVMe SMART page still unreadable: " ++ reason, args);
+        } else {
+            log.warn("Cannot read the NVMe SMART page: " ++ reason, args);
+        }
+        self.nvme_failing = true;
+        return null;
     }
 
     /// Locate the first NVMe controller node, caching the result.

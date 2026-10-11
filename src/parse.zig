@@ -4,6 +4,7 @@
 //! any host, not just the target Raspberry Pi.
 
 const std = @import("std");
+const syscall = @import("syscall.zig");
 
 pub const CpuTimes = struct {
     user: u64,
@@ -351,10 +352,55 @@ pub fn nvmeSmartLog(page: []const u8) !NvmeHealth {
     };
 }
 
-/// Parse a dotted-quad IPv4 address into its four octets.
+/// What `NVME_IOCTL_ADMIN_CMD` came to, read from the ioctl's raw return.
 ///
-/// Octets rather than a packed integer: that is what the socket APIs want, and
-/// it leaves no byte-order question to get wrong.
+/// There are three outcomes, not two. A negated errno is the kernel failing to
+/// get the command to the controller or its answer back. Zero is the
+/// controller completing it. Anything else positive is the controller's own
+/// status for a command it completed *with an error* — not an errno, so a
+/// check that only asks whether the syscall failed reads it as success, with
+/// the data buffer never written. That check is what this replaces: a refused
+/// Get Log Page left the zeroed page to be decoded, and a zeroed SMART page
+/// says "no critical warning".
+pub const NvmeCommandResult = union(enum) {
+    completed,
+    /// The kernel could not carry the command out.
+    failed: std.os.linux.E,
+    /// The controller refused the command or failed it.
+    status: NvmeStatus,
+};
+
+/// The status field of an NVMe completion, as the kernel hands it back: the
+/// completion entry's status word without its phase bit.
+pub const NvmeStatus = struct {
+    raw: u16,
+
+    /// Status Code Type: 0 generic, 1 command specific, 2 media and data
+    /// integrity, 3 path related, 7 vendor specific.
+    pub fn codeType(self: NvmeStatus) u3 {
+        return @truncate(self.raw >> 8);
+    }
+
+    /// Status Code, whose meaning depends on the type.
+    pub fn code(self: NvmeStatus) u8 {
+        return @truncate(self.raw);
+    }
+
+    /// Do Not Retry: the controller expects the same command to fail again.
+    pub fn doNotRetry(self: NvmeStatus) bool {
+        return self.raw & 0x4000 != 0;
+    }
+};
+
+pub fn nvmeCommandResult(rc: usize) NvmeCommandResult {
+    const err = syscall.errno(rc);
+    if (err != .SUCCESS) return .{ .failed = err };
+    if (rc == 0) return .completed;
+    // Fifteen bits in the kernel; anything wider is not a status this knows,
+    // and is reported as the widest one rather than cut down to a valid one.
+    return .{ .status = .{ .raw = std.math.cast(u16, rc) orelse std.math.maxInt(u16) } };
+}
+
 /// Group ID of `name` in the contents of /etc/group, whose lines are
 /// `name:password:gid:members`.
 pub fn groupId(content: []const u8, name: []const u8) ?u32 {
@@ -368,6 +414,10 @@ pub fn groupId(content: []const u8, name: []const u8) ?u32 {
     return null;
 }
 
+/// Parse a dotted-quad IPv4 address into its four octets.
+///
+/// Octets rather than a packed integer: that is what the socket APIs want, and
+/// it leaves no byte-order question to get wrong.
 pub fn ipv4(text: []const u8) ![4]u8 {
     var octets = std.mem.splitScalar(u8, text, '.');
     var addr: [4]u8 = undefined;
@@ -688,6 +738,38 @@ test "a healthy drive reports no fault" {
 test "nvmeSmartLog rejects a truncated page" {
     const short: [100]u8 = @splat(0);
     try testing.expectError(error.ShortLogPage, nvmeSmartLog(&short));
+}
+
+test "an NVMe command the controller refused is not a completed one" {
+    // The regression: Invalid Field in Command with Do Not Retry, which is
+    // what a controller answers a log page it does not have with. Positive,
+    // so not an errno, and it used to pass for success.
+    const refused = nvmeCommandResult(0x4002);
+    try testing.expect(refused == .status);
+    try testing.expectEqual(@as(u3, 0), refused.status.codeType());
+    try testing.expectEqual(@as(u8, 0x02), refused.status.code());
+    try testing.expect(refused.status.doNotRetry());
+
+    // Media error, unrecovered read: type 2, code 0x81.
+    const media = nvmeCommandResult(0x0281);
+    try testing.expectEqual(@as(u3, 2), media.status.codeType());
+    try testing.expectEqual(@as(u8, 0x81), media.status.code());
+    try testing.expect(!media.status.doNotRetry());
+
+    // The smallest status there is must not round down to success.
+    try testing.expect(nvmeCommandResult(1) == .status);
+}
+
+test "only a zero return is a completed NVMe command" {
+    try testing.expect(nvmeCommandResult(0) == .completed);
+
+    const enotty: usize = @bitCast(@as(isize, -25));
+    try testing.expectEqual(std.os.linux.E.NOTTY, nvmeCommandResult(enotty).failed);
+    const eacces: usize = @bitCast(@as(isize, -13));
+    try testing.expectEqual(std.os.linux.E.ACCES, nvmeCommandResult(eacces).failed);
+
+    // Wider than a status can be: still a failure, and not a made-up code.
+    try testing.expectEqual(@as(u16, 0xFFFF), nvmeCommandResult(0x1_0002).status.raw);
 }
 
 test "nvmeWarningNames decodes each bit and combinations" {
