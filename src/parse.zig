@@ -256,8 +256,9 @@ pub fn netDevTotalsWhere(content: []const u8, filter: anytype) ?NetTotals {
 /// A package line starts with `name/suite`, and that part is never translated.
 /// Everything else apt prints here may be: the "Listing... Done" header is
 /// translated under a non-English locale, and matching on the English word
-/// used to count it as a package, so the tick for "up to date" never showed. The daemon also runs apt in the C locale, but the count should not
-/// depend on that.
+/// used to count it as a package, so the tick for "up to date" never showed.
+/// The daemon also runs apt in the C locale, but the count should not depend
+/// on that.
 pub fn aptUpgradableCount(stdout: []const u8) u32 {
     var count: u32 = 0;
     var lines = std.mem.splitScalar(u8, stdout, '\n');

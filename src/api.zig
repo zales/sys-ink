@@ -286,7 +286,8 @@ test "notices need a configured token, and then that token" {
 test "a notice with nothing to show is turned away" {
     try testing.expectEqual(NoticeOutcome.empty, noticeRequest(open, .post_notice, post("  \n", "Bearer s3cret")));
     // An explicit dismissal is not empty: it asks for something.
-    try testing.expectEqualStrings("{\"text\": \"\"}", noticeRequest(open, .post_notice, post("{\"text\": \"\"}", "Bearer s3cret")).accepted);
+    const dismissal = post("{\"text\": \"\"}", "Bearer s3cret");
+    try testing.expectEqualStrings("{\"text\": \"\"}", noticeRequest(open, .post_notice, dismissal).accepted);
 }
 
 test "DELETE dismisses, and is authorized like POST" {

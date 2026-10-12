@@ -27,26 +27,124 @@ pub const Sensor = struct {
 
 /// Every entity published under the SysInk device.
 pub const sensors = [_]Sensor{
-    .{ .id = "cpu_load", .name = "CPU Load", .unit = "%", .state_class = measurement, .icon = "mdi:cpu-64-bit" },
-    .{ .id = "cpu_temp", .name = "CPU Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
-    .{ .id = "memory", .name = "Memory Usage", .unit = "%", .state_class = measurement, .icon = "mdi:memory" },
-    .{ .id = "disk_usage", .name = "Disk Usage", .unit = "%", .state_class = measurement, .icon = "mdi:harddisk" },
-    .{ .id = "disk_temp", .name = "Disk Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
-    .{ .id = "fan_speed", .name = "Fan Speed", .unit = "RPM", .state_class = measurement, .icon = "mdi:fan" },
-    .{ .id = "signal_strength", .name = "WiFi Signal", .unit = "dBm", .device_class = "signal_strength", .state_class = measurement, .icon = "mdi:wifi" },
-    .{ .id = "ip_address", .name = "IP Address", .icon = "mdi:ip-network" },
-    .{ .id = "internet", .name = "Internet Connected", .component = .binary_sensor, .device_class = "connectivity", .icon = "mdi:web" },
-    .{ .id = "traffic_down", .name = "Download Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:download" },
-    .{ .id = "traffic_up", .name = "Upload Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:upload" },
-    .{ .id = "uptime_days", .name = "Uptime Days", .unit = "d", .state_class = measurement, .icon = "mdi:clock-outline" },
-    .{ .id = "apt_updates", .name = "APT Updates", .state_class = measurement, .icon = "mdi:package-up" },
+    .{
+        .id = "cpu_load",
+        .name = "CPU Load",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:cpu-64-bit",
+    },
+    .{
+        .id = "cpu_temp",
+        .name = "CPU Temperature",
+        .unit = "°C",
+        .device_class = "temperature",
+        .state_class = measurement,
+        .icon = "mdi:thermometer",
+    },
+    .{
+        .id = "memory",
+        .name = "Memory Usage",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:memory",
+    },
+    .{
+        .id = "disk_usage",
+        .name = "Disk Usage",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:harddisk",
+    },
+    .{
+        .id = "disk_temp",
+        .name = "Disk Temperature",
+        .unit = "°C",
+        .device_class = "temperature",
+        .state_class = measurement,
+        .icon = "mdi:thermometer",
+    },
+    .{
+        .id = "fan_speed",
+        .name = "Fan Speed",
+        .unit = "RPM",
+        .state_class = measurement,
+        .icon = "mdi:fan",
+    },
+    .{
+        .id = "signal_strength",
+        .name = "WiFi Signal",
+        .unit = "dBm",
+        .device_class = "signal_strength",
+        .state_class = measurement,
+        .icon = "mdi:wifi",
+    },
+    .{
+        .id = "ip_address",
+        .name = "IP Address",
+        .icon = "mdi:ip-network",
+    },
+    .{
+        .id = "internet",
+        .name = "Internet Connected",
+        .component = .binary_sensor,
+        .device_class = "connectivity",
+        .icon = "mdi:web",
+    },
+    .{
+        .id = "traffic_down",
+        .name = "Download Speed",
+        .unit = "kB/s",
+        .device_class = "data_rate",
+        .state_class = measurement,
+        .icon = "mdi:download",
+    },
+    .{
+        .id = "traffic_up",
+        .name = "Upload Speed",
+        .unit = "kB/s",
+        .device_class = "data_rate",
+        .state_class = measurement,
+        .icon = "mdi:upload",
+    },
+    .{
+        .id = "uptime_days",
+        .name = "Uptime Days",
+        .unit = "d",
+        .state_class = measurement,
+        .icon = "mdi:clock-outline",
+    },
+    .{
+        .id = "apt_updates",
+        .name = "APT Updates",
+        .state_class = measurement,
+        .icon = "mdi:package-up",
+    },
     // device_class problem makes Home Assistant treat ON as a fault, so it shows
     // up in the "problems" view and can drive a notification without a template.
-    .{ .id = "undervoltage", .name = "Under-voltage", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:flash-alert" },
-    .{ .id = "nvme_fault", .name = "NVMe SMART Fault", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:harddisk-remove" },
+    .{
+        .id = "undervoltage",
+        .name = "Under-voltage",
+        .component = .binary_sensor,
+        .device_class = "problem",
+        .icon = "mdi:flash-alert",
+    },
+    .{
+        .id = "nvme_fault",
+        .name = "NVMe SMART Fault",
+        .component = .binary_sensor,
+        .device_class = "problem",
+        .icon = "mdi:harddisk-remove",
+    },
     // Vendor's life-used estimate from the same SMART page; the long-term trend
     // is the early warning the fault bit only gives at the end.
-    .{ .id = "ssd_wear", .name = "SSD Wear", .unit = "%", .state_class = measurement, .icon = "mdi:chart-donut" },
+    .{
+        .id = "ssd_wear",
+        .name = "SSD Wear",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:chart-donut",
+    },
 };
 
 const measurement = "measurement";
@@ -240,7 +338,9 @@ pub const MqttClient = struct {
 
         self.stream = bounded_connect.connectStream(address, self.port, connect_timeout_ms) catch |err| {
             self.recordFailure();
-            log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{ self.host, self.port, err, self.backoffDelay() });
+            log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{
+                self.host, self.port, err, self.backoffDelay(),
+            });
             return err;
         };
         errdefer self.closeStream();

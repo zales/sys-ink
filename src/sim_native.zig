@@ -209,7 +209,9 @@ pub fn main(init: std.process.Init) !u8 {
 fn buildImage(colour_space: Id, pixels: [*]u8, w: usize, h: usize) Id {
     var planes: [1][*]u8 = .{pixels};
 
-    const rep = send(Msg.InitBitmap, send(Msg.Ret, class("NSBitmapImageRep"), "alloc", .{}), "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:", .{
+    const init_bitmap = "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:" ++
+        "hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:";
+    const rep = send(Msg.InitBitmap, send(Msg.Ret, class("NSBitmapImageRep"), "alloc", .{}), init_bitmap, .{
         @as([*][*]u8, &planes),
         @as(isize, @intCast(w)),
         @as(isize, @intCast(h)),

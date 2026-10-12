@@ -107,11 +107,6 @@ pub const Scheduler = struct {
 
         return min_wait;
     }
-
-    /// Clear all scheduled tasks.
-    pub fn clear(self: *Scheduler) void {
-        self.tasks.clearRetainingCapacity();
-    }
 };
 
 // ----------------------------------------------------------------------------
@@ -217,16 +212,5 @@ test "idleSecondsAt returns null with no tasks" {
     var s = testScheduler(&.{});
     defer s.deinit();
 
-    try testing.expectEqual(@as(?i64, null), s.idleSecondsAt(0));
-}
-
-test "clear removes every task" {
-    var counter = Counter{};
-    var s = testScheduler(&.{makeTask("t", 10, 0, &counter)});
-    defer s.deinit();
-
-    s.clear();
-    s.runPendingAt(1000);
-    try testing.expectEqual(@as(u32, 0), counter.hits);
     try testing.expectEqual(@as(?i64, null), s.idleSecondsAt(0));
 }
