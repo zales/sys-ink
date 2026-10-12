@@ -279,7 +279,7 @@ const failed_wait_pause_ms = 1000;
 /// once per second, while a signal still stops it immediately. It watches the
 /// notice pipe, the MQTT connection and the API's mailbox as well, so a notice
 /// goes up the moment it arrives, and wakes for the one on show to come down on
-/// time.
+/// time, or for one that had to wait its turn to go up.
 fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSources) void {
     const max_sleep_seconds = 3600;
     const have_pipe = wake_pipe[0] >= 0;
@@ -289,7 +289,7 @@ fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSourc
 
     while (!should_exit.load(.acquire)) {
         scheduler.runPending();
-        daemon.expireNotice();
+        daemon.stepNotices();
         if (should_exit.load(.acquire)) break;
 
         const idle = scheduler.idleSeconds() orelse max_sleep_seconds;

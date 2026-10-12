@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: SysInk HTTP API
-  version: 1.10.3
+  version: 1.11.0
   summary: Readings from a SysInk panel, and notices onto it.
   description: |
     Served by the daemon beside the panel preview when `WEB_PREVIEW=true`.
@@ -86,6 +86,12 @@ paths:
         The notice replaces the dashboard at once, for `duration` seconds or
         `NOTIFY_DURATION` (30 by default), and a newer one replaces the one on
         show. It takes the same payload as the notice pipe and the MQTT topic.
+
+        Notices change the panel at most once every two seconds. One that
+        arrives sooner after the last waits out the rest of them, and of
+        several arriving meanwhile only the latest is shown. The answer is
+        `202` either way: it says the notice was taken in, not that it was
+        shown.
 
         The body is read by what it contains, not by `Content-Type`: a body
         that parses as a JSON object is a JSON notice, unless its `text` (or
@@ -218,7 +224,7 @@ components:
 
   responses:
     Accepted:
-      description: Accepted; on the panel within a moment.
+      description: Accepted; on the panel within a moment, unless a newer notice takes its place first.
       content:
         application/json:
           schema:

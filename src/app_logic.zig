@@ -2,8 +2,7 @@
 //!
 //! `main.zig` reads the sensors, draws, and talks to the panel and the broker.
 //! What it does when — whether this update is a full refresh, which fault has
-//! just appeared, when a notice comes down, what goes to the broker — is
-//! decided here, against a time and readings passed in. Each rule can then be
+//! just appeared, what goes to the broker — is decided here, against a time and readings passed in. Each rule can then be
 //! tested with no panel, no clock and no network.
 
 const std = @import("std");
@@ -86,39 +85,6 @@ pub const RefreshClock = struct {
 
     pub fn force(self: *RefreshClock) void {
         self.forced = true;
-    }
-};
-
-/// How long the notice on show stays up.
-pub const NoticeClock = struct {
-    /// Monotonic timestamp at which the notice on show is taken down, if one is.
-    until: ?i64 = null,
-
-    /// A notice went up at `now`, for `duration` seconds. One already up is
-    /// replaced, and its time with it.
-    pub fn show(self: *NoticeClock, now: i64, duration: u32) void {
-        self.until = now + @as(i64, duration);
-    }
-
-    /// Take the notice on show down early. False when there was none.
-    pub fn dismiss(self: *NoticeClock) bool {
-        if (self.until == null) return false;
-        self.until = null;
-        return true;
-    }
-
-    /// True once, when the notice's time is up at `now`.
-    pub fn expired(self: *NoticeClock, now: i64) bool {
-        const until = self.until orelse return false;
-        if (now < until) return false;
-        self.until = null;
-        return true;
-    }
-
-    /// Seconds until the notice comes down, for the main loop to wake on time.
-    pub fn secondsLeft(self: NoticeClock, now: i64) ?i64 {
-        const until = self.until orelse return null;
-        return @max(0, until - now);
     }
 };
 
@@ -324,49 +290,6 @@ test "a full refresh made elsewhere drops a pending forced one" {
     clock.force();
     clock.tookFull(50);
     try testing.expectEqual(Refresh.partial, clock.next(60));
-}
-
-test "a notice stays up for its duration and comes down once" {
-    var notice: NoticeClock = .{};
-    try testing.expect(notice.secondsLeft(100) == null);
-    try testing.expect(!notice.expired(100));
-
-    notice.show(100, 30);
-    try testing.expectEqual(@as(?i64, 30), notice.secondsLeft(100));
-    try testing.expectEqual(@as(?i64, 1), notice.secondsLeft(129));
-    try testing.expect(!notice.expired(129));
-
-    try testing.expect(notice.expired(130));
-    // Down already: there is nothing to take down a second time.
-    try testing.expect(!notice.expired(131));
-    try testing.expect(notice.secondsLeft(131) == null);
-}
-
-test "a newer notice replaces the older one's time" {
-    var notice: NoticeClock = .{};
-    notice.show(100, 30);
-    notice.show(120, 60);
-
-    try testing.expect(!notice.expired(130));
-    try testing.expectEqual(@as(?i64, 50), notice.secondsLeft(130));
-    try testing.expect(notice.expired(180));
-}
-
-test "the main loop is never told to wait a negative time for a notice" {
-    var notice: NoticeClock = .{};
-    notice.show(100, 30);
-    // Woken late: the notice is overdue, not due in minus five seconds.
-    try testing.expectEqual(@as(?i64, 0), notice.secondsLeft(135));
-}
-
-test "dismissing takes a notice down early, and only if there is one" {
-    var notice: NoticeClock = .{};
-    try testing.expect(!notice.dismiss());
-
-    notice.show(100, 30);
-    try testing.expect(notice.dismiss());
-    try testing.expect(!notice.dismiss());
-    try testing.expect(!notice.expired(200));
 }
 
 test "a rate is reported in whole bytes, whatever the float holds" {

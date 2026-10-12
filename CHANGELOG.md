@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
+| 1.11.0 | `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`, `download_bytes_per_second` and `upload_bytes_per_second` can be `null`, like every other reading, and a reading that could not be refreshed is listed under the new `stale` object. | A client that assumed those six were always numbers needs to allow for `null`. |
+| 1.11.0 | MQTT publishes only the readings whose latest measurement worked. One that fails is no longer published with its last value, so its Home Assistant entity goes unavailable after three `INTERVAL_FAST` periods. | Nothing, unless an automation counted on a sensor never becoming unavailable. |
+| 1.11.0 | A variable left blank (`NAME=`) counts as unset for every setting. `NOTIFY_ENABLED=`, `PANEL_SLEEP=` and `MQTT_DISCOVERY=` used to read as off and now read as their default, on; the log says so at startup. | Write `=false` to turn one of them off. |
+| 1.11.0 | Notices change the panel at most once every two seconds. Of several arriving in between only the latest is shown, and the one on show sent again is not drawn again. | Nothing, unless a sender counted on every notice of a rapid series being shown: space them, or send the one that matters. |
 | 1.10.1 | Requires Zig 0.17.0 to build, and network access on the first build to fetch the translate-c package. | Only affects building from source. `-Doptimize=ReleaseSafe` still works, as a deprecated spelling of `-Doptimize=safe`. |
 | 1.8.0 | Home Assistant discovery derives its identity from `MQTT_CLIENT_ID`, and `MQTT_TOPIC_PREFIX` defaults to it. With the default client id nothing changes. | If you set a custom `MQTT_CLIENT_ID`, the device reappears under new entity IDs. Set `MQTT_TOPIC_PREFIX=sysink` to keep the old state topics, and clear the retained configs under `homeassistant/+/sysink/+/config` to drop the old entities. |
 | 1.8.0 | The service unit sets `ProtectHome=yes`. | `BMP_EXPORT_PATH` and `LOG_FILE_PATH` can no longer point into `/home` or `/root`. |
@@ -23,7 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-12
+
 ### Fixed
+- **A sender stuck in a loop flooded the log, and could keep the panel
+  refreshing.** Every notice was drawn and logged the moment it arrived, so two
+  seconds of `yes > /run/sys-ink/notify` wrote thousands of lines: enough for
+  journald to rate-limit the unit and drop its other messages, or to grow
+  `LOG_FILE_PATH` by hundreds of KB a second. A sender alternating two texts
+  refreshed the e-paper without pause on top of that, and MQTT and
+  `POST /api/notice` were open to the same. A notice still goes up at once, but
+  one that arrives within two seconds of the last change a notice made to the
+  panel waits out the rest of them, and of those arriving meanwhile only the
+  latest is kept. However fast a sender writes, that is one change to the panel
+  and one log line per interval.
+- **A notice could write log lines of its own.** Its text was logged as sent, so
+  one with a newline in it, as JSON, MQTT and HTTP all allow, continued on a
+  line that looked like the daemon's, and escape sequences reached the terminal
+  of whoever read the log. Folded as the panel shows it, the text has neither.
 - An NVMe SMART command the controller refused was read as a healthy drive.
   The ioctl that carries it has three outcomes: an errno, zero, or the
   controller's own status for a command it completed with an error — which is
@@ -66,6 +87,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first one `/proc/net/wireless` lists. Nothing changes where it is `wlan0`.
 
 ### Changed
+- The log has a notice as the panel shows it, folded to ASCII, rather than as
+  it was sent. The same notice sent again while it is up still restarts its
+  timer, but is logged at debug level and no longer redrawn.
+- A notice whose time runs out while another waits to go up stays until that
+  one replaces it, rather than giving way to the dashboard for a second and a
+  full refresh.
 - `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`,
   `download_bytes_per_second` and `upload_bytes_per_second` can now be `null`,
   like every other reading, and there is a new `stale` object. A client that
@@ -547,6 +574,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.11.0]: https://github.com/zales/sys-ink/releases/tag/v1.11.0
 [1.10.3]: https://github.com/zales/sys-ink/releases/tag/v1.10.3
 [1.10.2]: https://github.com/zales/sys-ink/releases/tag/v1.10.2
 [1.10.1]: https://github.com/zales/sys-ink/releases/tag/v1.10.1
