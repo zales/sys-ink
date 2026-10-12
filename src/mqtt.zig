@@ -576,10 +576,18 @@ pub const MqttClient = struct {
     }
 
     /// Send one whole packet, waiting at most `send_timeout_ms` for room.
+    ///
+    /// Written as to a stream, which has no use for a destination: the
+    /// connection is one. `Socket.send` is the datagram call and wants an
+    /// address to go with every packet. TCP on Linux ignores it once
+    /// connected, which is all that made it work; the Unix socket that stands
+    /// in for the broker under test refuses it there, as it is entitled to.
     fn sendPacket(self: *Self, packet: []const u8) !void {
         const stream = self.stream orelse return error.NotConnected;
         try bounded_connect.waitWritable(stream.socket.handle, send_timeout_ms);
-        try stream.socket.send(self.io, &stream.socket.address, packet);
+
+        var writer = stream.writer(self.io, &.{});
+        writer.interface.writeAll(packet) catch return writer.err orelse error.WriteFailed;
     }
 
     fn receiveConnack(self: *Self) !void {
