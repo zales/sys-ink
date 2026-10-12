@@ -6,8 +6,9 @@
 //! `NetworkOps`, which read a tree of fixtures as readily as the machine; a
 //! broker can be the other end of a socket pair; and whatever depends on the
 //! time has a form that takes it as an argument. That puts most of this under
-//! test. What decides — which refresh, which fault, how long a notice stays —
-//! is `app_logic.zig`; this is where those decisions meet the parts they are
+//! test. What decides — which refresh, which fault, what goes to the broker —
+//! is `app_logic.zig`, and when a notice goes up and comes down is the pacer in
+//! `notice.zig`; this is where those decisions meet the parts they are
 //! about.
 //!
 //! What the tests here leave to the device is what only a machine can answer,
@@ -89,7 +90,8 @@ pub fn App(comptime Transport: type) type {
         frame_sink: ?FrameSink = null,
         /// When to do what; see `app_logic.zig`, where each of these is tested.
         refresh: app_logic.RefreshClock,
-        notice_clock: app_logic.NoticeClock = .{},
+        /// When notices go up and when they come down.
+        pacer: notice.Pacer = .{},
         /// Which faults have been announced, so each is logged once. What the
         /// faults are is in the readings; see `showFaults`.
         fault_log: app_logic.FaultLog = .{},
@@ -476,53 +478,75 @@ pub fn App(comptime Transport: type) type {
         /// Put a notice on the panel straight away, rather than at the next display
         /// tick, which may be half a minute off. One with no text takes down the
         /// notice on show instead. `raw` is as it arrived, from whichever source.
+        ///
+        /// Straight away unless the panel has only just changed: the pacer
+        /// decides, and nothing is drawn or logged here for a notice it holds
+        /// back. A sender in a loop gets through this thousands of times a second.
         pub fn applyNotice(self: *Self, raw: []const u8) void {
-            self.applyNoticeAt(raw, self.nowSeconds());
+            if (self.offerNotice(raw)) self.stepNotices();
         }
 
         /// `applyNotice` at an explicit time, from which the notice's own runs.
         pub fn applyNoticeAt(self: *Self, raw: []const u8, now: i64) void {
+            if (self.offerNotice(raw)) _ = self.stepNoticesAt(now);
+        }
+
+        /// Hand what arrived to the pacer. False when it was not a notice.
+        fn offerNotice(self: *Self, raw: []const u8) bool {
             // Room for the unescaped strings of the largest payload either source
             // delivers, with the JSON parser's own bookkeeping.
             var scratch: [8192]u8 = undefined;
-            const n = notice.parse(&scratch, raw) orelse return;
+            const n = notice.parse(&scratch, raw) orelse return false;
 
-            if (n.text.len == 0) {
-                if (!self.notice_clock.dismiss()) return;
-                log.info("Notice dismissed", .{});
-                self.takeNoticeDownAt(now);
-                return;
+            self.pacer.offer(n, self.options.notify_duration);
+            return true;
+        }
+
+        /// Do to the panel what the notices call for by now: put up the one whose
+        /// turn has come, or take down the one whose time is up. Asked every time
+        /// round the main loop, and whenever a notice arrives.
+        pub fn stepNotices(self: *Self) void {
+            if (!self.stepNoticesAt(self.nowSeconds())) return;
+            // A full refresh takes a couple of seconds, and the interval between
+            // changes is counted from the end of one: counted from its start, it
+            // would be over before the panel had rested.
+            self.pacer.settle(self.nowSeconds());
+        }
+
+        /// `stepNotices` at an explicit time. True when the panel was changed.
+        pub fn stepNoticesAt(self: *Self, now: i64) bool {
+            const step = self.pacer.next(now) orelse return false;
+
+            switch (step) {
+                .show => |shown| {
+                    if (shown.repeat) {
+                        // Already on the glass, so there is nothing to draw, and a
+                        // sender repeating itself is not worth a line each time.
+                        log.debug("Notice repeated, for another {d}s", .{shown.duration});
+                        return false;
+                    }
+                    log.info("Notice for {d}s: {s}", .{ shown.duration, shown.text });
+                    self.renderer.showNotice(shown.text);
+                },
+                .dismissed, .expired => {
+                    if (step == .dismissed) log.info("Notice dismissed", .{});
+                    self.renderer.clearNotice();
+                    // A partial update from a screen of large text back to the
+                    // dashboard can leave a faint ghost of it; the full refresh is
+                    // worth its flash.
+                    self.refresh.force();
+                },
             }
 
-            const duration = n.duration orelse self.options.notify_duration;
-            log.info("Notice for {d}s: {s}", .{ duration, n.text });
-            self.renderer.showNotice(n.text);
-            self.notice_clock.show(now, duration);
             self.updateDisplayAt(now);
+            return true;
         }
 
-        /// Take the notice down once its time is up.
-        pub fn expireNotice(self: *Self) void {
-            self.expireNoticeAt(self.nowSeconds());
-        }
-
-        /// `expireNotice` at an explicit time.
-        pub fn expireNoticeAt(self: *Self, now: i64) void {
-            if (self.notice_clock.expired(now)) self.takeNoticeDownAt(now);
-        }
-
-        fn takeNoticeDownAt(self: *Self, now: i64) void {
-            self.renderer.clearNotice();
-            // A partial update from a screen of large text back to the dashboard
-            // can leave a faint ghost of it; the full refresh is worth its flash.
-            self.refresh.force();
-            self.updateDisplayAt(now);
-        }
-
-        /// Seconds until the notice on show comes down, for the main loop to wake
-        /// on time; null when there is none.
+        /// Seconds until the notices next call for something, for the main loop
+        /// to wake on time: the one on show coming down, or one that had to wait
+        /// its turn going up. Null when there is nothing to wake for.
         pub fn noticeSecondsLeft(self: *Self) ?i64 {
-            return self.notice_clock.secondsLeft(self.nowSeconds());
+            return self.pacer.secondsLeft(self.nowSeconds());
         }
 
         // ------------------------------------------------------------------------
@@ -946,20 +970,20 @@ test "a notice goes up at once, and the dashboard comes back with a full refresh
     bench.app.applyNoticeAt("Backup finished", 1010);
     try testing.expect(bench.renderer.notice_shown);
     try testing.expectEqual(Waveform.partial, bench.refreshed().?);
-    try testing.expectEqual(@as(?i64, 30), bench.app.notice_clock.secondsLeft(1010));
+    try testing.expectEqual(@as(?i64, 30), bench.app.pacer.secondsLeft(1010));
 
     bench.transport.resetLog();
-    bench.app.expireNoticeAt(1039);
+    _ = bench.app.stepNoticesAt(1039);
     try testing.expect(bench.renderer.notice_shown);
     try testing.expect(!bench.panelTouched());
 
-    bench.app.expireNoticeAt(1040);
+    try testing.expect(bench.app.stepNoticesAt(1040));
     try testing.expect(!bench.renderer.notice_shown);
     try testing.expectEqual(Waveform.full, bench.refreshed().?);
 
     // Down already: its time passing again does nothing.
     bench.transport.resetLog();
-    bench.app.expireNoticeAt(1041);
+    try testing.expect(!bench.app.stepNoticesAt(1041));
     try testing.expect(!bench.panelTouched());
 }
 
@@ -970,13 +994,13 @@ test "a notice may say how long it stays, and can be taken down early" {
     try bench.app.showInitialFrameAt(1000);
 
     bench.app.applyNoticeAt("{\"text\": \"Deploy running\", \"duration\": 120}", 1000);
-    try testing.expectEqual(@as(?i64, 120), bench.app.notice_clock.secondsLeft(1000));
+    try testing.expectEqual(@as(?i64, 120), bench.app.pacer.secondsLeft(1000));
 
     bench.transport.resetLog();
     bench.app.applyNoticeAt("{\"text\": \"\"}", 1010);
     try testing.expect(!bench.renderer.notice_shown);
     try testing.expectEqual(Waveform.full, bench.refreshed().?);
-    try testing.expect(bench.app.notice_clock.secondsLeft(1010) == null);
+    try testing.expect(bench.app.pacer.secondsLeft(1010) == null);
 
     // With nothing up, a dismissal and a notice with nothing to show both
     // leave the panel alone.
@@ -985,6 +1009,49 @@ test "a notice may say how long it stays, and can be taken down early" {
     bench.app.applyNoticeAt(" \n\t ", 1020);
     try testing.expect(!bench.renderer.notice_shown);
     try testing.expect(!bench.panelTouched());
+}
+
+test "notices that come faster than the panel should change wait their turn, and only the latest goes up" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .notify_duration = 30 });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.app.applyNoticeAt("first", 1010);
+    try testing.expect(bench.renderer.notice_shown);
+
+    // A second on: too soon. Neither is drawn, and the first stays up.
+    bench.transport.resetLog();
+    bench.app.applyNoticeAt("second", 1011);
+    bench.app.applyNoticeAt("third", 1011);
+    try testing.expect(!bench.panelTouched());
+    // The loop is told to come back when the wait is over, not in half a minute.
+    try testing.expectEqual(@as(?i64, 1), bench.app.pacer.secondsLeft(1011));
+
+    // Its turn: the latest, once, as a partial update. The second never shows.
+    try testing.expect(bench.app.stepNoticesAt(1012));
+    try testing.expectEqual(Waveform.partial, bench.refreshed().?);
+    var expected = try Renderer.init(testing.allocator, .{});
+    defer expected.deinit();
+    expected.showNotice("third");
+    try testing.expectEqualSlices(u8, expected.notice.data, bench.renderer.notice.data);
+    try testing.expectEqual(@as(?i64, 30), bench.app.pacer.secondsLeft(1012));
+}
+
+test "the notice on show sent again is not drawn again, and stays up longer" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .notify_duration = 30 });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.app.applyNoticeAt("Backup running", 1010);
+    try testing.expect(bench.renderer.notice_shown);
+
+    bench.transport.resetLog();
+    bench.app.applyNoticeAt("Backup running", 1025);
+    try testing.expect(!bench.panelTouched());
+    // From the repeat, not from when it first went up.
+    try testing.expectEqual(@as(?i64, 30), bench.app.pacer.secondsLeft(1025));
 }
 
 const Collector = struct {

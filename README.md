@@ -137,7 +137,7 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   of it runs under test against a recorder and a tree of fixtures.
 - `src/app_logic.zig`: What those tasks decide, apart from the I/O that
   carries it out — when a refresh is a full one, which fault just appeared,
-  when a notice comes down, what goes to the broker (unit tested).
+  what goes to the broker (unit tested).
 - `src/scheduler.zig`: Monotonic-clock task scheduler for periodic updates.
 - `src/parse.zig`: I/O-free parsers for procfs/sysfs and command output (unit tested).
 - `src/reading.zig`: A reading together with how its latest measurement went:
@@ -162,8 +162,8 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/network_ops.zig`: Network status and traffic monitoring.
 - `src/mqtt.zig`: MQTT 3.1.1 client and Home Assistant discovery.
 - `src/notice.zig`, `src/notice_fifo.zig`: notices — reading the payload,
-  folding its text to what the fonts can draw, and receiving it through the
-  named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
+  folding its text to what the fonts can draw, deciding when one goes up and
+  comes down, and receiving it through the named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
   `src/web_preview.zig`.
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging. The
@@ -629,6 +629,12 @@ characters, is ignored rather than shown as a blank panel.
 | `NOTIFY_DURATION` | `30` | Seconds a notice stays up |
 
 - **A newer notice replaces the one on show** and restarts its timer.
+- **Notices change the panel at most once every two seconds.** One goes up at
+  once, but the next to arrive within two seconds of that waits out the rest of
+  them, and of several arriving meanwhile only the latest is shown. A sender
+  stuck in a loop therefore costs one refresh and one log line per interval,
+  however fast it writes. The same notice sent again while it is up only
+  restarts its timer: nothing is redrawn, and it is logged at debug level.
 - **On the pipe, one line is one notice.** The line ends at a newline or at the
   end of the write, so `printf` works as well as `echo`. A JSON notice may be
   spread over several lines, as `jq` prints it.
@@ -639,7 +645,8 @@ characters, is ignored rather than shown as a blank panel.
   most the panel holds.
 - **The fonts cover ASCII only.** Diacritics are dropped (`Příliš žluťoučký`
   shows as `Prilis zlutoucky`), typographic quotes and dashes become their ASCII
-  lookalikes, and anything else, emoji included, shows as `?`.
+  lookalikes, and anything else, emoji included, shows as `?`. The log has a
+  notice the same way, on one line, so its text cannot pass for log lines.
 - **Who may write** is decided by the pipe's permissions: `0600` root-only by
   default, `0620` with `NOTIFY_GROUP` set. To let a program running as an
   ordinary user post notices, put that user in a group and name it:

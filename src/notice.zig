@@ -1,9 +1,10 @@
 //! Notices: short messages from other programs, shown on the panel for a while
 //! in place of the dashboard.
 //!
-//! This module is the I/O-free half: reading what arrived and turning it into
-//! text the panel can draw. Receiving it is `notice_fifo.zig` for the local
-//! pipe, `mqtt.zig` for the broker and `web_preview.zig` for the HTTP API.
+//! This module is the I/O-free half: reading what arrived, turning it into
+//! text the panel can draw, and deciding when it goes up and comes down — see
+//! `Pacer`. Receiving it is `notice_fifo.zig` for the local pipe, `mqtt.zig`
+//! for the broker and `web_preview.zig` for the HTTP API.
 //!
 //! All three carry the same thing: plain text, or a JSON object for when a
 //! notice needs more than that — see `parse`.
@@ -209,6 +210,142 @@ pub fn lastMessage(chunk: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Least time a sender must leave the panel alone between two changes to it,
+/// in seconds.
+///
+/// Every refresh wears the e-paper a little and takes a moment of its own, and
+/// a notice replaced sooner than this was never read anyway. The clock is read
+/// in whole seconds, so the real gap is anywhere between one second and two.
+pub const min_interval = 2;
+
+/// Decides when notices go up and when they come down.
+///
+/// A notice goes up at once, unless the panel changed within the last
+/// `min_interval`: then it waits out the rest of that, and a newer one arriving
+/// meanwhile takes its place, as it would have on the panel. So however fast a
+/// sender writes, the panel changes once per interval and the log gains one
+/// line. Every notice used to be drawn and logged as it arrived, which a sender
+/// stuck in a loop turned into thousands of log lines a second — enough for
+/// journald to drop the daemon's other messages — and, between two texts, into
+/// a panel that never stopped refreshing.
+///
+/// Free of I/O, the clock included: the time is passed in, as it is to
+/// `Scheduler.runPendingAt`, so all of it is tested on any host.
+pub const Pacer = struct {
+    /// The notice on show, kept to tell a repeat of it by.
+    shown: Request = .{},
+    /// Monotonic second at which the notice on show comes down; null with
+    /// none up.
+    until: ?i64 = null,
+    /// The latest notice to arrive that has not been acted on yet.
+    waiting: ?Request = null,
+    /// Monotonic second of the last change to the panel; null before the first.
+    changed: ?i64 = null,
+
+    const Request = struct {
+        /// Folded, as the panel draws it. Empty asks for the notice on show to
+        /// come down.
+        buf: [max_len]u8 = undefined,
+        len: usize = 0,
+        duration: u32 = 0,
+
+        fn text(self: *const Request) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+
+    /// What the caller is to do to the panel.
+    pub const Step = union(enum) {
+        show: Show,
+        /// Back to the dashboard, because a sender asked.
+        dismissed,
+        /// Back to the dashboard, because the notice's time is up.
+        expired,
+    };
+
+    pub const Show = struct {
+        /// As the panel draws it, which also makes it fit for a log line:
+        /// folding leaves no newline or escape sequence for a sender to forge
+        /// one with. Borrowed: valid until the pacer is asked again.
+        text: []const u8,
+        duration: u32,
+        /// The notice already on show, sent again: nothing to draw, it only
+        /// stays up longer.
+        repeat: bool,
+    };
+
+    /// Take in a notice that has just arrived, in place of any still waiting.
+    /// `next` then says what to do about it, which may be nothing yet.
+    pub fn offer(self: *Pacer, n: Notice, default_duration: u32) void {
+        self.waiting = .{ .duration = n.duration orelse default_duration };
+        const w = &self.waiting.?;
+        w.len = foldToAscii(&w.buf, n.text).len;
+    }
+
+    /// What to do to the panel now, if anything. Ask after every `offer` and
+    /// every time round the loop.
+    pub fn next(self: *Pacer, now: i64) ?Step {
+        const on_show = self.until != null;
+
+        if (self.waiting) |w| {
+            const dismissal = w.len == 0;
+            if (dismissal and !on_show) {
+                // Nothing to take down, so nothing to wait for either.
+                self.waiting = null;
+            } else if (self.restLeft(now) == 0) {
+                self.waiting = null;
+                self.changed = now;
+                if (dismissal) {
+                    self.until = null;
+                    return .dismissed;
+                }
+                const repeat = on_show and w.duration == self.shown.duration and
+                    std.mem.eql(u8, w.text(), self.shown.text());
+                self.shown = w;
+                self.until = now + @as(i64, w.duration);
+                return .{ .show = .{ .text = self.shown.text(), .duration = w.duration, .repeat = repeat } };
+            } else if (!dismissal) {
+                // The one on show stays until this one replaces it, even past
+                // its time: going back to the dashboard for a second in
+                // between would cost two refreshes, one of them full.
+                return null;
+            }
+        }
+
+        const until = self.until orelse return null;
+        if (now < until) return null;
+        self.until = null;
+        self.changed = now;
+        return .expired;
+    }
+
+    /// The panel has finished the change `next` asked for. A full refresh
+    /// takes a couple of seconds, so the interval is counted from its end:
+    /// counted from its start, it would be over before the panel had rested.
+    pub fn settle(self: *Pacer, now: i64) void {
+        self.changed = now;
+    }
+
+    /// Seconds until `next` has something to do without another notice
+    /// arriving, which is how long the loop may sleep. Null when there is
+    /// nothing to wake for.
+    pub fn secondsLeft(self: *const Pacer, now: i64) ?i64 {
+        const expiry: ?i64 = if (self.until) |until| @max(0, until - now) else null;
+        const waiting = if (self.waiting) |*request| request else return expiry;
+        const rest = self.restLeft(now);
+        // As in `next`: a notice waiting to go up holds the one on show, and
+        // a dismissal has only the one on show to wait for.
+        if (waiting.len > 0) return rest;
+        return @min(rest, expiry orelse return null);
+    }
+
+    /// Seconds a sender still has to leave the panel alone.
+    fn restLeft(self: *const Pacer, now: i64) i64 {
+        const changed = self.changed orelse return 0;
+        return @max(0, changed + min_interval - now);
+    }
+};
+
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
@@ -356,4 +493,223 @@ test "a notice is the last non-blank line of the chunk" {
     try testing.expectEqualStrings("x", lastMessage("  x \r\n").?);
     try testing.expect(lastMessage("\n \n") == null);
     try testing.expect(lastMessage("") == null);
+}
+
+test "folding what is already folded changes nothing" {
+    // The pacer hands the renderer folded text, which the renderer folds again.
+    var once_buf: [max_len]u8 = undefined;
+    var twice_buf: [max_len]u8 = undefined;
+    // More of each than fits, so that the cut at `max_len` is folded twice too.
+    const sharp_s: *const [max_len * "ß".len]u8 = comptime sharp_s: {
+        const copies: [max_len]["ß".len]u8 = @splat("ß".*);
+        break :sharp_s @ptrCast(&copies);
+    };
+    const degrees: *const [max_len * "° ".len]u8 = comptime degrees: {
+        const copies: [max_len]["° ".len]u8 = @splat("° ".*);
+        break :degrees @ptrCast(&copies);
+    };
+    for ([_][]const u8{
+        "  Příliš žluťoučký kůň\n„úpěl“ – 22°C… 😀 ",
+        sharp_s,
+        degrees,
+    }) |text| {
+        const once = foldToAscii(&once_buf, text);
+        try testing.expectEqualStrings(once, foldToAscii(&twice_buf, once));
+    }
+}
+
+/// A notice arriving at `now`, and what the daemon is told to do about it.
+fn arrive(p: *Pacer, text: []const u8, now: i64) ?Pacer.Step {
+    p.offer(.{ .text = text }, 30);
+    return p.next(now);
+}
+
+test "the first notice goes up at once and comes down when its time is up" {
+    var p: Pacer = .{};
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(100));
+
+    const step = arrive(&p, "Backup finished", 100).?;
+    try testing.expectEqualStrings("Backup finished", step.show.text);
+    try testing.expectEqual(@as(u32, 30), step.show.duration);
+    try testing.expect(!step.show.repeat);
+
+    try testing.expectEqual(@as(?i64, 30), p.secondsLeft(100));
+    try testing.expect(p.next(129) == null);
+    try testing.expect(p.next(130).? == .expired);
+    try testing.expect(p.next(131) == null);
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(131));
+}
+
+test "a notice arriving straight after another waits out the interval" {
+    var p: Pacer = .{};
+    _ = arrive(&p, "first", 100).?;
+
+    try testing.expect(arrive(&p, "second", 100) == null);
+    try testing.expectEqual(@as(?i64, 2), p.secondsLeft(100));
+    try testing.expect(p.next(101) == null);
+    try testing.expectEqual(@as(?i64, 1), p.secondsLeft(101));
+
+    try testing.expectEqualStrings("second", p.next(102).?.show.text);
+    // Its time on show runs from when it went up, not from when it arrived.
+    try testing.expectEqual(@as(?i64, 30), p.secondsLeft(102));
+
+    // With the panel left alone for the interval, the next is not held up.
+    try testing.expectEqualStrings("third", arrive(&p, "third", 104).?.show.text);
+}
+
+test "of the notices arriving while one waits, only the latest goes up" {
+    var p: Pacer = .{};
+    _ = arrive(&p, "first", 100).?;
+    try testing.expect(arrive(&p, "second", 100) == null);
+    try testing.expect(arrive(&p, "third", 101) == null);
+    try testing.expect(arrive(&p, "fourth", 101) == null);
+
+    try testing.expectEqualStrings("fourth", p.next(102).?.show.text);
+    try testing.expect(p.next(102) == null);
+    try testing.expect(p.next(104) == null);
+}
+
+test "a sender that never stops changes the panel once per interval" {
+    var p: Pacer = .{};
+    var steps: u32 = 0;
+
+    // A thousand notices a second for a minute, no two alike, with the loop
+    // coming round between them as it does in the daemon.
+    for (0..60_000) |i| {
+        const now: i64 = @intCast(100 + i / 1000);
+        if (p.next(now) != null) steps += 1;
+
+        var buf: [16]u8 = undefined;
+        const text = try std.mem.print(&buf, "notice {d}", .{i});
+        if (arrive(&p, text, now)) |step| {
+            try testing.expect(!step.show.repeat);
+            steps += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 60 / min_interval), steps);
+}
+
+test "the same notice over and over is drawn once and kept up" {
+    var p: Pacer = .{};
+    var drawn: u32 = 0;
+    var repeats: u32 = 0;
+
+    // `yes > /run/sys-ink/notify`, for a minute.
+    for (0..60_000) |i| {
+        const now: i64 = @intCast(100 + i / 1000);
+        const step = arrive(&p, "y", now) orelse continue;
+        if (step.show.repeat) repeats += 1 else drawn += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), drawn);
+    try testing.expectEqual(@as(u32, 60 / min_interval - 1), repeats);
+
+    // The last to arrive is still waiting its turn, and keeps it up as well.
+    try testing.expectEqual(@as(?i64, 0), p.secondsLeft(160));
+    try testing.expect(p.next(160).?.show.repeat);
+    try testing.expectEqual(@as(?i64, 30), p.secondsLeft(160));
+}
+
+test "a repeat is told by what the panel shows, and for how long" {
+    var p: Pacer = .{};
+    try testing.expect(!arrive(&p, "Pračka hotová", 100).?.show.repeat);
+
+    // The panel has no diacritics, so this is the same notice again.
+    try testing.expect(arrive(&p, "Pracka hotova", 110).?.show.repeat);
+    try testing.expectEqual(@as(?i64, 30), p.secondsLeft(110));
+
+    // The same text for another length of time is a change worth a log line.
+    p.offer(.{ .text = "Pracka hotova", .duration = 300 }, 30);
+    try testing.expect(!p.next(120).?.show.repeat);
+
+    // And once it has come down, the same notice is a new one.
+    try testing.expect(p.next(420).? == .expired);
+    p.offer(.{ .text = "Pracka hotova", .duration = 300 }, 30);
+    try testing.expect(!p.next(500).?.show.repeat);
+}
+
+test "a dismissal takes the notice down, in its turn like any other" {
+    var p: Pacer = .{};
+    _ = arrive(&p, "Deploy running", 100).?;
+
+    try testing.expect(arrive(&p, "", 101) == null);
+    try testing.expectEqual(@as(?i64, 1), p.secondsLeft(101));
+    try testing.expect(p.next(102).? == .dismissed);
+    try testing.expect(p.next(102) == null);
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(102));
+
+    // At once, when the panel has been left alone for the interval.
+    _ = arrive(&p, "Deploy running", 200).?;
+    try testing.expect(arrive(&p, "", 210).? == .dismissed);
+}
+
+test "a dismissal with nothing on show does nothing, and calls off a notice still waiting" {
+    var p: Pacer = .{};
+    try testing.expect(arrive(&p, "", 100) == null);
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(100));
+
+    _ = arrive(&p, "first", 100).?;
+    try testing.expect(arrive(&p, "", 100) == null);
+    try testing.expect(p.next(102).? == .dismissed);
+
+    try testing.expect(arrive(&p, "second", 103) == null);
+    try testing.expect(arrive(&p, "", 103) == null);
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(103));
+    try testing.expect(p.next(110) == null);
+}
+
+test "a notice waiting to go up keeps the one on show from coming down first" {
+    var p: Pacer = .{};
+    p.offer(.{ .text = "short", .duration = 1 }, 30);
+    _ = p.next(100).?;
+    try testing.expect(arrive(&p, "next", 100) == null);
+
+    // Its time is up at 101, but the dashboard would only flash by.
+    try testing.expect(p.next(101) == null);
+    try testing.expectEqual(@as(?i64, 1), p.secondsLeft(101));
+    try testing.expectEqualStrings("next", p.next(102).?.show.text);
+}
+
+test "a dismissal waiting does not keep a notice past its time" {
+    var p: Pacer = .{};
+    p.offer(.{ .text = "short", .duration = 1 }, 30);
+    _ = p.next(100).?;
+    try testing.expect(arrive(&p, "", 100) == null);
+
+    try testing.expectEqual(@as(?i64, 1), p.secondsLeft(100));
+    try testing.expect(p.next(101).? == .expired);
+    // Which leaves the dismissal nothing to do, and the loop nothing to wake for.
+    try testing.expectEqual(@as(?i64, null), p.secondsLeft(101));
+    try testing.expect(p.next(103) == null);
+}
+
+test "a notice arriving just after one came down waits as well" {
+    var p: Pacer = .{};
+    _ = arrive(&p, "first", 100).?;
+    try testing.expect(p.next(130).? == .expired);
+
+    try testing.expect(arrive(&p, "second", 131) == null);
+    try testing.expectEqualStrings("second", p.next(132).?.show.text);
+}
+
+test "the interval is counted from when the panel finished changing" {
+    var p: Pacer = .{};
+    _ = arrive(&p, "first", 100).?;
+    // The refresh took until 103.
+    p.settle(103);
+
+    try testing.expect(arrive(&p, "second", 103) == null);
+    try testing.expectEqual(@as(?i64, 2), p.secondsLeft(103));
+    try testing.expect(p.next(104) == null);
+    try testing.expectEqualStrings("second", p.next(105).?.show.text);
+}
+
+test "a notice cannot write log lines of its own" {
+    var p: Pacer = .{};
+    const forged = arrive(&p, "Backup done\n[12:00:00] [err] (main) Disk failing\r\x1b[2J\x00", 100).?;
+    try testing.expectEqualStrings("Backup done [12:00:00] [err] (main) Disk failing [2J", forged.show.text);
+    for (forged.show.text) |byte| try testing.expect(byte >= 0x20 and byte != 0x7F);
+
+    // The controls and line breaks outside ASCII go the same way.
+    const wide = arrive(&p, "a\u{85}b\u{2028}c\u{9b}31m", 200).?;
+    try testing.expectEqualStrings("a?b?c?31m", wide.show.text);
 }

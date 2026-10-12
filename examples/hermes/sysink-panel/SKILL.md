@@ -30,9 +30,10 @@ Do not use it:
 - **for anything private.** Anyone in the room can read the panel. No
   passwords, tokens, personal details or message contents.
 - instead of answering in chat. The panel is an extra signal, not the reply.
-- for a stream of updates. Each notice replaces the one before it, and a
-  refresh takes about half a second, so send one when it matters, not one per
-  step.
+- for a stream of updates. Each notice replaces the one before it, a refresh
+  takes about half a second, and of notices sent less than two seconds apart
+  only the first and the latest are shown, so send one when it matters, not one
+  per step.
 
 ## How to send one
 

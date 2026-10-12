@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A sender stuck in a loop flooded the log, and could keep the panel
+  refreshing.** Every notice was drawn and logged the moment it arrived, so two
+  seconds of `yes > /run/sys-ink/notify` wrote thousands of lines: enough for
+  journald to rate-limit the unit and drop its other messages, or to grow
+  `LOG_FILE_PATH` by hundreds of KB a second. A sender alternating two texts
+  refreshed the e-paper without pause on top of that, and MQTT and
+  `POST /api/notice` were open to the same. A notice still goes up at once, but
+  one that arrives within two seconds of the last change a notice made to the
+  panel waits out the rest of them, and of those arriving meanwhile only the
+  latest is kept. However fast a sender writes, that is one change to the panel
+  and one log line per interval.
+- **A notice could write log lines of its own.** Its text was logged as sent, so
+  one with a newline in it, as JSON, MQTT and HTTP all allow, continued on a
+  line that looked like the daemon's, and escape sequences reached the terminal
+  of whoever read the log. Folded as the panel shows it, the text has neither.
 - An NVMe SMART command the controller refused was read as a healthy drive.
   The ioctl that carries it has three outcomes: an errno, zero, or the
   controller's own status for a command it completed with an error — which is
@@ -66,6 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first one `/proc/net/wireless` lists. Nothing changes where it is `wlan0`.
 
 ### Changed
+- The log has a notice as the panel shows it, folded to ASCII, rather than as
+  it was sent. The same notice sent again while it is up still restarts its
+  timer, but is logged at debug level and no longer redrawn.
+- A notice whose time runs out while another waits to go up stays until that
+  one replaces it, rather than giving way to the dashboard for a second and a
+  full refresh.
 - `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`,
   `download_bytes_per_second` and `upload_bytes_per_second` can now be `null`,
   like every other reading, and there is a new `stale` object. A client that
