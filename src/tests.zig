@@ -1,13 +1,17 @@
 //! Test root.
 //!
-//! Pulls in every module that carries unit tests. The remaining hardware-facing
-//! modules (system_ops, network_ops) are Linux-only and deliberately left out — their testable logic lives in `parse.zig`, which is
-//! free of I/O and runs anywhere. Those are type-checked by `zig build check`
-//! instead.
+//! Pulls in every module that carries unit tests. The root is this file rather
+//! than `main.zig` so that the suite runs on any host: `main` is Linux-only,
+//! and is type-checked by `zig build check` instead.
 //!
-//! The notice pipe and the daemon's HTTP server are Linux-only as well, but
-//! need no hardware: their tests run against a real pipe and a real loopback
-//! socket, on Linux — which is where CI runs — and are left out elsewhere.
+//! The modules that read the machine are here too, despite reading procfs and
+//! sysfs: `system_ops` and `network_ops` take the directory those are read
+//! under, so their tests give them a tree of fixtures (`sysroot.zig`). The
+//! parsing itself lives in `parse.zig`, free of I/O.
+//!
+//! The notice pipe and the daemon's HTTP server are Linux-only, but need no
+//! hardware: their tests run against a real pipe and a real loopback socket,
+//! on Linux — which is where CI runs — and are left out elsewhere.
 //!
 //! The panel driver and the state machine above it are here despite talking to
 //! hardware: both are generic over the transport, so their command sequences
@@ -41,6 +45,9 @@ test {
     _ = @import("frame_server.zig");
     _ = @import("http_request.zig");
     _ = @import("api.zig");
+    _ = @import("sysroot.zig");
+    _ = @import("system_ops.zig");
+    _ = @import("network_ops.zig");
 
     if (builtin.target.os.tag == .linux) {
         _ = @import("notice_fifo.zig");

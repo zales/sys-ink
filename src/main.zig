@@ -6,6 +6,7 @@ const syscall = @import("syscall.zig");
 const WebPreview = @import("web_preview.zig").WebPreview;
 const api = @import("api.zig");
 const network_ops = @import("network_ops.zig");
+const Root = @import("sysroot.zig").Root;
 const parse = @import("parse.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
@@ -623,10 +624,16 @@ pub fn main(init: std.process.Init) !u8 {
     // Now, with the logger up: the level and the file are settings themselves.
     logReport(&report);
 
-    var sys_ops = SystemOps.init(allocator, io, init.environ_map);
+    const root = Root.system(io) catch |err| {
+        log.err("Cannot open the root directory: {t}", .{err});
+        return 1;
+    };
+    defer root.close();
+
+    var sys_ops = SystemOps.init(allocator, io, root, init.environ_map);
     defer sys_ops.deinit();
-    var net_ops = NetworkOps.init(io, .{ .ip = cfg.internet_check_ip, .port = cfg.internet_check_port });
-    var traffic_mon = TrafficMonitor.init(io);
+    var net_ops = NetworkOps.init(io, root, .{ .ip = cfg.internet_check_ip, .port = cfg.internet_check_port });
+    var traffic_mon = TrafficMonitor.init(io, root);
 
     var renderer = Renderer.init(allocator, .{ .thresholds = cfg.thresholds }) catch |err| {
         log.err("Failed to initialize display: {t}", .{err});

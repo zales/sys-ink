@@ -12,8 +12,11 @@
 // Network readings: the interfaces' addresses.
 #include <ifaddrs.h>
 
-// Disk usage. Linux-only, like system_ops.zig, the one module that reads it;
-// the tests, which also build on macOS, reach only the parts above.
+// Disk usage: statfs. On Linux, where the daemon runs, it is declared in
+// <sys/vfs.h>; on macOS, where only the tests do, in <sys/mount.h>.
 #ifdef __linux__
 #include <sys/vfs.h>
+#endif
+#ifdef __APPLE__
+#include <sys/mount.h>
 #endif
