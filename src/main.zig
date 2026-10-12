@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init) !u8 {
     try daemon.scheduleDisplay(&scheduler, fast);
 
     log.info("Starting main loop (Ctrl+C to exit)", .{});
-    runLoop(&scheduler, &daemon, .{
+    runLoop(io, &scheduler, &daemon, .{
         .pipe = if (notice_fifo) |*f| f else null,
         .preview = if (preview) |*p| p else null,
     });
@@ -269,6 +269,9 @@ const NoticeSources = struct {
     preview: ?*WebPreview,
 };
 
+/// After a wait that failed, how long to stand still before trying again.
+const failed_wait_pause_ms = 1000;
+
 /// Run scheduled tasks until a signal arrives.
 ///
 /// Between ticks the loop blocks on the wake pipe for exactly as long as the
@@ -277,9 +280,12 @@ const NoticeSources = struct {
 /// notice pipe, the MQTT connection and the API's mailbox as well, so a notice
 /// goes up the moment it arrives, and wakes for the one on show to come down on
 /// time.
-fn runLoop(scheduler: *Scheduler, daemon: *App, sources: NoticeSources) void {
+fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSources) void {
     const max_sleep_seconds = 3600;
     const have_pipe = wake_pipe[0] >= 0;
+    // So that a wait which keeps failing is reported when it starts and when
+    // it stops, not once a second in between.
+    var wait_failing = false;
 
     while (!should_exit.load(.acquire)) {
         scheduler.runPending();
@@ -321,7 +327,21 @@ fn runLoop(scheduler: *Scheduler, daemon: *App, sources: NoticeSources) void {
             watched += 1;
         }
 
-        _ = std.posix.poll(fds[0..watched], @intCast(seconds * 1000)) catch {};
+        _ = std.posix.poll(fds[0..watched], @intCast(seconds * 1000)) catch |err| {
+            // An interrupted wait is retried inside `poll`; what gets here is
+            // the kernel out of memory, or worse. Nothing was waited for, so
+            // going straight round again would spin a core for as long as it
+            // lasts: stand still for a moment instead. A signal is still seen
+            // within that moment, at the top of the loop.
+            if (!wait_failing) log.warn("Cannot wait for events: {t}; checking once a second instead", .{err});
+            wait_failing = true;
+            std.Io.sleep(io, .fromMilliseconds(failed_wait_pause_ms), .awake) catch {};
+            continue;
+        };
+        if (wait_failing) {
+            log.info("Waiting for events works again", .{});
+            wait_failing = false;
+        }
 
         const ready = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR;
         if (sources.pipe) |fifo| {
