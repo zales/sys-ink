@@ -161,7 +161,7 @@ const App = struct {
 
     fn updateSignal(self: *App) void {
         // Read even on a cable: MQTT publishes it whenever there is one.
-        const signal = self.net.getSignalStrength("wlan0");
+        const signal = self.net.getSignalStrength();
         if (signal) |s| log.debug("Signal: {d} dBm", .{s});
 
         // Relies on the IP task having run first this cycle; see the schedule.

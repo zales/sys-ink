@@ -10,6 +10,9 @@ const log = std.log.scoped(.network);
 /// Longest IPv4 dotted quad ("255.255.255.255").
 pub const max_ip_len = 15;
 
+/// Longest interface name the kernel allows, IFNAMSIZ less its terminator.
+const max_interface_len = 15;
+
 /// How long an internet-reachability probe stays valid. Several callers ask for
 /// it each cycle and the probe blocks while it runs.
 const internet_cache_seconds = 60;
@@ -37,8 +40,9 @@ pub const NetworkOps = struct {
     last_signal: ?i32 = null,
     last_ip: [max_ip_len]u8 = undefined,
     last_ip_len: usize = 0,
-    /// Whether that address is on a wired interface. See `lastIpIsWired`.
-    last_ip_wired: bool = false,
+    /// The interface that address is on.
+    last_ip_interface: [max_interface_len]u8 = undefined,
+    last_ip_interface_len: usize = 0,
 
     pub fn init(io: std.Io, probe: Probe) NetworkOps {
         return .{ .io = io, .probe = probe };
@@ -61,13 +65,20 @@ pub const NetworkOps = struct {
     /// and everything else that carries an address here — eth0, end0, enp*,
     /// USB adapters — is wired.
     pub fn lastIpIsWired(self: *const NetworkOps) bool {
-        return self.last_ip_len != 0 and self.last_ip_wired;
+        const interface = self.lastIpInterface() orelse return false;
+        return !isWireless(interface);
     }
 
     /// The address the most recent look found, or null if it found none.
     pub fn lastIpAddress(self: *const NetworkOps) ?[]const u8 {
         if (self.last_ip_len == 0) return null;
         return self.last_ip[0..self.last_ip_len];
+    }
+
+    /// The interface that address is on, or null if there is none.
+    fn lastIpInterface(self: *const NetworkOps) ?[]const u8 {
+        if (self.last_ip_len == 0) return null;
+        return self.last_ip_interface[0..self.last_ip_interface_len];
     }
 
     /// Whether the machine can reach the configured probe host.
@@ -94,11 +105,15 @@ pub const NetworkOps = struct {
         return true;
     }
 
-    /// Get WiFi signal strength in dBm from /proc/net/wireless
-    pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) ?i32 {
-        // Forgotten before looking, as the address is: a look that finds
-        // nothing, or cannot look at all, must not leave the last reading
-        // behind for MQTT to go on publishing.
+    /// Wi-Fi signal strength in dBm from /proc/net/wireless, or null when
+    /// there is no Wi-Fi.
+    ///
+    /// Of the interface the panel's address is on when that one is wireless,
+    /// and otherwise of the first one listed: on a cable the reading is still
+    /// taken, for MQTT. No name is assumed. `wlan0` is what Raspberry Pi OS
+    /// calls it, and `wlp2s0` or `wlx…` is what predictable names do, where a
+    /// fixed `wlan0` never showed a signal at all.
+    pub fn getSignalStrength(self: *NetworkOps) ?i32 {
         self.last_signal = null;
 
         const file = std.Io.Dir.openFileAbsolute(self.io, "/proc/net/wireless", .{}) catch return null;
@@ -106,8 +121,12 @@ pub const NetworkOps = struct {
 
         var buf: [2048]u8 = undefined;
         const bytes_read = file.readPositionalAll(self.io, &buf, 0) catch return null;
+        const content = buf[0..bytes_read];
 
-        self.last_signal = parse.wirelessSignal(buf[0..bytes_read], interface);
+        const carrying = if (self.lastIpInterface()) |name| (if (isWireless(name)) name else null) else null;
+        const interface = carrying orelse parse.firstWirelessInterface(content) orelse return null;
+
+        self.last_signal = parse.wirelessSignal(content, interface);
         return self.last_signal;
     }
 
@@ -131,7 +150,7 @@ pub const NetworkOps = struct {
         // Null means nothing usable has been seen yet.
         var best_rank: ?parse.InterfaceRank = null;
         var best_len: usize = 0;
-        var best_wired = false;
+        var best_name: []const u8 = "";
 
         var current = ifap;
         while (current) |ifa| : (current = ifa.ifa_next) {
@@ -158,22 +177,38 @@ pub const NetworkOps = struct {
             @memcpy(buf[0..ip.len], ip);
             best_rank = rank;
             best_len = ip.len;
-            best_wired = !std.mem.startsWith(u8, name, "wl");
+            // Borrowed from the list, which lives until this returns.
+            best_name = name;
 
             if (rank == .wired) break; // nothing outranks a cable
         }
 
         if (best_rank == null) return null;
 
-        // Kept for MQTT, which publishes the address the panel is showing rather
-        // than walking the interface list a second time.
-        @memcpy(self.last_ip[0..best_len], buf[0..best_len]);
-        self.last_ip_len = best_len;
-        self.last_ip_wired = best_wired;
-
+        self.rememberAddress(buf[0..best_len], best_name);
         return buf[0..best_len];
     }
+
+    /// Keep `ip` and the interface it is on, for MQTT and the API, which
+    /// report the address the panel is showing rather than walking the
+    /// interface list a second time, and for the signal slot, which depends
+    /// on what kind of interface that is. Public for the tests of whatever
+    /// reads those back, which have no interface list to walk.
+    pub fn rememberAddress(self: *NetworkOps, ip: []const u8, interface: []const u8) void {
+        const ip_len = @min(ip.len, max_ip_len);
+        @memcpy(self.last_ip[0..ip_len], ip[0..ip_len]);
+        self.last_ip_len = ip_len;
+
+        const name_len = @min(interface.len, max_interface_len);
+        @memcpy(self.last_ip_interface[0..name_len], interface[0..name_len]);
+        self.last_ip_interface_len = name_len;
+    }
 };
+
+/// `wl` is the kernel's and udev's prefix for wireless interfaces.
+fn isWireless(interface: []const u8) bool {
+    return std.mem.startsWith(u8, interface, "wl");
+}
 
 /// Whether hardware backs the interface, which shows as a `device` link in
 /// sysfs. Bridges, veth pairs and tunnels have none.

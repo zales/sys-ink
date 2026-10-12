@@ -136,6 +136,19 @@ pub fn wirelessSignal(content: []const u8, interface: []const u8) ?i32 {
     return null;
 }
 
+/// Name of the first interface /proc/net/wireless lists, or null when it lists
+/// none. Only wireless interfaces appear there, whatever they are called.
+pub fn firstWirelessInterface(content: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        // The two header lines have no colon.
+        const colon = std.mem.find(u8, line, ":") orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], &std.ascii.whitespace);
+        if (name.len > 0) return name;
+    }
+    return null;
+}
+
 /// Where an interface stands when several carry an address. Earlier wins.
 pub const InterfaceRank = enum(u8) {
     /// Hardware on a cable.
@@ -555,6 +568,25 @@ test "wirelessSignal does not match on a name prefix" {
     // "wlan0" is a prefix of "wlan01" but must not match.
     try testing.expectEqual(@as(?i32, null), wirelessSignal(content, "wlan0"));
     try testing.expectEqual(@as(?i32, -55), wirelessSignal(content, "wlan01"));
+}
+
+test "the first wireless interface is found whatever it is called" {
+    const content =
+        \\Inter-| sta-|   Quality        |   Discarded packets
+        \\ face | tus | link level noise |  nwid crypt frag retry misc
+        \\wlp2s0: 0000   55.  -62.  -256        0     0    0     0    0
+        \\ wlan1: 0000   70.  -40.  -256        0     0    0     0    0
+    ;
+    try testing.expectEqualStrings("wlp2s0", firstWirelessInterface(content).?);
+    try testing.expectEqual(@as(?i32, -62), wirelessSignal(content, firstWirelessInterface(content).?));
+
+    // No Wi-Fi at all: the two header lines and nothing else.
+    const headers_only =
+        \\Inter-| sta-|   Quality        |   Discarded packets
+        \\ face | tus | link level noise |  nwid crypt frag retry misc
+    ;
+    try testing.expect(firstWirelessInterface(headers_only) == null);
+    try testing.expect(firstWirelessInterface("") == null);
 }
 
 test "a cable outranks Wi-Fi whatever the port is called" {
