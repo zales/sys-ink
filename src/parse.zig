@@ -97,7 +97,16 @@ pub fn unsignedInt(content: []const u8) !u32 {
     return std.fmt.parseInt(u32, trimmed, 10);
 }
 
-pub const Uptime = struct { days: u32, hours: u32, minutes: u32 };
+pub const Uptime = struct {
+    days: u32,
+    hours: u32,
+    minutes: u32,
+
+    /// The whole of it in minutes.
+    pub fn totalMinutes(self: Uptime) u64 {
+        return @as(u64, self.days) * 24 * 60 + @as(u64, self.hours) * 60 + self.minutes;
+    }
+};
 
 /// Parse /proc/uptime ("<seconds>.<frac> <idle>").
 pub fn uptime(content: []const u8) !Uptime {
@@ -568,6 +577,16 @@ test "wirelessSignal does not match on a name prefix" {
     // "wlan0" is a prefix of "wlan01" but must not match.
     try testing.expectEqual(@as(?i32, null), wirelessSignal(content, "wlan0"));
     try testing.expectEqual(@as(?i32, -55), wirelessSignal(content, "wlan01"));
+}
+
+test "an uptime adds up to its minutes" {
+    try testing.expectEqual(@as(u64, 0), (Uptime{ .days = 0, .hours = 0, .minutes = 0 }).totalMinutes());
+    try testing.expectEqual(@as(u64, 4445), (Uptime{ .days = 3, .hours = 2, .minutes = 5 }).totalMinutes());
+    // Past what 32 bits of minutes hold: the sum is widened before it is taken.
+    try testing.expectEqual(
+        @as(u64, 6_184_752_906_239),
+        (Uptime{ .days = std.math.maxInt(u32), .hours = 23, .minutes = 59 }).totalMinutes(),
+    );
 }
 
 test "the first wireless interface is found whatever it is called" {

@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const update_select = @import("epd2in9.zig").update_select;
 
 pub const FakeTransport = struct {
     pub const RST_PIN: u32 = 17;
@@ -104,6 +105,22 @@ pub const FakeTransport = struct {
     pub fn sentCommand(self: *FakeTransport, cmd: u8) bool {
         var buf: [128]u8 = undefined;
         return std.mem.indexOfScalar(u8, self.commands(&buf), cmd) != null;
+    }
+
+    /// How a refresh was driven.
+    pub const Waveform = enum { full, partial };
+
+    /// The waveform of the last refresh in the log, or null if the log holds
+    /// none. For tests above the driver, which care that the panel was
+    /// refreshed and how, and not which bytes say so.
+    pub fn lastWaveform(self: *FakeTransport) ?Waveform {
+        const args = self.lastArgsAfter(update_select.command) orelse return null;
+        if (args.len != 1) return null;
+        return switch (args[0]) {
+            update_select.full => .full,
+            update_select.partial => .partial,
+            else => null,
+        };
     }
 
     /// Payload following the *last* occurrence of `cmd`.

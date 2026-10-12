@@ -188,10 +188,32 @@ pub const Stale = struct {
     }
 };
 
+/// The readings that are forgotten when they cannot be had, rather than kept
+/// as stale. `Stale` has no place for them, and whoever reports them has only
+/// to ask whether they are there.
+pub const never_stale = [_][]const u8{ "uptime_minutes", "ip_address", "signal_strength", "internet" };
+
 comptime {
     // Every name under `stale` is a reading of the same name beside it.
     for (@typeInfo(Stale).@"struct".field_names) |name| {
         std.debug.assert(@hasField(Status, name));
+    }
+
+    // And every reading is one or the other. A reading added to `Status` has
+    // to be given a place under `stale` or be named above before this
+    // compiles, which is what keeps a new one from going out to the broker as
+    // current after its sensor has stopped answering.
+    for (@typeInfo(Status).@"struct".field_names) |name| {
+        // Not readings: which kind of interface the address is on, and the
+        // list itself.
+        if (std.mem.eql(u8, name, "wired") or std.mem.eql(u8, name, "stale")) continue;
+
+        const forgotten = for (never_stale) |never| {
+            if (std.mem.eql(u8, never, name)) break true;
+        } else false;
+        if (@hasField(Stale, name) == forgotten) {
+            @compileError("api.Status." ++ name ++ " must be either in api.Stale or in api.never_stale");
+        }
     }
 }
 

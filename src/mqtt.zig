@@ -1619,11 +1619,17 @@ test "parsePublish rejects a topic length the packet cannot hold" {
 
 /// A client whose connection is one end of a socket pair, the other end
 /// standing in for the broker.
-const LoopbackClient = struct {
+///
+/// Public for the tests of whatever publishes through a client, which read
+/// what it sent with `nextPublished`. Keep it where `init` put it while
+/// anything holds a pointer to `client`.
+pub const LoopbackClient = struct {
     client: MqttClient,
     broker: c_int,
+    /// What has arrived at the broker's end, reassembled.
+    arrived: Inbound = .{},
 
-    fn init() !LoopbackClient {
+    pub fn init() !LoopbackClient {
         var fds: [2]c_int = undefined;
         if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) return error.SocketPairFailed;
 
@@ -1636,7 +1642,7 @@ const LoopbackClient = struct {
         return self;
     }
 
-    fn deinit(self: *LoopbackClient) void {
+    pub fn deinit(self: *LoopbackClient) void {
         // No DISCONNECT: nothing reads it, and a full buffer would block.
         self.client.connected = false;
         self.client.deinit();
@@ -1646,7 +1652,43 @@ const LoopbackClient = struct {
     fn send(self: *LoopbackClient, bytes: []const u8) !void {
         if (std.c.write(self.broker, bytes.ptr, bytes.len) != bytes.len) return error.WriteFailed;
     }
+
+    /// The next message the client published, in the order it sent them, or
+    /// null once the broker's end has no more. Borrowed until the next call.
+    pub fn nextPublished(self: *LoopbackClient) ?Publish {
+        while (true) {
+            const waiting = self.arrived.next() catch return null;
+            if (waiting) |packet| {
+                if (packet.kind() != @backingInt(MqttClient.PacketType.PUBLISH)) continue;
+                return parsePublish(packet) catch null;
+            }
+
+            const space = self.arrived.free();
+            const rc = c.recv(self.broker, space.ptr, space.len, c.MSG_DONTWAIT);
+            if (rc <= 0) return null;
+            self.arrived.commit(@intCast(rc));
+        }
+    }
 };
+
+test "what the client publishes can be read back at the broker's end" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+    try testing.expect(lb.nextPublished() == null);
+
+    try lb.client.publish("cpu_load", "12", false);
+    try lb.client.publish("status", "online", true);
+
+    const first = lb.nextPublished().?;
+    try testing.expectEqualStrings("sysink/cpu_load", first.topic);
+    try testing.expectEqualStrings("12", first.payload);
+    try testing.expect(!first.retain);
+
+    const second = lb.nextPublished().?;
+    try testing.expectEqualStrings("sysink/status", second.topic);
+    try testing.expect(second.retain);
+    try testing.expect(lb.nextPublished() == null);
+}
 
 test "a notice published to the topic is received" {
     var lb = try LoopbackClient.init();

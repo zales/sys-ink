@@ -2,7 +2,9 @@
 //!
 //! Pulls in every module that carries unit tests. The root is this file rather
 //! than `main.zig` so that the suite runs on any host: `main` is Linux-only,
-//! and is type-checked by `zig build check` instead.
+//! and is type-checked by `zig build check` instead. What is left in it is the
+//! wiring: the daemon's tasks are `app.zig` and what they decide is
+//! `app_logic.zig`, both tested here.
 //!
 //! The modules that read the machine are here too, despite reading procfs and
 //! sysfs: `system_ops` and `network_ops` take the directory those are read
@@ -45,6 +47,8 @@ test {
     _ = @import("frame_server.zig");
     _ = @import("http_request.zig");
     _ = @import("api.zig");
+    _ = @import("app_logic.zig");
+    _ = @import("app.zig");
     _ = @import("sysroot.zig");
     _ = @import("system_ops.zig");
     _ = @import("network_ops.zig");

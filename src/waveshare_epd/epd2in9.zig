@@ -44,6 +44,17 @@ pub const PanelSpec = struct {
 /// Length of a waveform table: 153 LUT bytes plus six voltage settings.
 const lut_len = 159;
 
+/// How an update the panel was told to make is recognised on the wire: the
+/// command that selects what the next activation does, and its argument for
+/// each kind of refresh. Named here, outside the driver type, for the recorder
+/// that tests above the driver read their updates from; the driver's own
+/// enums take their values from these.
+pub const update_select = struct {
+    pub const command = 0x22;
+    pub const full = 0xC7;
+    pub const partial = 0x0F;
+};
+
 /// Waveshare 2.9inch e-Paper Module (B/W) V2, the panel this project targets and
 /// the only one verified on hardware.
 pub const waveshare_2in9_v2: PanelSpec = .{
@@ -134,10 +145,10 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// as authoritative while being wrong.
         const DisplayUpdate = enum(u8) {
             /// Full waveform: repaints every pixel, which is what makes it flash.
-            full = 0xC7,
+            full = update_select.full,
             /// Weak waveform, applied only where the frame differs from the
             /// reference in the base RAM.
-            partial = 0x0F,
+            partial = update_select.partial,
             /// Clock and analog on, without activating an update — so it cannot
             /// disturb the glass.
             power_on = 0xC0,
@@ -151,7 +162,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             SW_RESET = 0x12,
             MASTER_ACTIVATION = 0x20,
             DISPLAY_UPDATE_CONTROL_1 = 0x21,
-            DISPLAY_UPDATE_CONTROL_2 = 0x22,
+            DISPLAY_UPDATE_CONTROL_2 = update_select.command,
             WRITE_RAM = 0x24,
             WRITE_RAM_BASE = 0x26,
             WRITE_VCOM_REGISTER = 0x2C,
