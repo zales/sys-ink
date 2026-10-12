@@ -23,10 +23,8 @@ int main(void) {
     printf("SPI_IOC_WR_BITS_PER_WORD:      0x%08lx\n", (unsigned long)SPI_IOC_WR_BITS_PER_WORD);
     printf("SPI_IOC_WR_MAX_SPEED_HZ:       0x%08lx\n", (unsigned long)SPI_IOC_WR_MAX_SPEED_HZ);
 
-    /* src/config.zig */
+    /* src/gpio_native.zig: finding the chip, then the v2 ABI */
     printf("GPIO_GET_CHIPINFO_IOCTL:       0x%08lx\n", (unsigned long)GPIO_GET_CHIPINFO_IOCTL);
-
-    /* src/gpio_native.zig, v2 ABI */
     printf("GPIO_V2_GET_LINE_IOCTL:        0x%08lx\n", (unsigned long)GPIO_V2_GET_LINE_IOCTL);
     printf("GPIO_V2_LINE_GET_VALUES_IOCTL: 0x%08lx\n", (unsigned long)GPIO_V2_LINE_GET_VALUES_IOCTL);
     printf("GPIO_V2_LINE_SET_VALUES_IOCTL: 0x%08lx\n", (unsigned long)GPIO_V2_LINE_SET_VALUES_IOCTL);

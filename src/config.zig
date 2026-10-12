@@ -1,16 +1,32 @@
+//! The daemon's settings, read from the environment once at startup.
+//!
+//! A value rather than a set of globals: `Config.fromEnv` returns it, and
+//! `main` hands each part of the daemon the settings that part needs. Nothing
+//! reaches back in here, so what a module depends on is in its `init`, and a
+//! test can give it anything.
+//!
+//! Every setting is read through `Env`, the broker's in `mqtt.zig` included,
+//! and what `Env` finds wrong goes into a `Report` for `main` to log once the
+//! logger is up: a variable given a value that cannot be used, and one whose
+//! name is not a setting but looks as if it was meant to be. Neither is
+//! passed over in silence.
+
 const std = @import("std");
-const builtin = @import("builtin");
 const parse = @import("parse.zig");
 
-const is_linux = builtin.target.os.tag == .linux;
+const EnvMap = std.process.Environ.Map;
 
-/// Parse a boolean environment variable. Accepts "1", "true", "yes", "on"
-/// (case-insensitive); anything else is false.
-pub fn parseBool(val: []const u8) bool {
+/// Parse a boolean setting. "1", "true", "yes" and "on" are true; "0",
+/// "false", "no" and "off" are false; all case-insensitive. Null for anything
+/// else.
+pub fn parseBool(val: []const u8) ?bool {
     for ([_][]const u8{ "1", "true", "yes", "on" }) |truthy| {
         if (std.ascii.eqlIgnoreCase(val, truthy)) return true;
     }
-    return false;
+    for ([_][]const u8{ "0", "false", "no", "off" }) |falsy| {
+        if (std.ascii.eqlIgnoreCase(val, falsy)) return false;
+    }
+    return null;
 }
 
 /// Variables withheld from child processes. The daemon has no use for passing
@@ -27,9 +43,9 @@ const secret_variables = [_][]const u8{ "MQTT_PASSWORD", "WEB_API_TOKEN" };
 /// Caller owns the result.
 pub fn childEnvironment(
     gpa: std.mem.Allocator,
-    parent: ?*const std.process.Environ.Map,
-) !std.process.Environ.Map {
-    var env: std.process.Environ.Map = if (parent) |p| try p.clone(gpa) else .init(gpa);
+    parent: ?*const EnvMap,
+) !EnvMap {
+    var env: EnvMap = if (parent) |p| try p.clone(gpa) else .init(gpa);
     errdefer env.deinit();
 
     try env.put("LC_ALL", "C");
@@ -37,254 +53,434 @@ pub fn childEnvironment(
     return env;
 }
 
+/// A variable whose value could not be used, and what was used instead.
+pub const Rejection = struct {
+    name: []const u8,
+    /// What the variable takes, to finish the sentence "expected ...".
+    expected: []const u8,
+    shown_buf: [shown_max]u8 = undefined,
+    shown_len: usize = 0,
+    used_buf: [24]u8 = undefined,
+    used_len: usize = 0,
+
+    /// As much of a value as a log line gets.
+    const shown_max = 48;
+
+    /// The offending value, made fit for a log line: cut to `shown_max`
+    /// bytes, and with everything that is not printable ASCII replaced. No
+    /// value any of these settings takes has anything else in it, and one
+    /// that does must not get to start a line of its own in the journal.
+    pub fn shown(self: *const Rejection) []const u8 {
+        return self.shown_buf[0..self.shown_len];
+    }
+
+    /// The value in effect, as text.
+    pub fn used(self: *const Rejection) []const u8 {
+        return self.used_buf[0..self.used_len];
+    }
+};
+
+/// A variable that is not a setting, but looks as if it was meant to be one.
+pub const Unknown = struct {
+    name: []const u8,
+    /// The setting it is a letter or two away from, if there is one.
+    meant: ?[]const u8,
+};
+
+/// What reading the environment turned up besides the settings themselves,
+/// for the caller to report.
+///
+/// Collected rather than logged on the spot: the log level and the log file
+/// are themselves settings, so nothing can be logged properly until the
+/// environment has been read.
+pub const Report = struct {
+    rejections: [max_rejections]Rejection = undefined,
+    rejection_count: usize = 0,
+    /// Every name a setting was looked up under. This is the list of what the
+    /// daemon's settings are: nothing else keeps one.
+    settings: [max_settings][]const u8 = undefined,
+    setting_count: usize = 0,
+    unknowns: [max_unknowns]Unknown = undefined,
+    unknown_count: usize = 0,
+
+    /// More than there are settings that can be rejected.
+    const max_rejections = 32;
+    /// More than there are settings.
+    const max_settings = 64;
+    /// As many stray names as are worth a line each.
+    const max_unknowns = 16;
+
+    /// Names that share a prefix with a setting and belong to someone else:
+    /// systemd sets this one for a service that reports its own readiness.
+    const foreign = [_][]const u8{"NOTIFY_SOCKET"};
+
+    pub fn rejected(self: *const Report) []const Rejection {
+        return self.rejections[0..self.rejection_count];
+    }
+
+    pub fn unknown(self: *const Report) []const Unknown {
+        return self.unknowns[0..self.unknown_count];
+    }
+
+    fn reject(
+        self: *Report,
+        name: []const u8,
+        value: []const u8,
+        expected: []const u8,
+        comptime used_fmt: []const u8,
+        used_args: anytype,
+    ) void {
+        if (self.rejection_count == max_rejections) return;
+        const entry = &self.rejections[self.rejection_count];
+        entry.* = .{ .name = name, .expected = expected };
+
+        entry.shown_len = @min(value.len, Rejection.shown_max);
+        for (entry.shown_buf[0..entry.shown_len], value[0..entry.shown_len]) |*out, byte| {
+            out.* = if (std.ascii.isPrint(byte)) byte else '?';
+        }
+        const used = std.mem.print(&entry.used_buf, used_fmt, used_args) catch "";
+        entry.used_len = used.len;
+        self.rejection_count += 1;
+    }
+
+    /// Note that `name` is a setting.
+    fn know(self: *Report, name: []const u8) void {
+        if (self.isSetting(name)) return;
+        // A setting that does not fit only goes unrecognised below, where it
+        // can at worst be reported as a stray: the tests hold the count under.
+        if (self.setting_count == max_settings) return;
+        self.settings[self.setting_count] = name;
+        self.setting_count += 1;
+    }
+
+    fn isSetting(self: *const Report, name: []const u8) bool {
+        for (self.settings[0..self.setting_count]) |setting| {
+            if (std.mem.eql(u8, setting, name)) return true;
+        }
+        return false;
+    }
+
+    /// Look through `map` for variables that are not settings but were
+    /// probably meant to be. Call it once every setting has been read: what
+    /// counts as one is what was asked for until then.
+    ///
+    /// The environment is full of names that are none of the daemon's
+    /// business, so only two kinds are picked out. One is a letter or two
+    /// away from a setting, `INTERVL_FAST`. The other begins as a family of
+    /// settings does, `THRESHOLD_CPU_HIGH` beside `THRESHOLD_CPU_CRITICAL`: a
+    /// setting from some other version, or one that was never there. Only the
+    /// name is kept. A misspelt `MQTT_PASSWORD` is exactly what turns up here,
+    /// and its value has no place in a log.
+    pub fn findUnknown(self: *Report, map: *const EnvMap) void {
+        for (map.keys()) |name| {
+            if (self.unknown_count == max_unknowns) return;
+            if (!looksLikeASetting(name) or self.isSetting(name)) continue;
+            if (isForeign(name)) continue;
+
+            const meant = self.closestSetting(name);
+            if (meant == null and !self.sharesAFamily(name)) continue;
+
+            self.unknowns[self.unknown_count] = .{ .name = name, .meant = meant };
+            self.unknown_count += 1;
+        }
+    }
+
+    /// Capitals, digits and underscores, as every setting is; and so nothing
+    /// that could do to a log line what `Rejection.shown` guards against.
+    fn looksLikeASetting(name: []const u8) bool {
+        if (name.len == 0 or name.len > max_name_len) return false;
+        for (name) |ch| {
+            if (!std.ascii.isUpper(ch) and !std.ascii.isDigit(ch) and ch != '_') return false;
+        }
+        return true;
+    }
+
+    fn isForeign(name: []const u8) bool {
+        for (foreign) |other| {
+            if (std.mem.eql(u8, other, name)) return true;
+        }
+        return false;
+    }
+
+    /// Whether `name` starts as some setting does, up to its first underscore.
+    fn sharesAFamily(self: *const Report, name: []const u8) bool {
+        const family = familyOf(name) orelse return false;
+        for (self.settings[0..self.setting_count]) |setting| {
+            if (std.mem.startsWith(u8, setting, family)) return true;
+        }
+        return false;
+    }
+
+    /// `MQTT_` of `MQTT_HOST`: the name through its first underscore.
+    fn familyOf(name: []const u8) ?[]const u8 {
+        const underscore = std.mem.indexOfScalar(u8, name, '_') orelse return null;
+        return name[0 .. underscore + 1];
+    }
+
+    /// The setting `name` is at most two edits from, if any; the nearest of
+    /// them if several.
+    fn closestSetting(self: *const Report, name: []const u8) ?[]const u8 {
+        var best: ?[]const u8 = null;
+        var best_distance: usize = max_typo_distance + 1;
+        for (self.settings[0..self.setting_count]) |setting| {
+            const distance = editDistance(name, setting);
+            if (distance < best_distance) {
+                best = setting;
+                best_distance = distance;
+            }
+        }
+        return best;
+    }
+};
+
+/// Longest name looked at as a possible setting; the longest there is has 23
+/// characters.
+const max_name_len = 40;
+
+/// How far from a setting a name may be and still be taken for it misspelt.
+const max_typo_distance = 2;
+
+/// The number of single-character insertions, deletions and substitutions
+/// between `a` and `b`, neither longer than `max_name_len`.
+fn editDistance(a: []const u8, b: []const u8) usize {
+    std.debug.assert(a.len <= max_name_len and b.len <= max_name_len);
+
+    // One row of the table at a time: `row[j]` is the distance between what
+    // of `a` has been gone through and the first `j` characters of `b`.
+    var row: [max_name_len + 1]usize = undefined;
+    for (0..b.len + 1) |j| row[j] = j;
+
+    for (a, 1..) |ch_a, i| {
+        var diagonal = row[0];
+        row[0] = i;
+        for (b, 1..) |ch_b, j| {
+            const above = row[j];
+            const substituted = diagonal + @intFromBool(ch_a != ch_b);
+            row[j] = @min(substituted, @min(above, row[j - 1]) + 1);
+            diagonal = above;
+        }
+    }
+    return row[b.len];
+}
+
+/// Reads typed settings out of an environment, noting each one it has to
+/// turn down.
+///
+/// A variable set to nothing counts as unset, whatever kind of setting it is:
+/// `NAME=` in an environment file is how a setting is left blank, and it
+/// reads as if the line were not there.
+pub const Env = struct {
+    map: *const EnvMap,
+    report: *Report,
+
+    /// The variable's value, or null when it is unset or set to nothing.
+    pub fn get(self: Env, name: []const u8) ?[]const u8 {
+        self.report.know(name);
+        const val = self.map.get(name) orelse return null;
+        return if (val.len > 0) val else null;
+    }
+
+    pub fn string(self: Env, name: []const u8, default: []const u8) []const u8 {
+        return self.get(name) orelse default;
+    }
+
+    /// Something that is not a boolean reads as false, as it always has, so a
+    /// setting spelled `disabled` still turns the thing off — but it is noted,
+    /// so that `MQTT_ENABLED=ture` does not pass for a decision.
+    pub fn boolean(self: Env, name: []const u8, default: bool) bool {
+        const expected = "1/true/yes/on or 0/false/no/off";
+        self.report.know(name);
+        const val = self.map.get(name) orelse return default;
+
+        if (val.len == 0) {
+            // Unset, like any other blank. Said aloud where that is not what
+            // it used to mean: every release before this read a blank as
+            // false, which for a setting that is on by default turned it off.
+            if (default) self.report.reject(name, val, expected, "true", .{});
+            return default;
+        }
+        return parseBool(val) orelse {
+            self.report.reject(name, val, expected, "false", .{});
+            return false;
+        };
+    }
+
+    /// A whole number no smaller than `min`. Anything else keeps `default`,
+    /// except a number below `min`, which is raised to it.
+    pub fn int(self: Env, comptime T: type, name: []const u8, default: T, comptime min: T) T {
+        const val = self.get(name) orelse return default;
+        const expected = std.fmt.comptimePrint("a whole number from {d} to {d}", .{ min, std.math.maxInt(T) });
+
+        const parsed = std.fmt.parseInt(T, val, 10) catch {
+            self.report.reject(name, val, expected, "{d}", .{default});
+            return default;
+        };
+        if (parsed < min) {
+            self.report.reject(name, val, expected, "{d}", .{min});
+            return min;
+        }
+        return parsed;
+    }
+};
+
+/// Readings at or above these are drawn inverted on the panel.
+pub const Thresholds = struct {
+    /// CPU load, percent.
+    cpu: u8 = 90,
+    /// CPU and disk temperature, °C.
+    temp: u8 = 85,
+    /// Memory in use, percent.
+    mem: u8 = 95,
+    /// Root filesystem in use, percent.
+    disk: u8 = 95,
+};
+
+pub const LogLevel = enum {
+    debug,
+    info,
+    warn,
+    err,
+
+    /// Null for a name that is not a level.
+    pub fn parse(str: []const u8) ?LogLevel {
+        const table = [_]struct { name: []const u8, level: LogLevel }{
+            .{ .name = "DEBUG", .level = .debug },
+            .{ .name = "INFO", .level = .info },
+            .{ .name = "WARN", .level = .warn },
+            .{ .name = "WARNING", .level = .warn },
+            .{ .name = "ERROR", .level = .err },
+            .{ .name = "ERR", .level = .err },
+        };
+        for (table) |entry| {
+            if (std.ascii.eqlIgnoreCase(str, entry.name)) return entry.level;
+        }
+        return null;
+    }
+
+    pub fn toStd(self: LogLevel) std.log.Level {
+        return switch (self) {
+            .debug => .debug,
+            .info => .info,
+            .warn => .warn,
+            .err => .err,
+        };
+    }
+};
+
 /// Application configuration loaded from environment variables
 pub const Config = struct {
-    /// CPU load critical threshold (%) - values above this are highlighted
-    pub var threshold_cpu_critical: u8 = 90;
+    thresholds: Thresholds = .{},
 
-    /// Temperature critical threshold (°C) - values above this are highlighted
-    pub var threshold_temp_critical: u8 = 85;
-
-    /// Memory critical threshold (%) - values above this are highlighted
-    pub var threshold_mem_critical: u8 = 95;
-
-    /// Disk usage critical threshold (%) - values above this are highlighted
-    pub var threshold_disk_critical: u8 = 95;
-
-    /// Log level
-    pub const LogLevel = enum {
-        debug,
-        info,
-        warn,
-        err,
-
-        pub fn parse(str: []const u8) LogLevel {
-            const table = [_]struct { name: []const u8, level: LogLevel }{
-                .{ .name = "DEBUG", .level = .debug },
-                .{ .name = "INFO", .level = .info },
-                .{ .name = "WARN", .level = .warn },
-                .{ .name = "WARNING", .level = .warn },
-                .{ .name = "ERROR", .level = .err },
-                .{ .name = "ERR", .level = .err },
-            };
-            for (table) |entry| {
-                if (std.ascii.eqlIgnoreCase(str, entry.name)) return entry.level;
-            }
-            return .info; // default
-        }
-
-        pub fn toStd(self: LogLevel) std.log.Level {
-            return switch (self) {
-                .debug => .debug,
-                .info => .info,
-                .warn => .warn,
-                .err => .err,
-            };
-        }
-    };
-
-    pub var log_level: LogLevel = .info;
-    pub var log_level_std: std.log.Level = .info;
-
+    log_level: LogLevel = .info,
     /// Enable/disable logging to file
-    pub var log_to_file: bool = false;
-
-    /// Log file path
-    pub var log_file_path: []const u8 = "/var/log/sys-ink.log";
+    log_to_file: bool = false,
+    log_file_path: []const u8 = "/var/log/sys-ink.log",
 
     /// Enable/disable BMP export
-    pub var export_bmp: bool = false;
+    export_bmp: bool = false,
+    bmp_export_path: []const u8 = "/tmp/sys-ink.bmp",
 
-    /// BMP export path
-    pub var bmp_export_path: []const u8 = "/tmp/sys-ink.bmp";
-
-    /// GPIO chip path
-    pub var gpio_chip: []const u8 = "/dev/gpiochip0";
-
+    /// GPIO chip path. Null: found by its label; see `GpioNative.findChip`.
+    gpio_chip: ?[]const u8 = null,
     /// SPI device path
-    pub var spi_device: []const u8 = "/dev/spidev0.0";
+    spi_device: []const u8 = "/dev/spidev0.0",
 
     /// Scheduler interval for fast updates (CPU, RAM, IP, etc.) in seconds
-    pub var interval_fast: u32 = 30;
-
+    interval_fast: u32 = 30,
     /// Scheduler interval for slow updates (APT, Internet) in seconds
-    pub var interval_slow: u32 = 10800; // 3 hours
-
+    interval_slow: u32 = 10800, // 3 hours
     /// How often to force a full (non-partial) refresh, in seconds. Full
     /// refreshes clear the ghosting that partial updates accumulate.
-    pub var interval_full_refresh: u32 = 600; // 10 minutes
+    interval_full_refresh: u32 = 600, // 10 minutes
 
     /// Park the panel in deep sleep between refreshes. Waveshare advises against
     /// leaving an e-paper panel driven continuously, and idle cycles (an
     /// unchanged frame) then cost nothing at all. Costs ~200ms per visible
     /// update to wake and restore the partial-update reference.
-    pub var panel_sleep: bool = true;
+    panel_sleep: bool = true,
 
     /// Host probed to decide whether the machine has internet access.
-    pub var internet_check_ip: [4]u8 = .{ 8, 8, 8, 8 };
-    pub var internet_check_port: u16 = 53;
+    internet_check_ip: [4]u8 = .{ 8, 8, 8, 8 },
+    internet_check_port: u16 = 53,
 
     /// Serve the current panel frame over HTTP. See `web_preview.zig`.
-    pub var web_preview: bool = false;
+    web_preview: bool = false,
     /// Loopback by default: the preview has no authentication and the frame
     /// carries addresses and load figures. Widening this is a decision.
-    pub var web_preview_addr: []const u8 = "127.0.0.1";
-    pub var web_preview_port: u16 = 8390;
+    web_preview_addr: []const u8 = "127.0.0.1",
+    web_preview_port: u16 = 8390,
     /// Bearer token for the API's notice routes. Unset: they stay shut. See
     /// `api.zig`.
-    pub var web_api_token: ?[]const u8 = null;
+    web_api_token: ?[]const u8 = null,
 
     /// Accept notices through a named pipe. See `notice_fifo.zig`.
-    pub var notify_enabled: bool = true;
-    pub var notify_fifo: []const u8 = "/run/sys-ink/notify";
+    notify_enabled: bool = true,
+    notify_fifo: []const u8 = "/run/sys-ink/notify",
     /// Group allowed to write to the pipe besides root. Unset: root only.
-    pub var notify_group: ?[]const u8 = null;
+    notify_group: ?[]const u8 = null,
     /// How long a notice stays on the panel, in seconds.
-    pub var notify_duration: u32 = 30;
+    notify_duration: u32 = 30,
 
-    /// Load configuration from environment variables
-    pub fn load(init: std.process.Init) void {
-        const env = init.environ_map;
+    /// The settings `map` gives, over the defaults above. Strings are borrowed
+    /// from `map`, which must outlive the result.
+    pub fn fromEnv(map: *const EnvMap, report: *Report) Config {
+        const env: Env = .{ .map = map, .report = report };
+        const defaults: Config = .{};
 
-        if (env.get("GPIO_CHIP")) |val| {
-            gpio_chip = val;
-        } else if (findGpioChip()) |path| {
-            gpio_chip = path;
-        }
-        if (env.get("SPI_DEVICE")) |val| {
-            spi_device = val;
-        }
-        if (env.get("EXPORT_BMP")) |val| {
-            export_bmp = parseBool(val);
-        }
-        if (env.get("BMP_EXPORT_PATH")) |val| {
-            bmp_export_path = val;
-        }
-        if (env.get("INTERVAL_FAST")) |val| {
-            interval_fast = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_fast);
-        }
-        if (env.get("INTERVAL_SLOW")) |val| {
-            interval_slow = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_slow);
-        }
-        if (env.get("INTERVAL_FULL_REFRESH")) |val| {
-            interval_full_refresh = @max(1, std.fmt.parseInt(u32, val, 10) catch interval_full_refresh);
-        }
-        if (env.get("PANEL_SLEEP")) |val| {
-            panel_sleep = parseBool(val);
-        }
+        return .{
+            .thresholds = .{
+                .cpu = env.int(u8, "THRESHOLD_CPU_CRITICAL", defaults.thresholds.cpu, 0),
+                .temp = env.int(u8, "THRESHOLD_TEMP_CRITICAL", defaults.thresholds.temp, 0),
+                .mem = env.int(u8, "THRESHOLD_MEM_CRITICAL", defaults.thresholds.mem, 0),
+                .disk = env.int(u8, "THRESHOLD_DISK_CRITICAL", defaults.thresholds.disk, 0),
+            },
 
-        if (env.get("INTERNET_CHECK_IP")) |val| {
-            internet_check_ip = parse.ipv4(val) catch internet_check_ip;
-        }
-        if (env.get("INTERNET_CHECK_PORT")) |val| {
-            internet_check_port = std.fmt.parseInt(u16, val, 10) catch internet_check_port;
-        }
+            .log_level = logLevel(env, defaults.log_level),
+            .log_to_file = env.boolean("LOG_TO_FILE", defaults.log_to_file),
+            .log_file_path = env.string("LOG_FILE_PATH", defaults.log_file_path),
 
-        if (env.get("WEB_PREVIEW")) |val| {
-            web_preview = parseBool(val);
-        }
-        if (env.get("WEB_PREVIEW_ADDR")) |val| {
-            web_preview_addr = val;
-        }
-        if (env.get("WEB_PREVIEW_PORT")) |val| {
-            web_preview_port = std.fmt.parseInt(u16, val, 10) catch web_preview_port;
-        }
-        if (env.get("WEB_API_TOKEN")) |val| {
-            if (val.len > 0) web_api_token = val;
-        }
+            .export_bmp = env.boolean("EXPORT_BMP", defaults.export_bmp),
+            .bmp_export_path = env.string("BMP_EXPORT_PATH", defaults.bmp_export_path),
 
-        if (env.get("NOTIFY_ENABLED")) |val| {
-            notify_enabled = parseBool(val);
-        }
-        if (env.get("NOTIFY_FIFO")) |val| {
-            notify_fifo = val;
-        }
-        if (env.get("NOTIFY_GROUP")) |val| {
-            if (val.len > 0) notify_group = val;
-        }
-        if (env.get("NOTIFY_DURATION")) |val| {
-            notify_duration = @max(1, std.fmt.parseInt(u32, val, 10) catch notify_duration);
-        }
+            .gpio_chip = env.get("GPIO_CHIP"),
+            .spi_device = env.string("SPI_DEVICE", defaults.spi_device),
 
-        if (env.get("THRESHOLD_CPU_CRITICAL")) |val| {
-            threshold_cpu_critical = std.fmt.parseInt(u8, val, 10) catch threshold_cpu_critical;
-        }
-        if (env.get("THRESHOLD_TEMP_CRITICAL")) |val| {
-            threshold_temp_critical = std.fmt.parseInt(u8, val, 10) catch threshold_temp_critical;
-        }
-        if (env.get("THRESHOLD_MEM_CRITICAL")) |val| {
-            threshold_mem_critical = std.fmt.parseInt(u8, val, 10) catch threshold_mem_critical;
-        }
-        if (env.get("THRESHOLD_DISK_CRITICAL")) |val| {
-            threshold_disk_critical = std.fmt.parseInt(u8, val, 10) catch threshold_disk_critical;
-        }
+            .interval_fast = env.int(u32, "INTERVAL_FAST", defaults.interval_fast, 1),
+            .interval_slow = env.int(u32, "INTERVAL_SLOW", defaults.interval_slow, 1),
+            .interval_full_refresh = env.int(u32, "INTERVAL_FULL_REFRESH", defaults.interval_full_refresh, 1),
+            .panel_sleep = env.boolean("PANEL_SLEEP", defaults.panel_sleep),
 
-        if (env.get("LOG_LEVEL")) |val| {
-            log_level = LogLevel.parse(val);
-        }
-        if (env.get("LOG_TO_FILE")) |val| {
-            log_to_file = parseBool(val);
-        }
-        if (env.get("LOG_FILE_PATH")) |val| {
-            log_file_path = val;
-        }
+            .internet_check_ip = probeAddress(env, defaults.internet_check_ip),
+            .internet_check_port = env.int(u16, "INTERNET_CHECK_PORT", defaults.internet_check_port, 0),
 
-        log_level_std = log_level.toStd();
-    }
+            .web_preview = env.boolean("WEB_PREVIEW", defaults.web_preview),
+            .web_preview_addr = env.string("WEB_PREVIEW_ADDR", defaults.web_preview_addr),
+            .web_preview_port = env.int(u16, "WEB_PREVIEW_PORT", defaults.web_preview_port, 0),
+            .web_api_token = env.get("WEB_API_TOKEN"),
 
-    /// Check if running as root user
-    pub fn isRoot() bool {
-        if (!is_linux) return false;
-        return std.os.linux.getuid() == 0;
-    }
-
-    /// Static buffer for the auto-detected GPIO chip path
-    var gpio_chip_buf: [32]u8 = undefined;
-
-    /// GPIO chip labels for the SoCs this runs on, most recent first.
-    const known_gpio_labels = [_][]const u8{
-        "pinctrl-rp1", // Pi 5
-        "pinctrl-bcm2711", // Pi 4
-        "pinctrl-bcm2835", // Pi 3 and older
-    };
-
-    fn findGpioChip() ?[]const u8 {
-        if (!is_linux) return null;
-
-        for (known_gpio_labels) |label| {
-            if (findGpioChipByLabel(label)) |path| return path;
-        }
-        return null;
-    }
-
-    /// Scan /dev/gpiochip0..31 and return path of the chip whose label matches.
-    /// Returns null if not found. Uses GPIO_GET_CHIPINFO_IOCTL (same as gpiodetect).
-    fn findGpioChipByLabel(label: []const u8) ?[]const u8 {
-        // struct gpiochip_info: name[32], label[32], lines(u32)
-        const GpiochipInfo = extern struct {
-            name: [32]u8,
-            label: [32]u8,
-            lines: u32,
+            .notify_enabled = env.boolean("NOTIFY_ENABLED", defaults.notify_enabled),
+            .notify_fifo = env.string("NOTIFY_FIFO", defaults.notify_fifo),
+            .notify_group = env.get("NOTIFY_GROUP"),
+            .notify_duration = env.int(u32, "NOTIFY_DURATION", defaults.notify_duration, 1),
         };
-        const GPIO_GET_CHIPINFO_IOCTL: u32 = 0x8044b401;
+    }
 
-        var path_buf: [32]u8 = undefined;
-        var i: u8 = 0;
-        while (i < 32) : (i += 1) {
-            const path = std.mem.printSentinel(&path_buf, "/dev/gpiochip{d}", .{i}, 0) catch continue;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
-            defer _ = std.os.linux.close(fd);
+    fn logLevel(env: Env, default: LogLevel) LogLevel {
+        const val = env.get("LOG_LEVEL") orelse return default;
+        return LogLevel.parse(val) orelse {
+            env.report.reject("LOG_LEVEL", val, "DEBUG, INFO, WARN or ERROR", "{s}", .{"INFO"});
+            return .info;
+        };
+    }
 
-            var info: GpiochipInfo = undefined;
-            const rc = std.os.linux.ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, @intFromPtr(&info));
-            if (rc != 0) continue;
-
-            const chip_label = std.mem.sliceTo(&info.label, 0);
-            if (std.mem.eql(u8, chip_label, label)) {
-                return std.mem.print(&gpio_chip_buf, "/dev/gpiochip{d}", .{i}) catch continue;
-            }
-        }
-        return null;
+    fn probeAddress(env: Env, default: [4]u8) [4]u8 {
+        const val = env.get("INTERNET_CHECK_IP") orelse return default;
+        return parse.ipv4(val) catch {
+            env.report.reject("INTERNET_CHECK_IP", val, "an IPv4 address", "{d}.{d}.{d}.{d}", .{
+                default[0], default[1], default[2], default[3],
+            });
+            return default;
+        };
     }
 };
 
@@ -294,17 +490,20 @@ pub const Config = struct {
 
 const testing = std.testing;
 
-test "parseBool accepts the usual truthy spellings" {
+test "parseBool knows true from false from neither" {
     for ([_][]const u8{ "1", "true", "TRUE", "True", "yes", "YES", "on", "ON" }) |val| {
-        try testing.expect(parseBool(val));
+        try testing.expectEqual(@as(?bool, true), parseBool(val));
     }
-    for ([_][]const u8{ "0", "false", "no", "off", "", "2", "maybe" }) |val| {
-        try testing.expect(!parseBool(val));
+    for ([_][]const u8{ "0", "false", "FALSE", "no", "off", "Off" }) |val| {
+        try testing.expectEqual(@as(?bool, false), parseBool(val));
+    }
+    for ([_][]const u8{ "2", "maybe", "ture", "disabled", " true", "" }) |val| {
+        try testing.expectEqual(@as(?bool, null), parseBool(val));
     }
 }
 
 test "childEnvironment forces the C locale and drops the secrets" {
-    var parent: std.process.Environ.Map = .init(testing.allocator);
+    var parent: EnvMap = .init(testing.allocator);
     defer parent.deinit();
     try parent.put("LANG", "cs_CZ.UTF-8");
     try parent.put("LC_ALL", "cs_CZ.UTF-8");
@@ -332,19 +531,307 @@ test "childEnvironment works without a parent environment" {
 }
 
 test "LogLevel.parse accepts both WARN and WARNING" {
-    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("WARN"));
-    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("WARNING"));
-    try testing.expectEqual(Config.LogLevel.warn, Config.LogLevel.parse("warn"));
+    try testing.expectEqual(LogLevel.warn, LogLevel.parse("WARN").?);
+    try testing.expectEqual(LogLevel.warn, LogLevel.parse("WARNING").?);
+    try testing.expectEqual(LogLevel.warn, LogLevel.parse("warn").?);
 }
 
 test "LogLevel.parse maps the remaining levels" {
-    try testing.expectEqual(Config.LogLevel.debug, Config.LogLevel.parse("debug"));
-    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse("INFO"));
-    try testing.expectEqual(Config.LogLevel.err, Config.LogLevel.parse("ERROR"));
-    try testing.expectEqual(Config.LogLevel.err, Config.LogLevel.parse("ERR"));
+    try testing.expectEqual(LogLevel.debug, LogLevel.parse("debug").?);
+    try testing.expectEqual(LogLevel.info, LogLevel.parse("INFO").?);
+    try testing.expectEqual(LogLevel.err, LogLevel.parse("ERROR").?);
+    try testing.expectEqual(LogLevel.err, LogLevel.parse("ERR").?);
 }
 
-test "LogLevel.parse falls back to info" {
-    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse("nonsense"));
-    try testing.expectEqual(Config.LogLevel.info, Config.LogLevel.parse(""));
+test "LogLevel.parse knows no other names" {
+    try testing.expect(LogLevel.parse("nonsense") == null);
+    try testing.expect(LogLevel.parse("") == null);
+}
+
+/// An environment holding `pairs`, name then value.
+fn envOf(pairs: []const [2][]const u8) !EnvMap {
+    var map: EnvMap = .init(testing.allocator);
+    errdefer map.deinit();
+    for (pairs) |pair| try map.put(pair[0], pair[1]);
+    return map;
+}
+
+fn rejectionOf(report: *const Report, name: []const u8) ?*const Rejection {
+    for (report.rejected()) |*r| if (std.mem.eql(u8, r.name, name)) return r;
+    return null;
+}
+
+fn unknownNamed(report: *const Report, name: []const u8) ?Unknown {
+    for (report.unknown()) |u| if (std.mem.eql(u8, u.name, name)) return u;
+    return null;
+}
+
+test "an empty environment gives the defaults and nothing to report" {
+    var map = try envOf(&.{});
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    report.findUnknown(&map);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+    try testing.expectEqual(@as(usize, 0), report.unknown().len);
+    try testing.expectEqual(@as(u32, 30), cfg.interval_fast);
+    try testing.expectEqual(@as(u8, 90), cfg.thresholds.cpu);
+    try testing.expect(cfg.notify_enabled);
+    try testing.expect(cfg.gpio_chip == null);
+    try testing.expect(cfg.web_api_token == null);
+    try testing.expectEqualStrings("/dev/spidev0.0", cfg.spi_device);
+}
+
+test "what the environment sets is what the config holds" {
+    var map = try envOf(&.{
+        .{ "INTERVAL_FAST", "10" },
+        .{ "THRESHOLD_TEMP_CRITICAL", "70" },
+        .{ "EXPORT_BMP", "yes" },
+        .{ "NOTIFY_ENABLED", "off" },
+        .{ "GPIO_CHIP", "/dev/gpiochip4" },
+        .{ "INTERNET_CHECK_IP", "1.1.1.1" },
+        .{ "LOG_LEVEL", "debug" },
+        .{ "WEB_API_TOKEN", "s3cret" },
+        .{ "NOTIFY_GROUP", "panel" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    report.findUnknown(&map);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+    try testing.expectEqual(@as(usize, 0), report.unknown().len);
+    try testing.expectEqual(@as(u32, 10), cfg.interval_fast);
+    try testing.expectEqual(@as(u8, 70), cfg.thresholds.temp);
+    try testing.expect(cfg.export_bmp);
+    try testing.expect(!cfg.notify_enabled);
+    try testing.expectEqualStrings("/dev/gpiochip4", cfg.gpio_chip.?);
+    try testing.expectEqual([4]u8{ 1, 1, 1, 1 }, cfg.internet_check_ip);
+    try testing.expectEqual(LogLevel.debug, cfg.log_level);
+    try testing.expectEqualStrings("s3cret", cfg.web_api_token.?);
+    try testing.expectEqualStrings("panel", cfg.notify_group.?);
+}
+
+test "a number that is not one keeps the default, and says so" {
+    var map = try envOf(&.{
+        .{ "INTERVAL_FAST", "abc" },
+        .{ "WEB_PREVIEW_PORT", "99999" },
+        .{ "THRESHOLD_CPU_CRITICAL", "-5" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expectEqual(@as(u32, 30), cfg.interval_fast);
+    try testing.expectEqual(@as(u16, 8390), cfg.web_preview_port);
+    try testing.expectEqual(@as(u8, 90), cfg.thresholds.cpu);
+    try testing.expectEqual(@as(usize, 3), report.rejected().len);
+
+    const interval = rejectionOf(&report, "INTERVAL_FAST").?;
+    try testing.expectEqualStrings("abc", interval.shown());
+    try testing.expectEqualStrings("30", interval.used());
+    try testing.expectEqualStrings("a whole number from 1 to 4294967295", interval.expected);
+    try testing.expectEqualStrings("8390", rejectionOf(&report, "WEB_PREVIEW_PORT").?.used());
+}
+
+test "an interval of zero is raised to one second, and says so" {
+    var map = try envOf(&.{ .{ "INTERVAL_FAST", "0" }, .{ "NOTIFY_DURATION", "0" } });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expectEqual(@as(u32, 1), cfg.interval_fast);
+    try testing.expectEqual(@as(u32, 1), cfg.notify_duration);
+    try testing.expectEqual(@as(usize, 2), report.rejected().len);
+    try testing.expectEqualStrings("1", rejectionOf(&report, "INTERVAL_FAST").?.used());
+}
+
+test "a boolean that is not one reads as false, and says so" {
+    // False rather than the default: `NOTIFY_ENABLED=disabled` has always
+    // turned notices off, and must not start turning them on.
+    var map = try envOf(&.{ .{ "NOTIFY_ENABLED", "disabled" }, .{ "WEB_PREVIEW", "ture" } });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expect(!cfg.notify_enabled);
+    try testing.expect(!cfg.web_preview);
+    try testing.expectEqual(@as(usize, 2), report.rejected().len);
+    try testing.expectEqualStrings("false", rejectionOf(&report, "NOTIFY_ENABLED").?.used());
+}
+
+test "an address or a log level that is not one keeps the default, and says so" {
+    var map = try envOf(&.{ .{ "INTERNET_CHECK_IP", "one.one.one.one" }, .{ "LOG_LEVEL", "LOUD" } });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expectEqual([4]u8{ 8, 8, 8, 8 }, cfg.internet_check_ip);
+    try testing.expectEqual(LogLevel.info, cfg.log_level);
+    try testing.expectEqualStrings("8.8.8.8", rejectionOf(&report, "INTERNET_CHECK_IP").?.used());
+    try testing.expectEqualStrings("INFO", rejectionOf(&report, "LOG_LEVEL").?.used());
+}
+
+test "a variable left blank counts as unset, whatever kind it is" {
+    var map = try envOf(&.{
+        .{ "INTERVAL_FAST", "" },
+        .{ "LOG_LEVEL", "" },
+        .{ "INTERNET_CHECK_IP", "" },
+        .{ "WEB_API_TOKEN", "" },
+        .{ "NOTIFY_GROUP", "" },
+        .{ "GPIO_CHIP", "" },
+        .{ "SPI_DEVICE", "" },
+        .{ "NOTIFY_FIFO", "" },
+        // Off by default, and off when blank: nothing to say.
+        .{ "EXPORT_BMP", "" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+    try testing.expectEqual(@as(u32, 30), cfg.interval_fast);
+    try testing.expect(cfg.web_api_token == null);
+    try testing.expect(cfg.notify_group == null);
+    // A path left blank is the default path, not an empty one to fail on.
+    try testing.expect(cfg.gpio_chip == null);
+    try testing.expectEqualStrings("/dev/spidev0.0", cfg.spi_device);
+    try testing.expectEqualStrings("/run/sys-ink/notify", cfg.notify_fifo);
+    try testing.expect(!cfg.export_bmp);
+}
+
+test "a blank that used to turn a default off now leaves it on, and says so" {
+    // Every release before this read `NOTIFY_ENABLED=` as false. Unset is
+    // what a blank means everywhere else, so it means that here too; but
+    // nobody who relied on the old reading finds out by accident.
+    var map = try envOf(&.{ .{ "NOTIFY_ENABLED", "" }, .{ "PANEL_SLEEP", "" } });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expect(cfg.notify_enabled);
+    try testing.expect(cfg.panel_sleep);
+    try testing.expectEqual(@as(usize, 2), report.rejected().len);
+
+    const notices = rejectionOf(&report, "NOTIFY_ENABLED").?;
+    try testing.expectEqualStrings("", notices.shown());
+    try testing.expectEqualStrings("true", notices.used());
+}
+
+test "a rejected value is made fit for a log line before it is kept" {
+    var report: Report = .{};
+
+    // A line of its own, an escape sequence, and bytes that are no character.
+    report.reject("INTERVAL_FAST", "5\n[err] (main) all is lost \x1b[2J\xff\xc3", "a number", "{d}", .{30});
+    try testing.expectEqualStrings("5?[err] (main) all is lost ?[2J??", report.rejected()[0].shown());
+
+    // Cut to length, and the list does not overflow.
+    const long: [200]u8 = @splat('x');
+    for (0..Report.max_rejections + 5) |_| report.reject("X", &long, "a number", "{d}", .{1});
+    try testing.expectEqual(Report.max_rejections, report.rejected().len);
+    try testing.expectEqual(Rejection.shown_max, report.rejected()[1].shown().len);
+}
+
+test "a name a letter or two from a setting is pointed out, with the setting it was meant for" {
+    var map = try envOf(&.{
+        .{ "INTERVL_FAST", "10" },
+        .{ "MQTT_PASSWRD", "hunter2" },
+        .{ "INTERVAL_FAST", "20" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    const cfg = Config.fromEnv(&map, &report);
+    // The broker's settings are read through the same `Env` in `mqtt.zig`;
+    // this one stands in for them here.
+    _ = (Env{ .map = &map, .report = &report }).get("MQTT_PASSWORD");
+    report.findUnknown(&map);
+
+    try testing.expectEqual(@as(u32, 20), cfg.interval_fast);
+    try testing.expectEqual(@as(usize, 2), report.unknown().len);
+    try testing.expectEqualStrings("INTERVAL_FAST", unknownNamed(&report, "INTERVL_FAST").?.meant.?);
+    try testing.expectEqualStrings("MQTT_PASSWORD", unknownNamed(&report, "MQTT_PASSWRD").?.meant.?);
+    // The name only: there is nowhere for the value of a misspelt secret to go.
+    try testing.expect(!@hasField(Unknown, "value"));
+}
+
+test "a name from a family of settings that is not one of them is pointed out" {
+    var map = try envOf(&.{
+        .{ "THRESHOLD_CPU_HIGH", "70" },
+        .{ "THRESHOLD_CPU_CRITICAL", "90" },
+        .{ "LOG_COLOUR", "always" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    _ = Config.fromEnv(&map, &report);
+    report.findUnknown(&map);
+
+    try testing.expectEqual(@as(usize, 2), report.unknown().len);
+    const high = unknownNamed(&report, "THRESHOLD_CPU_HIGH").?;
+    // Not a misspelling of anything: there is no setting to suggest.
+    try testing.expect(high.meant == null);
+    try testing.expect(unknownNamed(&report, "LOG_COLOUR") != null);
+}
+
+test "what is none of the daemon's business is left alone" {
+    var map = try envOf(&.{
+        .{ "PATH", "/usr/bin" },
+        .{ "LANG", "cs_CZ.UTF-8" },
+        .{ "HOME", "/root" },
+        .{ "INVOCATION_ID", "0123" },
+        .{ "RUNTIME_DIRECTORY", "/run/sys-ink" },
+        // Other programs' settings, in the same file.
+        .{ "DISPLAY_MODE", "ha" },
+        .{ "HA_URL", "https://example.invalid" },
+        // systemd's, for all that it starts as the notice settings do.
+        .{ "NOTIFY_SOCKET", "/run/systemd/notify" },
+        // Lower case is not how a setting is spelled, typo or not.
+        .{ "http_proxy", "http://proxy:3128" },
+        .{ "interval_fast", "10" },
+    });
+    defer map.deinit();
+    var report: Report = .{};
+
+    _ = Config.fromEnv(&map, &report);
+    report.findUnknown(&map);
+    try testing.expectEqual(@as(usize, 0), report.unknown().len);
+}
+
+test "the list of strays stops when it is full" {
+    var map: EnvMap = .init(testing.allocator);
+    defer map.deinit();
+    var names: [Report.max_unknowns + 4][16]u8 = undefined;
+    for (&names, 0..) |*name, i| {
+        try map.put(try std.mem.print(name, "MQTT_STRAY_{d}", .{i}), "x");
+    }
+    var report: Report = .{};
+
+    report.know("MQTT_HOST");
+    report.findUnknown(&map);
+    try testing.expectEqual(Report.max_unknowns, report.unknown().len);
+}
+
+test "the distance between two names counts each edit once" {
+    try testing.expectEqual(@as(usize, 0), editDistance("MQTT_HOST", "MQTT_HOST"));
+    try testing.expectEqual(@as(usize, 1), editDistance("INTERVL_FAST", "INTERVAL_FAST"));
+    try testing.expectEqual(@as(usize, 1), editDistance("MQTT_PORTS", "MQTT_PORT"));
+    try testing.expectEqual(@as(usize, 2), editDistance("LOG_LEVLE", "LOG_LEVEL"));
+    try testing.expectEqual(@as(usize, 9), editDistance("", "MQTT_HOST"));
+    try testing.expect(editDistance("THRESHOLD_CPU_HIGH", "THRESHOLD_CPU_CRITICAL") > max_typo_distance);
+}
+
+test "every setting there is fits the list of them" {
+    var map = try envOf(&.{});
+    defer map.deinit();
+    var report: Report = .{};
+    _ = Config.fromEnv(&map, &report);
+
+    // With room left for the broker's, which `mqtt.zig` reads the same way.
+    try testing.expect(report.setting_count > 20);
+    try testing.expect(report.setting_count + 12 <= Report.max_settings);
+    for (report.settings[0..report.setting_count]) |name| {
+        try testing.expect(name.len <= max_name_len);
+    }
 }

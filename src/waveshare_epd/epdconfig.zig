@@ -17,23 +17,26 @@ pub const EpdConfig = struct {
     pub const BUSY_PIN: u32 = 24;
     pub const PWR_PIN: u32 = 18;
 
-    allocator: std.mem.Allocator,
-    spi_fd: std.posix.fd_t,
+    pub const Options = struct {
+        /// GPIO chip the panel's lines are on. Null: the one whose label says
+        /// it is the header's, and failing that `fallback_gpio_chip`.
+        gpio_chip: ?[]const u8 = null,
+        spi_device: []const u8 = "/dev/spidev0.0",
+    };
 
-    line_rst: ?GpioNative.Handle,
-    line_dc: ?GpioNative.Handle,
-    line_pwr: ?GpioNative.Handle,
-    line_busy: ?GpioNative.Handle,
+    /// Where the header is on every Pi up to the 4.
+    const fallback_gpio_chip = "/dev/gpiochip0";
 
-    pub fn init(allocator: std.mem.Allocator) EpdConfig {
-        return .{
-            .allocator = allocator,
-            .spi_fd = -1,
-            .line_rst = null,
-            .line_dc = null,
-            .line_pwr = null,
-            .line_busy = null,
-        };
+    options: Options,
+    spi_fd: std.posix.fd_t = -1,
+
+    line_rst: ?GpioNative.Handle = null,
+    line_dc: ?GpioNative.Handle = null,
+    line_pwr: ?GpioNative.Handle = null,
+    line_busy: ?GpioNative.Handle = null,
+
+    pub fn init(options: Options) EpdConfig {
+        return .{ .options = options };
     }
 
     /// Initialize SPI and GPIO using chardev
@@ -44,7 +47,10 @@ pub const EpdConfig = struct {
         // idempotent, so the later deinit-time call is a no-op.
         errdefer self.moduleExit();
 
-        const chip_path = @import("../config.zig").Config.gpio_chip;
+        var found_chip: [GpioNative.chip_path_max]u8 = undefined;
+        const chip_path = self.options.gpio_chip orelse
+            GpioNative.findChip(&found_chip) orelse
+            fallback_gpio_chip;
         log.info("Requesting GPIO lines from {s}", .{chip_path});
 
         // Request pins
@@ -60,7 +66,7 @@ pub const EpdConfig = struct {
         log.info("Power on, waiting for display to stabilize", .{});
         self.delayMs(200); // Give display time to power up
 
-        const spi_path = @import("../config.zig").Config.spi_device;
+        const spi_path = self.options.spi_device;
         log.info("Opening SPI device {s}", .{spi_path});
         self.spi_fd = std.posix.openat(std.posix.AT.FDCWD, spi_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch |err| {
             log.err("Failed to open SPI device {s}: {t}", .{ spi_path, err });
@@ -219,4 +225,12 @@ test "the SPI request numbers are the ones the kernel's headers define" {
     try testing.expectEqual(@as(u32, 0x40016b01), EpdConfig.SPI_IOC_WR_MODE);
     try testing.expectEqual(@as(u32, 0x40016b03), EpdConfig.SPI_IOC_WR_BITS_PER_WORD);
     try testing.expectEqual(@as(u32, 0x40046b04), EpdConfig.SPI_IOC_WR_MAX_SPEED_HZ);
+}
+
+test "nothing is driven before the transport is brought up" {
+    var transport = EpdConfig.init(.{});
+    try testing.expectError(error.NotInitialized, transport.spiWrite("x"));
+    // Safe on a transport that never came up, and safe to repeat.
+    transport.moduleExit();
+    transport.moduleExit();
 }

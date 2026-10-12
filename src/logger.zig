@@ -1,8 +1,12 @@
 const std = @import("std");
-const config = @import("config.zig");
 
 var mutex: std.Io.Mutex = .init;
 var app_io: std.Io = undefined;
+
+/// Records less urgent than this are dropped. `std.log` reaches `logFn`
+/// through a global hook, so this has to be module state; it is set once, by
+/// `init`.
+var threshold: std.log.Level = .info;
 
 var log_file: ?std.Io.File = null;
 /// Kept alive alongside `file_writer`, which borrows it.
@@ -17,17 +21,22 @@ var file_writer: ?std.Io.File.Writer = null;
 /// stored verbatim in the journal.
 var use_color: bool = false;
 
+pub const Options = struct {
+    level: std.log.Level = .info,
+    /// Also append every record to this file. Null: stderr only.
+    file_path: ?[]const u8 = null,
+};
+
 /// Set up logging. Never fails: a log file that cannot be opened is reported on
 /// stderr and logging carries on there, rather than keeping the daemon — and
 /// with it the panel — from starting over a logging option.
-pub fn init(io: std.Io) void {
+pub fn init(io: std.Io, options: Options) void {
     app_io = io;
+    threshold = options.level;
 
     use_color = std.Io.File.stderr().isTty(io) catch false;
 
-    if (!config.Config.log_to_file) return;
-
-    const path = config.Config.log_file_path;
+    const path = options.file_path orelse return;
     const file = openAppend(path) catch |err| {
         std.debug.print("Failed to open log file '{s}': {t}; logging to stderr only\n", .{ path, err });
         return;
@@ -106,7 +115,7 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@backingInt(level) > @backingInt(config.Config.log_level_std)) return;
+    if (@backingInt(level) > @backingInt(threshold)) return;
 
     const io = std.Options.debug_io;
     const scope_prefix = comptime if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ";

@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    var renderer = try Renderer.init(allocator);
+    var renderer = try Renderer.init(allocator, .{});
     defer renderer.deinit();
 
     renderer.drawReferenceScreen();

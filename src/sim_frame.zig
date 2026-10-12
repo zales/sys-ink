@@ -135,7 +135,7 @@ test "successive frames differ" {
     // future change cannot quietly make every frame identical.
     const testing = std.testing;
 
-    var renderer = try Renderer.init(testing.allocator);
+    var renderer = try Renderer.init(testing.allocator, .{});
     defer renderer.deinit();
     renderer.renderGrid();
 
@@ -159,7 +159,7 @@ test "successive frames differ" {
 test "the fault overlay is part of the frame it hands over" {
     const testing = std.testing;
 
-    var renderer = try Renderer.init(testing.allocator);
+    var renderer = try Renderer.init(testing.allocator, .{});
     defer renderer.deinit();
     renderer.renderGrid();
 

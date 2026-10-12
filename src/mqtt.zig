@@ -97,7 +97,6 @@ pub fn nodeId(buf: *[max_node_id_len]u8, client_id: []const u8) []const u8 {
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration
 pub const MqttClient = struct {
-    allocator: std.mem.Allocator,
     io: std.Io,
     stream: ?net.Stream = null,
     host: []const u8,
@@ -109,6 +108,9 @@ pub const MqttClient = struct {
     discovery_enabled: bool,
     /// Subscribe to the notice topic on every connect.
     notices_enabled: bool,
+    /// Seconds without a state update before Home Assistant shows an entity as
+    /// unavailable.
+    expire_after: u64,
     notify_topic_buf: [256]u8 = undefined,
     notify_topic_len: usize = 0,
     /// Packets from the broker, reassembled.
@@ -167,13 +169,10 @@ pub const MqttClient = struct {
         DISCONNECT = 14,
     };
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        cfg: MqttConfig,
-    ) Self {
+    /// Must stay where it is once `connect` has been called: a lookup in
+    /// flight holds a pointer into it.
+    pub fn init(io: std.Io, cfg: MqttConfig) Self {
         var self: Self = .{
-            .allocator = allocator,
             .io = io,
             .host = cfg.host,
             .port = cfg.port,
@@ -183,6 +182,7 @@ pub const MqttClient = struct {
             .topic_prefix = cfg.topic_prefix,
             .discovery_enabled = cfg.discovery_enabled,
             .notices_enabled = cfg.notices_enabled,
+            .expire_after = expireAfterSeconds(cfg.publish_interval),
         };
         if (std.mem.print(&self.notify_topic_buf, "{s}/{s}", .{ cfg.topic_prefix, notify_suffix })) |topic| {
             self.notify_topic_len = topic.len;
@@ -556,7 +556,7 @@ pub const MqttClient = struct {
         const payload = try discoveryPayload(&payload_buf, sensor, .{
             .node_id = self.node(),
             .topic_prefix = self.topic_prefix,
-            .expire_after = expireAfterSeconds(),
+            .expire_after = self.expire_after,
         });
 
         try self.publishRaw(topic, payload, true);
@@ -652,8 +652,8 @@ const DiscoveryOptions = struct {
 /// Without an expiry a Pi that is switched off, or a daemon that has stopped,
 /// leaves every entity showing its last value indefinitely, which reads as a
 /// healthy machine. Three intervals ride out a missed cycle or two.
-fn expireAfterSeconds() u64 {
-    return 3 * @as(u64, config.Config.interval_fast);
+fn expireAfterSeconds(publish_interval: u32) u64 {
+    return 3 * @as(u64, publish_interval);
 }
 
 /// Build `sensor`'s discovery config as JSON.
@@ -1121,27 +1121,31 @@ pub const MqttConfig = struct {
     discovery_enabled: bool = true,
     /// Set from `NOTIFY_ENABLED` by the caller, which owns that setting.
     notices_enabled: bool = true,
+    /// Seconds between state updates. Set from `INTERVAL_FAST` by the caller,
+    /// which owns that one too; entities expire after three of these.
+    publish_interval: u32 = 30,
 
-    pub fn load(init: std.process.Init) MqttConfig {
-        return fromEnv(init.environ_map);
-    }
+    /// The broker settings `map` gives. Read through `config.Env`, as every
+    /// setting is, so that a value that cannot be used and a misspelt name
+    /// end up in `report` with the rest.
+    pub fn fromEnv(map: *const std.process.Environ.Map, report: *config.Report) MqttConfig {
+        const env: config.Env = .{ .map = map, .report = report };
+        const defaults: MqttConfig = .{};
 
-    pub fn fromEnv(env: *const std.process.Environ.Map) MqttConfig {
-        var cfg = MqttConfig{};
-
-        if (env.get("MQTT_ENABLED")) |val| cfg.enabled = config.parseBool(val);
-        if (env.get("MQTT_HOST")) |val| cfg.host = val;
-        if (env.get("MQTT_PORT")) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
-        if (env.get("MQTT_USERNAME")) |val| cfg.username = val;
-        if (env.get("MQTT_PASSWORD")) |val| cfg.password = val;
-        if (env.get("MQTT_CLIENT_ID")) |val| cfg.client_id = val;
-        // Follows the client id unless set, so a second panel on the same broker
-        // needs one variable changed rather than two. The defaults are equal, so
-        // an existing setup keeps its topics.
-        cfg.topic_prefix = env.get("MQTT_TOPIC_PREFIX") orelse cfg.client_id;
-        if (env.get("MQTT_DISCOVERY")) |val| cfg.discovery_enabled = config.parseBool(val);
-
-        return cfg;
+        const client_id = env.string("MQTT_CLIENT_ID", defaults.client_id);
+        return .{
+            .enabled = env.boolean("MQTT_ENABLED", defaults.enabled),
+            .host = env.string("MQTT_HOST", defaults.host),
+            .port = env.int(u16, "MQTT_PORT", defaults.port, 0),
+            .username = env.get("MQTT_USERNAME"),
+            .password = env.get("MQTT_PASSWORD"),
+            .client_id = client_id,
+            // Follows the client id unless set, so a second panel on the same
+            // broker needs one variable changed rather than two. The defaults
+            // are equal, so an existing setup keeps its topics.
+            .topic_prefix = env.get("MQTT_TOPIC_PREFIX") orelse client_id,
+            .discovery_enabled = env.boolean("MQTT_DISCOVERY", defaults.discovery_enabled),
+        };
     }
 };
 
@@ -1263,7 +1267,7 @@ test "interpretConnack rejects a non-CONNACK packet" {
 test "publishing on a dropped connection does not reconnect behind the caller" {
     // `io` is left undefined on purpose: any attempt to resolve, connect or read
     // the clock would trip over it. Reconnecting is `connect`'s job only.
-    var client = MqttClient.init(testing.allocator, undefined, .{});
+    var client = MqttClient.init(undefined, .{});
     defer client.deinit();
 
     try testing.expectError(error.NotConnected, client.publish("cpu_load", "1", false));
@@ -1426,14 +1430,77 @@ test "numeric sensors keep statistics and the rest do not" {
 test "the topic prefix follows the client id unless set" {
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
+    var report: config.Report = .{};
 
-    try testing.expectEqualStrings("sysink", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("sysink", MqttConfig.fromEnv(&env, &report).topic_prefix);
 
     try env.put("MQTT_CLIENT_ID", "office");
-    try testing.expectEqualStrings("office", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("office", MqttConfig.fromEnv(&env, &report).topic_prefix);
 
     try env.put("MQTT_TOPIC_PREFIX", "custom");
-    try testing.expectEqualStrings("custom", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("custom", MqttConfig.fromEnv(&env, &report).topic_prefix);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+}
+
+test "broker settings that cannot be used are turned down, not passed over" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("MQTT_ENABLED", "ture");
+    try env.put("MQTT_PORT", "mqtt");
+    try env.put("MQTT_HOST", "broker.lan");
+    var report: config.Report = .{};
+
+    const cfg = MqttConfig.fromEnv(&env, &report);
+    try testing.expect(!cfg.enabled);
+    try testing.expectEqual(@as(u16, 1883), cfg.port);
+    try testing.expectEqualStrings("broker.lan", cfg.host);
+
+    try testing.expectEqual(@as(usize, 2), report.rejected().len);
+    try testing.expectEqualStrings("MQTT_ENABLED", report.rejected()[0].name);
+    try testing.expectEqualStrings("MQTT_PORT", report.rejected()[1].name);
+    try testing.expectEqualStrings("1883", report.rejected()[1].used());
+}
+
+test "broker settings left blank are the defaults, and credentials left blank are none" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    for ([_][]const u8{ "MQTT_HOST", "MQTT_PORT", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CLIENT_ID", "MQTT_TOPIC_PREFIX" }) |name| {
+        try env.put(name, "");
+    }
+    var report: config.Report = .{};
+
+    const cfg = MqttConfig.fromEnv(&env, &report);
+    // An empty name to look up, or an empty user to log in as, is nobody's
+    // intention: it used to be what a blank line in the file came to.
+    try testing.expectEqualStrings("localhost", cfg.host);
+    try testing.expectEqual(@as(u16, 1883), cfg.port);
+    try testing.expect(cfg.username == null);
+    try testing.expect(cfg.password == null);
+    try testing.expectEqualStrings("sysink", cfg.client_id);
+    try testing.expectEqualStrings("sysink", cfg.topic_prefix);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+}
+
+test "a broker setting misspelt is pointed out by name, and its value is not kept" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("MQTT_PASSWRD", "hunter2");
+    try env.put("MQTT_KEEPALIVE", "60");
+    var report: config.Report = .{};
+
+    _ = MqttConfig.fromEnv(&env, &report);
+    report.findUnknown(&env);
+
+    try testing.expectEqual(@as(usize, 2), report.unknown().len);
+    for (report.unknown()) |stray| {
+        if (std.mem.eql(u8, stray.name, "MQTT_PASSWRD")) try testing.expectEqualStrings("MQTT_PASSWORD", stray.meant.?);
+        if (std.mem.eql(u8, stray.name, "MQTT_KEEPALIVE")) try testing.expect(stray.meant == null);
+    }
+}
+
+test "entities expire after three publish intervals" {
+    const client = MqttClient.init(undefined, .{ .publish_interval = 10 });
+    try testing.expectEqual(@as(u64, 30), client.expire_after);
 }
 
 test "sensor ids are unique" {
@@ -1561,7 +1628,7 @@ const LoopbackClient = struct {
         if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) return error.SocketPairFailed;
 
         var self: LoopbackClient = .{
-            .client = MqttClient.init(testing.allocator, testing.io, .{}),
+            .client = MqttClient.init(testing.io, .{}),
             .broker = fds[1],
         };
         self.client.stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .loopback(0) } } };

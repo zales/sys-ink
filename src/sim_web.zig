@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    var renderer = try sim_frame.Renderer.init(allocator);
+    var renderer = try sim_frame.Renderer.init(allocator, .{});
     defer renderer.deinit();
     renderer.renderGrid();
 

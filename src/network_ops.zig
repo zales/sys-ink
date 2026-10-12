@@ -1,5 +1,4 @@
 const std = @import("std");
-const config = @import("config.zig");
 const parse = @import("parse.zig");
 const Reading = @import("reading.zig").Reading;
 const bounded_connect = @import("bounded_connect.zig");
@@ -19,9 +18,17 @@ const internet_cache_seconds = 60;
 /// render loop for the kernel's TCP timeout.
 const probe_timeout_ms = 1000;
 
+/// The host a TCP connection is tried to, to decide whether the machine has
+/// internet access.
+pub const Probe = struct {
+    ip: [4]u8 = .{ 8, 8, 8, 8 },
+    port: u16 = 53,
+};
+
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
     io: std.Io,
+    probe: Probe,
     cached_internet: ?bool = null,
     cached_internet_at: i64 = 0,
 
@@ -33,8 +40,8 @@ pub const NetworkOps = struct {
     /// Whether that address is on a wired interface. See `lastIpIsWired`.
     last_ip_wired: bool = false,
 
-    pub fn init(io: std.Io) NetworkOps {
-        return .{ .io = io };
+    pub fn init(io: std.Io, probe: Probe) NetworkOps {
+        return .{ .io = io, .probe = probe };
     }
 
     /// The most recent signal reading, or null if there was none.
@@ -74,19 +81,15 @@ pub const NetworkOps = struct {
             if (now - self.cached_internet_at < internet_cache_seconds) return cached;
         }
 
-        const reachable = probeInternet();
+        const reachable = probeInternet(self.probe);
         self.cached_internet = reachable;
         self.cached_internet_at = now;
         return reachable;
     }
 
-    /// Bounded TCP connect against the configured probe host.
-    fn probeInternet() bool {
-        const fd = bounded_connect.connect(
-            config.Config.internet_check_ip,
-            config.Config.internet_check_port,
-            probe_timeout_ms,
-        ) catch return false;
+    /// Bounded TCP connect against the probe host.
+    fn probeInternet(probe: Probe) bool {
+        const fd = bounded_connect.connect(probe.ip, probe.port, probe_timeout_ms) catch return false;
         bounded_connect.closeFd(fd);
         return true;
     }

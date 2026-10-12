@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !u8 {
     const setup_pool = newAutoreleasePool();
     defer _ = send(Msg.Void, setup_pool, "drain", .{});
 
-    var renderer = try sim_frame.Renderer.init(allocator);
+    var renderer = try sim_frame.Renderer.init(allocator, .{});
     defer renderer.deinit();
     renderer.renderGrid();
 

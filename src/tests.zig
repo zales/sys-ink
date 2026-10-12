@@ -11,7 +11,10 @@
 //!
 //! The panel driver and the state machine above it are here despite talking to
 //! hardware: both are generic over the transport, so their command sequences
-//! are asserted against a recorder. The renderer needs neither.
+//! are asserted against a recorder. The renderer needs neither. Of the real
+//! transport, `epdconfig` and `gpio_native`, only what can be known without a
+//! panel is tested: the ioctl request numbers, and that nothing is driven
+//! before it is brought up.
 
 const builtin = @import("builtin");
 

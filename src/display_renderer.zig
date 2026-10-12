@@ -1,7 +1,7 @@
 const std = @import("std");
 const Frame = @import("waveshare_epd/epd2in9.zig").Frame;
 const layout = @import("display_config.zig");
-const config = @import("config.zig");
+const Thresholds = @import("config.zig").Thresholds;
 const parse = @import("parse.zig");
 const Reading = @import("reading.zig").Reading;
 const Graphics = @import("graphics.zig");
@@ -32,6 +32,11 @@ comptime {
 pub const Renderer = struct {
     const Self = @This();
 
+    pub const Options = struct {
+        /// Readings at or above these are drawn inverted.
+        thresholds: Thresholds = .{},
+    };
+
     bitmap: Bitmap,
     /// The notice screen, drawn apart from the dashboard so that the
     /// dashboard's slots keep updating underneath it and reappear intact
@@ -44,6 +49,7 @@ pub const Renderer = struct {
     /// The frame as `packedFrame` hands it over. Both are kept around so
     /// that producing a frame does not allocate.
     bmp_buffer: []u8,
+    thresholds: Thresholds,
     /// Draws the status bar inverted, signalling a hardware fault. Driven by the
     /// daemon as the OR of every fault source (under-voltage, NVMe SMART), so
     /// the bar clears only when all of them have.
@@ -51,7 +57,7 @@ pub const Renderer = struct {
     allocator: std.mem.Allocator,
     grid_cached: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, options: Options) !Self {
         var bitmap = try Bitmap.init(allocator, layout.DISPLAY_WIDTH, layout.DISPLAY_HEIGHT);
         errdefer bitmap.deinit();
         var notice = try Bitmap.init(allocator, layout.DISPLAY_WIDTH, layout.DISPLAY_HEIGHT);
@@ -68,6 +74,7 @@ pub const Renderer = struct {
             .notice = notice,
             .panel_buffer = panel_buffer,
             .bmp_buffer = bmp_buffer,
+            .thresholds = options.thresholds,
             .allocator = allocator,
         };
     }
@@ -422,28 +429,28 @@ pub const Renderer = struct {
 
     /// Render CPU load
     pub fn renderCpuLoad(self: *Self, load: Reading(u8)) void {
-        self.renderGauge(layout.cpu.load, "{d}%", load, config.Config.threshold_cpu_critical);
+        self.renderGauge(layout.cpu.load, "{d}%", load, self.thresholds.cpu);
     }
 
     /// Render CPU temperature
     pub fn renderCpuTemp(self: *Self, temp: Reading(u32)) void {
-        self.renderGauge(layout.cpu.temp, "{d}°C", temp, config.Config.threshold_temp_critical);
+        self.renderGauge(layout.cpu.temp, "{d}°C", temp, self.thresholds.temp);
     }
 
     /// Render memory usage
     pub fn renderMemory(self: *Self, usage: Reading(u8)) void {
-        self.renderGauge(layout.mem.usage, "{d}%", usage, config.Config.threshold_mem_critical);
+        self.renderGauge(layout.mem.usage, "{d}%", usage, self.thresholds.mem);
     }
 
     /// Render root filesystem usage
     pub fn renderDiskUsage(self: *Self, usage: Reading(u8)) void {
-        self.renderGauge(layout.disk.usage, "{d}%", usage, config.Config.threshold_disk_critical);
+        self.renderGauge(layout.disk.usage, "{d}%", usage, self.thresholds.disk);
     }
 
     /// Render disk temperature. Unavailable means the hardware has no sensor,
     /// shown as a dash: "0°C" claimed a reading nobody took.
     pub fn renderDiskTemp(self: *Self, temp: Reading(u32)) void {
-        self.renderGauge(layout.disk.temp, "{d}°C", temp, config.Config.threshold_temp_critical);
+        self.renderGauge(layout.disk.temp, "{d}°C", temp, self.thresholds.temp);
     }
 
     /// Render fan speed. Unavailable means there is no fan, shown as a dash;
@@ -645,7 +652,7 @@ test "the rendered screen matches the checked-in reference" {
     // To regenerate after an intentional layout change:
     //     zig build golden
     // then look at the diff before committing it.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -674,9 +681,9 @@ test "the rendered screen matches the checked-in reference" {
 test "rendering is deterministic" {
     // The golden test is only meaningful if the same inputs always produce the
     // same frame.
-    var a = try Renderer.init(testing.allocator);
+    var a = try Renderer.init(testing.allocator, .{});
     defer a.deinit();
-    var b = try Renderer.init(testing.allocator);
+    var b = try Renderer.init(testing.allocator, .{});
     defer b.deinit();
 
     a.drawReferenceScreen();
@@ -686,7 +693,7 @@ test "rendering is deterministic" {
 }
 
 test "the APT count fits its slot however large it gets" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     const width = layout.apt.count.area.width;
@@ -708,7 +715,7 @@ test "the APT count fits its slot however large it gets" {
 test "a shrinking APT count leaves nothing behind outside its slot" {
     // The visible form of the overflow: pixels right of the slot that the
     // three-digit count drew and the two-digit one never cleared.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -724,7 +731,7 @@ test "a shrinking APT count leaves nothing behind outside its slot" {
 test "shrinking traffic and fan readings leave nothing behind" {
     // Every slot a reading draws into must be cleared in full before the next
     // one, or a wider reading leaves pixels behind a narrower one.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -740,7 +747,7 @@ test "shrinking traffic and fan readings leave nothing behind" {
 }
 
 test "a missing sensor is drawn as a dash, not as zero" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.renderDiskTemp(.of(0));
@@ -753,7 +760,7 @@ test "a missing sensor is drawn as a dash, not as zero" {
     try testing.expect(!std.mem.eql(u8, zero, r.bitmap.data));
 
     // And the dash is exactly what it says, drawn where the reading would be.
-    var expected = try Renderer.init(testing.allocator);
+    var expected = try Renderer.init(testing.allocator, .{});
     defer expected.deinit();
     expected.renderDiskTemp(.of(0));
     expected.renderFanSpeed(.of(0));
@@ -804,7 +811,7 @@ fn drawEverySlot(r: *Renderer, comptime make: anytype) void {
 test "a stale reading is drawn faded: the same value with pixels taken out" {
     // The regression this pins: a slot whose reading had failed looked exactly
     // like one that was live.
-    var live = try Renderer.init(testing.allocator);
+    var live = try Renderer.init(testing.allocator, .{});
     defer live.deinit();
     live.drawReferenceScreen();
     const reference = try testing.allocator.dupe(u8, live.bitmap.data);
@@ -815,7 +822,7 @@ test "a stale reading is drawn faded: the same value with pixels taken out" {
     drawEverySlot(&live, currentReading);
     try testing.expectEqualSlices(u8, reference, live.bitmap.data);
 
-    var stale = try Renderer.init(testing.allocator);
+    var stale = try Renderer.init(testing.allocator, .{});
     defer stale.deinit();
     stale.drawReferenceScreen();
     drawEverySlot(&stale, staleReading);
@@ -831,7 +838,7 @@ test "a stale reading is drawn faded: the same value with pixels taken out" {
 }
 
 test "each slot fades on its own and comes back whole" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
     r.drawReferenceScreen();
     const live = try testing.allocator.dupe(u8, r.bitmap.data);
@@ -857,11 +864,11 @@ test "each slot fades on its own and comes back whole" {
 }
 
 test "a stale fan reading keeps its unit whole" {
-    var live = try Renderer.init(testing.allocator);
+    var live = try Renderer.init(testing.allocator, .{});
     defer live.deinit();
     live.renderFanSpeed(.of(543));
 
-    var stale = try Renderer.init(testing.allocator);
+    var stale = try Renderer.init(testing.allocator, .{});
     defer stale.deinit();
     stale.renderFanSpeed(.staleOf(543));
 
@@ -881,7 +888,7 @@ test "a stale fan reading keeps its unit whole" {
 
 test "a stale critical value stays inverted" {
     // Last known to be over the threshold is still worth the alarm.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
     r.bitmap.clear(.White);
 
@@ -898,7 +905,7 @@ test "a stale critical value stays inverted" {
 }
 
 test "a reading with no value is a dash in every slot" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
     r.drawReferenceScreen();
     drawEverySlot(&r, noReading);
@@ -906,7 +913,7 @@ test "a reading with no value is a dash in every slot" {
 
     // The same screen with each of those slots cleared and a dash put in it
     // by hand, in the slot's own font.
-    var expected = try Renderer.init(testing.allocator);
+    var expected = try Renderer.init(testing.allocator, .{});
     defer expected.deinit();
     expected.drawReferenceScreen();
 
@@ -930,6 +937,23 @@ test "a reading with no value is a dash in every slot" {
     try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
 }
 
+test "the thresholds the renderer is given are the ones it inverts at" {
+    var r = try Renderer.init(testing.allocator, .{ .thresholds = .{ .cpu = 50, .temp = 60 } });
+    defer r.deinit();
+    r.bitmap.clear(.White);
+    const area = layout.cpu.load.area.width * layout.cpu.load.area.height;
+
+    // Under it the slot is mostly white, at it mostly black.
+    r.renderCpuLoad(.of(49));
+    try testing.expect(countBlack(&r) < area / 2);
+    r.renderCpuLoad(.of(50));
+    try testing.expect(countBlack(&r) > area / 2);
+
+    // A reading with no value is over no threshold.
+    r.renderCpuLoad(.{});
+    try testing.expect(countBlack(&r) < area / 2);
+}
+
 // --- under-voltage warning ---------------------------------------------------
 
 /// Rows of the unrotated BMP buffer covering the status bar.
@@ -939,7 +963,7 @@ fn statusBarRows(r: *Renderer) []const u8 {
 }
 
 test "the warning inverts the status bar in the frame sent to the panel" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -954,7 +978,7 @@ test "the warning reaches the BMP preview too" {
     // conversion, so the exported preview showed a clean status bar while the
     // glass showed an inverted one. A preview that disagrees with the device is
     // worse than no preview.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -978,7 +1002,7 @@ test "the warning does not leak into the bitmap" {
     // The status bar's slots are each redrawn by their own task, so an inversion
     // left behind would be partially erased and the frame would come out half
     // inverted. toggleFaultOverlay relies on invertRect being its own inverse.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -995,7 +1019,7 @@ test "the warning does not leak into the bitmap" {
 test "repeated refreshes with the warning on are stable" {
     // An inversion that accumulated would alternate the bar between normal and
     // inverted on every refresh.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1006,7 +1030,7 @@ test "repeated refreshes with the warning on are stable" {
 }
 
 test "the warning leaves everything above the status bar alone" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1025,7 +1049,7 @@ test "the warning leaves everything above the status bar alone" {
 }
 
 test "a notice replaces the dashboard and clearing it brings the dashboard back intact" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1040,7 +1064,7 @@ test "a notice replaces the dashboard and clearing it brings the dashboard back 
 }
 
 test "the dashboard keeps updating underneath a notice" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1054,7 +1078,7 @@ test "the dashboard keeps updating underneath a notice" {
 
     // ...and the dashboard it returns to has it.
     r.clearNotice();
-    var expected = try Renderer.init(testing.allocator);
+    var expected = try Renderer.init(testing.allocator, .{});
     defer expected.deinit();
     expected.drawReferenceScreen();
     expected.renderCpuLoad(.of(99));
@@ -1062,7 +1086,7 @@ test "the dashboard keeps updating underneath a notice" {
 }
 
 test "a notice reaches the panel's frame, and holds still while it is up" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1077,7 +1101,7 @@ test "a notice reaches the panel's frame, and holds still while it is up" {
 }
 
 test "a hardware fault shows over a notice too" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1100,7 +1124,7 @@ test "a hardware fault shows over a notice too" {
 }
 
 test "the ellipsis never splits the degree sign" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     var lines: [layout.notice.max_lines][]const u8 = undefined;
@@ -1124,7 +1148,7 @@ test "the ellipsis never splits the degree sign" {
 }
 
 test "the sleep screen takes over from a notice" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
@@ -1141,14 +1165,14 @@ test "the sleep screen takes over from a notice" {
 test "the sleep screen carries no fault overlay" {
     // It has no status bar to invert: the overlay would cut a white strip
     // across the bottom of a black page.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();
     r.setFaultWarning(true);
     r.drawSleepScreen();
 
-    var expected = try Renderer.init(testing.allocator);
+    var expected = try Renderer.init(testing.allocator, .{});
     defer expected.deinit();
     expected.drawSleepScreen();
 
@@ -1157,7 +1181,7 @@ test "the sleep screen carries no fault overlay" {
 }
 
 test "a short notice gets the largest font, a longer one steps down" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     var lines: [layout.notice.max_lines][]const u8 = undefined;
@@ -1180,7 +1204,7 @@ test "a short notice gets the largest font, a longer one steps down" {
 
 test "the lengths the Hermes skill promises hold" {
     // examples/hermes/sysink-panel/SKILL.md tells an agent what fits; keep it true.
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     var lines: [layout.notice.max_lines][]const u8 = undefined;
@@ -1200,7 +1224,7 @@ test "the lengths the Hermes skill promises hold" {
 }
 
 test "a notice too long for the smallest font ends in an ellipsis within the body" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     const long: *const [100 * 5]u8 = comptime long: {
@@ -1220,7 +1244,7 @@ test "a notice too long for the smallest font ends in an ellipsis within the bod
 }
 
 test "no warning means no overlay at all" {
-    var r = try Renderer.init(testing.allocator);
+    var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     r.drawReferenceScreen();

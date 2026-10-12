@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const Config = config.Config;
 const logger = @import("logger.zig");
 const syscall = @import("syscall.zig");
 const WebPreview = @import("web_preview.zig").WebPreview;
@@ -68,6 +69,7 @@ fn signalHandler(_: std.os.linux.SIG) callconv(.c) void {
 /// keeps the callbacks off global mutable state.
 const App = struct {
     io: std.Io,
+    options: Options,
     sys: *SystemOps,
     net: *NetworkOps,
     traffic: *TrafficMonitor,
@@ -87,6 +89,21 @@ const App = struct {
     /// cycle. Null means the source has not reported yet.
     last_undervoltage: ?bool = null,
     last_nvme_fault: ?bool = null,
+
+    /// What the tasks go by. Plain values, so that nothing here reads the
+    /// configuration.
+    const Options = struct {
+        /// Seconds between full refreshes of the panel, which clear the ghosting
+        /// partial ones leave behind.
+        interval_full_refresh: u32,
+        /// How long a notice stays up when it does not say, in seconds.
+        notify_duration: u32,
+        /// Where each frame is also written as a BMP. Null: nowhere.
+        bmp_export_path: ?[]const u8,
+        /// Whether the APT check may refresh the package lists first, which takes
+        /// root. Without it the count comes from the lists as they stand.
+        may_update_package_lists: bool,
+    };
 
     fn nowSeconds(self: *App) i64 {
         return std.Io.Timestamp.now(self.io, .awake).toSeconds();
@@ -190,7 +207,7 @@ const App = struct {
     fn updateApt(self: *App) void {
         // Kick off the check in the background; the count below is whatever the
         // previous run produced.
-        self.sys.refreshUpdates(config.Config.isRoot(), self.net.checkInternetConnection());
+        self.sys.refreshUpdates(self.options.may_update_package_lists, self.net.checkInternetConnection());
     }
 
     /// Repaint the APT counter from the latest background result.
@@ -297,7 +314,7 @@ const App = struct {
         // Periodic full refresh clears the ghosting that partial updates leave
         // behind. Driven by elapsed time so it does not depend on INTERVAL_FAST.
         const full_refresh = self.full_refresh_due or
-            elapsed >= @as(i64, config.Config.interval_full_refresh);
+            elapsed >= @as(i64, self.options.interval_full_refresh);
         if (full_refresh) {
             self.last_full_refresh = now;
             self.full_refresh_due = false;
@@ -342,14 +359,14 @@ const App = struct {
 
     /// Write the frame on show to the BMP file, if that is turned on.
     fn exportBmp(self: *App) void {
-        if (!config.Config.export_bmp) return;
+        const path = self.options.bmp_export_path orelse return;
 
         self.bmp_exporter.save(
             self.io,
             self.renderer.packedFrame(),
             display_config.DISPLAY_WIDTH,
             display_config.DISPLAY_HEIGHT,
-            config.Config.bmp_export_path,
+            path,
         ) catch |err| {
             log.err("Failed to export BMP: {t}", .{err});
         };
@@ -453,7 +470,7 @@ const App = struct {
             return;
         }
 
-        const duration = n.duration orelse config.Config.notify_duration;
+        const duration = n.duration orelse self.options.notify_duration;
         log.info("Notice for {d}s: {s}", .{ duration, n.text });
         self.renderer.showNotice(n.text);
         self.notice_until = self.nowSeconds() + @as(i64, duration);
@@ -562,36 +579,66 @@ const App = struct {
     }
 };
 
+/// Log what reading the settings turned up: each one given a value the daemon
+/// could not use, and each name that is not a setting but looks like one.
+fn logReport(report: *const config.Report) void {
+    for (report.rejected()) |*r| {
+        log.warn("Ignoring {s}={s}: expected {s}; using {s}", .{ r.name, r.shown(), r.expected, r.used() });
+    }
+    for (report.unknown()) |stray| {
+        if (stray.meant) |meant| {
+            log.warn("Ignoring {s}: not a setting; did you mean {s}?", .{ stray.name, meant });
+        } else {
+            log.warn("Ignoring {s}: not a setting this daemon has", .{stray.name});
+        }
+    }
+}
+
+fn isRoot() bool {
+    return std.os.linux.getuid() == 0;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    config.Config.load(init);
+    var report: config.Report = .{};
+    const cfg = Config.fromEnv(init.environ_map, &report);
+    var mqtt_config = MqttConfig.fromEnv(init.environ_map, &report);
+    // Once everything has been read: what a setting is, is what was asked for.
+    report.findUnknown(init.environ_map);
+    mqtt_config.notices_enabled = cfg.notify_enabled;
+    mqtt_config.publish_interval = cfg.interval_fast;
 
-    logger.init(io);
+    logger.init(io, .{
+        .level = cfg.log_level.toStd(),
+        .file_path = if (cfg.log_to_file) cfg.log_file_path else null,
+    });
     defer logger.deinit();
 
     // Runs unprivileged as long as the user is in the gpio and spi groups.
     installSignalHandlers();
 
     log.info("SysInk starting", .{});
+    // Now, with the logger up: the level and the file are settings themselves.
+    logReport(&report);
 
     var sys_ops = SystemOps.init(allocator, io, init.environ_map);
     defer sys_ops.deinit();
-    var net_ops = NetworkOps.init(io);
+    var net_ops = NetworkOps.init(io, .{ .ip = cfg.internet_check_ip, .port = cfg.internet_check_port });
     var traffic_mon = TrafficMonitor.init(io);
 
-    var renderer = Renderer.init(allocator) catch |err| {
+    var renderer = Renderer.init(allocator, .{ .thresholds = cfg.thresholds }) catch |err| {
         log.err("Failed to initialize display: {t}", .{err});
         return 1;
     };
     defer renderer.deinit();
 
     // The transport outlives the panel, which only borrows it.
-    var epd_config = EpdConfig.init(allocator);
+    var epd_config = EpdConfig.init(.{ .gpio_chip = cfg.gpio_chip, .spi_device = cfg.spi_device });
     defer epd_config.moduleExit();
 
-    var panel = Panel.init(&epd_config, .{ .sleep_between_updates = config.Config.panel_sleep });
+    var panel = Panel.init(&epd_config, .{ .sleep_between_updates = cfg.panel_sleep });
 
     log.info("Initializing display", .{});
     panel.startup() catch |err| {
@@ -602,6 +649,12 @@ pub fn main(init: std.process.Init) !u8 {
 
     var app = App{
         .io = io,
+        .options = .{
+            .interval_full_refresh = cfg.interval_full_refresh,
+            .notify_duration = cfg.notify_duration,
+            .bmp_export_path = if (cfg.export_bmp) cfg.bmp_export_path else null,
+            .may_update_package_lists = isRoot(),
+        },
         .sys = &sys_ops,
         .net = &net_ops,
         .traffic = &traffic_mon,
@@ -612,14 +665,12 @@ pub fn main(init: std.process.Init) !u8 {
     app.showLoading();
     renderer.renderGrid();
 
-    var mqtt_config = MqttConfig.load(init);
-    mqtt_config.notices_enabled = config.Config.notify_enabled;
     var mqtt_client: ?MqttClient = null;
     defer if (mqtt_client) |*client| client.deinit();
 
     if (mqtt_config.enabled) {
         log.info("MQTT enabled, broker {s}:{d}", .{ mqtt_config.host, mqtt_config.port });
-        mqtt_client = MqttClient.init(allocator, io, mqtt_config);
+        mqtt_client = MqttClient.init(io, mqtt_config);
 
         if (mqtt_client) |*client| {
             // A failure here is not fatal: publishMqttStats retries with backoff,
@@ -636,8 +687,8 @@ pub fn main(init: std.process.Init) !u8 {
     var scheduler = Scheduler.init(allocator, io);
     defer scheduler.deinit();
 
-    const fast = config.Config.interval_fast;
-    const slow = config.Config.interval_slow;
+    const fast = cfg.interval_fast;
+    const slow = cfg.interval_slow;
 
     try scheduler.every(fast, "cpu", &app, App.updateCpu);
     try scheduler.every(fast, "memory", &app, App.updateMemory);
@@ -672,12 +723,12 @@ pub fn main(init: std.process.Init) !u8 {
     // Bound and started here, at its final address: `start` hands the runtime a
     // pointer to it, so it must not move afterwards.
     var preview: ?WebPreview = null;
-    if (config.Config.web_preview) {
+    if (cfg.web_preview) {
         const api_options: api.Options = .{
-            .token = config.Config.web_api_token,
-            .notices_enabled = config.Config.notify_enabled,
+            .token = cfg.web_api_token,
+            .notices_enabled = cfg.notify_enabled,
         };
-        preview = WebPreview.init(io, config.Config.web_preview_addr, config.Config.web_preview_port, api_options) catch |err| blk: {
+        preview = WebPreview.init(io, cfg.web_preview_addr, cfg.web_preview_port, api_options) catch |err| blk: {
             log.err("Cannot start the panel preview: {t}", .{err});
             break :blk null;
         };
@@ -690,8 +741,8 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     var notice_fifo: ?NoticeFifo = null;
-    if (config.Config.notify_enabled) {
-        notice_fifo = NoticeFifo.open(io, config.Config.notify_fifo, config.Config.notify_group) catch |err| blk: {
+    if (cfg.notify_enabled) {
+        notice_fifo = NoticeFifo.open(io, cfg.notify_fifo, cfg.notify_group) catch |err| blk: {
             log.err("Notices disabled: {t}", .{err});
             break :blk null;
         };
@@ -699,7 +750,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer if (notice_fifo) |*f| f.close();
     if (notice_fifo) |*f| {
         app.notices = f;
-        log.info("Accepting notices on {s}", .{config.Config.notify_fifo});
+        log.info("Accepting notices on {s}", .{cfg.notify_fifo});
     }
 
     // Registered last so it does not run before the base frame exists. Its first

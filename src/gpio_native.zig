@@ -134,6 +134,45 @@ pub const GpioNative = struct {
 
         return .{ .fd = req.fd };
     }
+
+    /// GPIO chip labels for the SoCs this runs on, most recent first.
+    const known_chip_labels = [_][]const u8{
+        "pinctrl-rp1", // Pi 5
+        "pinctrl-bcm2711", // Pi 4
+        "pinctrl-bcm2835", // Pi 3 and older
+    };
+
+    /// Longest path `findChip` writes.
+    pub const chip_path_max = 32;
+
+    /// Path of the header's GPIO chip, written into `buf`, or null when no
+    /// chip carries a label that is known.
+    ///
+    /// By label because the number is not fixed: the header is gpiochip0 on a
+    /// Pi 4 and gpiochip4 on a Pi 5 with an older kernel.
+    pub fn findChip(buf: *[chip_path_max]u8) ?[]const u8 {
+        for (known_chip_labels) |label| {
+            if (findChipByLabel(buf, label)) |path| return path;
+        }
+        return null;
+    }
+
+    /// Scan /dev/gpiochip0..31 for the chip labelled `label`, as `gpiodetect`
+    /// does.
+    fn findChipByLabel(buf: *[chip_path_max]u8, label: []const u8) ?[]const u8 {
+        for (0..32) |i| {
+            const path = std.mem.printSentinel(buf, "/dev/gpiochip{d}", .{i}, 0) catch continue;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch continue;
+            defer _ = std.os.linux.close(fd);
+
+            var info: ChipInfo = undefined;
+            const rc = std.os.linux.ioctl(fd, GPIO_GET_CHIPINFO_IOCTL, @intFromPtr(&info));
+            if (!syscall.ok(rc)) continue;
+
+            if (std.mem.eql(u8, std.mem.sliceTo(&info.label, 0), label)) return path;
+        }
+        return null;
+    }
 };
 
 // ----------------------------------------------------------------------------
