@@ -5,6 +5,7 @@ const syscall = @import("syscall.zig");
 const WebPreview = @import("web_preview.zig").WebPreview;
 const api = @import("api.zig");
 const network_ops = @import("network_ops.zig");
+const parse = @import("parse.zig");
 const SystemOps = @import("system_ops.zig").SystemOps;
 const NetworkOps = network_ops.NetworkOps;
 const TrafficMonitor = network_ops.TrafficMonitor;
@@ -97,47 +98,48 @@ const App = struct {
 
     // Paired readings are taken and drawn independently, so one failing leaves
     // only its own slot stale instead of taking its neighbour down with it.
+    //
+    // Each slot is drawn from the reading whether or not the attempt worked:
+    // that is what lets the panel show a value that could not be refreshed as
+    // stale. It used to be skipped on a failure, which left the old value up
+    // looking as live as its neighbours.
 
     fn updateCpu(self: *App) void {
         if (self.sys.getCpuLoad()) |load| {
-            self.renderer.renderCpuLoad(load);
             log.debug("CPU load: {d}%", .{load});
         } else |err| log.warn("getCpuLoad failed: {t}", .{err});
+        self.renderer.renderCpuLoad(self.sys.cpu_load);
 
         if (self.sys.getCpuTemperature()) |temp| {
-            self.renderer.renderCpuTemp(temp);
             log.debug("CPU temperature: {d}°C", .{temp});
         } else |err| log.warn("getCpuTemperature failed: {t}", .{err});
+        self.renderer.renderCpuTemp(self.sys.cpu_temp);
     }
 
     fn updateMemory(self: *App) void {
-        const mem = self.sys.getMemory() catch |err| {
-            log.warn("getMemory failed: {t}", .{err});
-            return;
-        };
-        self.renderer.renderMemory(mem);
-        log.debug("Memory: {d}%", .{mem});
+        if (self.sys.getMemory()) |mem| {
+            log.debug("Memory: {d}%", .{mem});
+        } else |err| log.warn("getMemory failed: {t}", .{err});
+        self.renderer.renderMemory(self.sys.memory);
     }
 
     fn updateDisk(self: *App) void {
         if (self.sys.getDiskUsage()) |usage| {
-            self.renderer.renderDiskUsage(usage);
             log.debug("Disk usage: {d}%", .{usage});
         } else |err| log.warn("getDiskUsage failed: {t}", .{err});
+        self.renderer.renderDiskUsage(self.sys.disk_usage);
 
         if (self.sys.getDiskTemp()) |temp| {
-            self.renderer.renderDiskTemp(temp);
             log.debug("Disk temperature: {?d}°C", .{temp});
         } else |err| log.warn("getDiskTemp failed: {t}", .{err});
+        self.renderer.renderDiskTemp(self.sys.disk_temp);
     }
 
     fn updateFan(self: *App) void {
-        const rpm = self.sys.getFanSpeed() catch |err| {
-            log.warn("getFanSpeed failed: {t}", .{err});
-            return;
-        };
-        self.renderer.renderFanSpeed(rpm);
-        log.debug("Fan: {?d} RPM", .{rpm});
+        if (self.sys.getFanSpeed()) |rpm| {
+            log.debug("Fan: {?d} RPM", .{rpm});
+        } else |err| log.warn("getFanSpeed failed: {t}", .{err});
+        self.renderer.renderFanSpeed(self.sys.fan_speed);
     }
 
     fn updateSignal(self: *App) void {
@@ -167,31 +169,22 @@ const App = struct {
     }
 
     fn updateUptime(self: *App) void {
-        const uptime = self.sys.getUptime() catch |err| {
-            log.warn("getUptime failed: {t}", .{err});
-            return;
-        };
-        self.renderer.renderUptime(uptime.days, uptime.hours, uptime.minutes);
-        log.debug("Uptime: {d}d {d}h {d}m", .{ uptime.days, uptime.hours, uptime.minutes });
+        if (self.sys.getUptime()) |uptime| {
+            log.debug("Uptime: {d}d {d}h {d}m", .{ uptime.days, uptime.hours, uptime.minutes });
+        } else |err| log.warn("getUptime failed: {t}", .{err});
+        self.renderer.renderUptime(self.sys.last_uptime);
     }
 
     fn updateTraffic(self: *App) void {
-        const traffic = self.traffic.getCurrentTraffic() catch |err| {
-            log.warn("getCurrentTraffic failed: {t}", .{err});
-            return;
-        };
-
-        log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
-            traffic.download_speed, traffic.download_unit,
-            traffic.upload_speed,   traffic.upload_unit,
-        });
-
-        self.renderer.renderTraffic(
-            traffic.download_speed,
-            traffic.download_unit,
-            traffic.upload_speed,
-            traffic.upload_unit,
-        );
+        if (self.traffic.getCurrentTraffic()) |rates| {
+            const down = parse.scaleBytes(rates.rx_bytes_per_sec);
+            const up = parse.scaleBytes(rates.tx_bytes_per_sec);
+            log.debug("Traffic: {d:.2} {s}/s down / {d:.2} {s}/s up", .{
+                down.value, down.unit,
+                up.value,   up.unit,
+            });
+        } else |err| log.warn("getCurrentTraffic failed: {t}", .{err});
+        self.renderer.renderTraffic(self.traffic.rates);
     }
 
     fn updateApt(self: *App) void {
@@ -202,8 +195,8 @@ const App = struct {
 
     /// Repaint the APT counter from the latest background result.
     fn renderApt(self: *App) void {
-        const count = self.sys.updatesCount();
-        log.debug("APT updates: {?d}", .{count});
+        const count = self.sys.aptUpdates();
+        log.debug("APT updates: {?d} ({t})", .{ count.value, count.state() });
         self.renderer.renderAptUpdates(count);
     }
 
@@ -232,8 +225,9 @@ const App = struct {
     /// automation can turn it into an actual notification.
     fn updateUndervoltage(self: *App) void {
         const active = self.sys.getUndervoltage() orelse {
-            // No sensor on this hardware; report nothing rather than a healthy
-            // reading, and leave the shared fault bar to the other sources.
+            // No sensor on this hardware, or no answer from it this time:
+            // nothing new to report, and certainly not a healthy reading.
+            // The fault bar goes by what each source last said.
             self.applyFaultState();
             return;
         };
@@ -274,7 +268,7 @@ const App = struct {
                 var buf: [256]u8 = undefined;
                 log.warn("NVMe SMART critical warning (0x{x}): {s}", .{
                     health.critical_warning,
-                    @import("parse.zig").nvmeWarningNames(&buf, health.critical_warning),
+                    parse.nvmeWarningNames(&buf, health.critical_warning),
                 });
             } else if (self.last_nvme_fault != null) {
                 log.info("NVMe SMART warning cleared", .{});
@@ -286,9 +280,13 @@ const App = struct {
 
     /// The fault bar shows the OR of every source, so one clearing while another
     /// is still active cannot blank it.
+    ///
+    /// Each source counts as it was last seen, stale or not: failing to read a
+    /// sensor is no evidence that the fault it reported has cleared. A source
+    /// never read, or absent from this hardware, raises nothing.
     fn applyFaultState(self: *App) void {
-        const uv = self.last_undervoltage orelse false;
-        const smart = self.last_nvme_fault orelse false;
+        const uv = self.sys.undervoltage.value orelse false;
+        const smart = if (self.sys.nvme_health.value) |health| health.faulted() else false;
         self.renderer.setFaultWarning(uv or smart);
     }
 
@@ -367,16 +365,23 @@ const App = struct {
 
     /// The cached readings, as `/api/status` reports them. Takes no
     /// measurement: the display tasks have just done that.
+    ///
+    /// A stale reading is reported with the value it last had, and its age
+    /// under `stale`; see `api.Status`.
     fn status(self: *App) api.Status {
-        const raw = self.traffic.getRawTraffic();
+        const now = self.nowSeconds();
+        const sys = self.sys;
+        const rates = self.traffic.rates;
+        const apt = sys.aptUpdates();
+        const nvme_age = sys.nvme_health.staleFor(now);
         return .{
-            .cpu_load = self.sys.last_cpu_load,
-            .cpu_temp = self.sys.last_cpu_temp,
-            .memory = self.sys.last_memory,
-            .disk_usage = self.sys.last_disk_usage,
-            .disk_temp = self.sys.last_disk_temp,
-            .fan_speed = self.sys.last_fan_speed,
-            .uptime_minutes = if (self.sys.lastUptime()) |u|
+            .cpu_load = sys.cpu_load.value,
+            .cpu_temp = sys.cpu_temp.value,
+            .memory = sys.memory.value,
+            .disk_usage = sys.disk_usage.value,
+            .disk_temp = sys.disk_temp.value,
+            .fan_speed = sys.fan_speed.value,
+            .uptime_minutes = if (sys.last_uptime) |u|
                 @as(u64, u.days) * 1440 + @as(u64, u.hours) * 60 + u.minutes
             else
                 null,
@@ -384,13 +389,31 @@ const App = struct {
             .wired = self.net.lastIpIsWired(),
             .signal_strength = self.net.lastSignalStrength(),
             .internet = self.net.lastInternet(),
-            .download_bytes_per_second = @intFromFloat(@max(0, @round(raw.rx_bytes_per_sec))),
-            .upload_bytes_per_second = @intFromFloat(@max(0, @round(raw.tx_bytes_per_sec))),
-            .apt_updates = self.sys.updatesCount(),
-            .undervoltage = self.last_undervoltage,
-            .nvme_fault = self.last_nvme_fault,
-            .ssd_wear = if (self.sys.last_nvme_health) |h| h.percentage_used else null,
+            .download_bytes_per_second = if (rates.value) |r| wholeBytes(r.rx_bytes_per_sec) else null,
+            .upload_bytes_per_second = if (rates.value) |r| wholeBytes(r.tx_bytes_per_sec) else null,
+            .apt_updates = apt.value,
+            .undervoltage = sys.undervoltage.value,
+            .nvme_fault = if (sys.nvme_health.value) |h| h.faulted() else null,
+            .ssd_wear = if (sys.nvme_health.value) |h| h.percentage_used else null,
+            .stale = .{
+                .cpu_load = sys.cpu_load.staleFor(now),
+                .cpu_temp = sys.cpu_temp.staleFor(now),
+                .memory = sys.memory.staleFor(now),
+                .disk_usage = sys.disk_usage.staleFor(now),
+                .disk_temp = sys.disk_temp.staleFor(now),
+                .fan_speed = sys.fan_speed.staleFor(now),
+                .download_bytes_per_second = rates.staleFor(now),
+                .upload_bytes_per_second = rates.staleFor(now),
+                .apt_updates = apt.staleFor(now),
+                .undervoltage = sys.undervoltage.staleFor(now),
+                .nvme_fault = nvme_age,
+                .ssd_wear = nvme_age,
+            },
         };
+    }
+
+    fn wholeBytes(rate: f64) u64 {
+        return @intFromFloat(@max(0, @round(rate)));
     }
 
     // ------------------------------------------------------------------------
@@ -466,35 +489,40 @@ const App = struct {
         // on every successful (re)connection.
         if (!client.connected) {
             client.connect() catch |err| {
-                if (err == error.BackoffActive) {
-                    log.debug("MQTT reconnect skipped (backoff)", .{});
-                } else {
-                    log.warn("MQTT reconnect failed: {t}", .{err});
+                switch (err) {
+                    error.BackoffActive => log.debug("MQTT reconnect skipped (backoff)", .{}),
+                    // The client has said so itself, and it is not a failure.
+                    error.StillResolving => {},
+                    else => log.warn("MQTT reconnect failed: {t}", .{err}),
                 }
                 return;
             };
         }
 
-        // Cached readings, populated by the display tasks above.
-        publishFmt(client, "cpu_load", "{d}", .{self.sys.last_cpu_load});
-        publishFmt(client, "cpu_temp", "{d}", .{self.sys.last_cpu_temp});
-        publishFmt(client, "memory", "{d}", .{self.sys.last_memory});
-        publishFmt(client, "disk_usage", "{d}", .{self.sys.last_disk_usage});
-        // Absent sensors publish nothing rather than a reading of zero.
-        if (self.sys.last_disk_temp) |temp| publishFmt(client, "disk_temp", "{d}", .{temp});
-        if (self.sys.last_fan_speed) |rpm| publishFmt(client, "fan_speed", "{d}", .{rpm});
-        if (self.last_undervoltage) |active| {
+        // Cached readings, populated by the display tasks above — and only
+        // the current ones. A reading whose latest attempt failed, or that
+        // there is no sensor for, publishes nothing rather than its last value
+        // or a zero. Sending the last value on every cycle is what kept Home
+        // Assistant showing a disk temperature hours old as live: the entity's
+        // `expire_after` counts from the last message, and they never stopped.
+        // Withheld, it expires and the entity reads unavailable.
+        const sys = self.sys;
+        if (sys.cpu_load.current()) |load| publishFmt(client, "cpu_load", "{d}", .{load});
+        if (sys.cpu_temp.current()) |temp| publishFmt(client, "cpu_temp", "{d}", .{temp});
+        if (sys.memory.current()) |mem| publishFmt(client, "memory", "{d}", .{mem});
+        if (sys.disk_usage.current()) |usage| publishFmt(client, "disk_usage", "{d}", .{usage});
+        if (sys.disk_temp.current()) |temp| publishFmt(client, "disk_temp", "{d}", .{temp});
+        if (sys.fan_speed.current()) |rpm| publishFmt(client, "fan_speed", "{d}", .{rpm});
+        if (sys.undervoltage.current()) |active| {
             client.publish("undervoltage", if (active) "ON" else "OFF", false) catch {};
         }
-        if (self.last_nvme_fault) |faulted| {
-            client.publish("nvme_fault", if (faulted) "ON" else "OFF", false) catch {};
-        }
-        if (self.sys.last_nvme_health) |health| {
+        if (sys.nvme_health.current()) |health| {
+            client.publish("nvme_fault", if (health.faulted()) "ON" else "OFF", false) catch {};
             publishFmt(client, "ssd_wear", "{d}", .{health.percentage_used});
         }
         // Withheld until a check has actually run, so Home Assistant is not told
         // "0 updates" on the basis of no data.
-        if (self.sys.updatesCount()) |count| publishFmt(client, "apt_updates", "{d}", .{count});
+        if (sys.aptUpdates().current()) |count| publishFmt(client, "apt_updates", "{d}", .{count});
 
         // The readings below are the ones the display tasks already took this
         // cycle, not fresh ones. The scheduler runs this task after them, so
@@ -502,7 +530,7 @@ const App = struct {
         // list — which is what this did — could only ever produce the same
         // numbers at twice the cost, and risked the panel and Home Assistant
         // disagreeing over which sample was "now".
-        if (self.sys.lastUptime()) |uptime| {
+        if (sys.last_uptime) |uptime| {
             publishFmt(client, "uptime_days", "{d}", .{uptime.days});
         }
 
@@ -517,9 +545,10 @@ const App = struct {
         // kB/s, decimal, matching both the entity's declared unit and what the
         // panel shows. This divided by 1024 while calling the result kB/s, which
         // disagreed with the display by 2.4%.
-        const raw = self.traffic.getRawTraffic();
-        publishFmt(client, "traffic_down", "{d:.2}", .{raw.rx_bytes_per_sec / 1000.0});
-        publishFmt(client, "traffic_up", "{d:.2}", .{raw.tx_bytes_per_sec / 1000.0});
+        if (self.traffic.rates.current()) |rates| {
+            publishFmt(client, "traffic_down", "{d:.2}", .{rates.rx_bytes_per_sec / 1000.0});
+            publishFmt(client, "traffic_up", "{d:.2}", .{rates.tx_bytes_per_sec / 1000.0});
+        }
 
         log.debug("MQTT stats published", .{});
     }
@@ -595,8 +624,10 @@ pub fn main(init: std.process.Init) !u8 {
         if (mqtt_client) |*client| {
             // A failure here is not fatal: publishMqttStats retries with backoff,
             // and discovery is republished once the broker comes up.
-            client.connect() catch |err| {
-                log.warn("MQTT connection failed: {t} - will retry later", .{err});
+            client.connect() catch |err| switch (err) {
+                // The first publish, a moment from now, collects the answer.
+                error.StillResolving => {},
+                else => log.warn("MQTT connection failed: {t} - will retry later", .{err}),
             };
             app.mqtt = client;
         }

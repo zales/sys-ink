@@ -66,21 +66,36 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
 
     // Type-check the hardware-facing modules without running anything. These
-    // only build for Linux, so give them an explicit target.
-    const check_target = b.resolveTargetQuery(.{ .os_tag = .linux, .abi = .musl });
-    const check_exe = b.addExecutable(.{
-        .name = "sys-ink-check",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = check_target,
-            .optimize = .debug,
-            .link_libc = true,
-            .imports = &.{.{ .name = "c", .module = libc(b, translate_c, check_target, .debug) }},
-        }),
-    });
-
-    const check_step = b.step("check", "Type-check the Linux-only modules");
-    check_step.dependOn(&check_exe.step);
+    // only build for Linux, so each build gets an explicit target: the host's
+    // own architecture, and the two a release is built for. The 32-bit one is
+    // the point. A 64-bit atomic compiles on x86_64 and on aarch64, which is
+    // where CI and the tests run, and not on the ARMv6 of a Pi Zero; with only
+    // the first of these checked, the release build was the first to find out.
+    const check_step = b.step("check", "Type-check the Linux-only modules for every release target");
+    const check_targets = [_]struct { name: []const u8, query: std.Target.Query }{
+        .{ .name = "sys-ink-check", .query = .{ .os_tag = .linux, .abi = .musl } },
+        .{ .name = "sys-ink-check-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
+        .{ .name = "sys-ink-check-armv6", .query = .{
+            .cpu_arch = .arm,
+            .os_tag = .linux,
+            .abi = .musleabihf,
+            .cpu_model = .{ .explicit = &std.Target.arm.cpu.arm1176jzf_s },
+        } },
+    };
+    for (check_targets) |check| {
+        const check_target = b.resolveTargetQuery(check.query);
+        const check_exe = b.addExecutable(.{
+            .name = check.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = check_target,
+                .optimize = .debug,
+                .link_libc = true,
+                .imports = &.{.{ .name = "c", .module = libc(b, translate_c, check_target, .debug) }},
+            }),
+        });
+        check_step.dependOn(&check_exe.step);
+    }
 
     // Regenerates the reference frame the renderer's layout test compares
     // against. Deliberately a separate step: the test must never rewrite its own

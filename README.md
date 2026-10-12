@@ -40,20 +40,21 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 ## Development
 
-You can develop and test the UI logic on a non-Raspberry Pi machine (e.g., x86_64 Linux) by using the BMP export feature. This allows you to visualize what would be sent to the display without the actual hardware.
+The daemon needs the panel to start: the first thing it does is open the GPIO
+chip and the SPI device, and it exits if it cannot. So it runs on the
+Raspberry Pi and nowhere else, and `EXPORT_BMP=true` does not change that — it
+copies each frame the panel is sent to a file, on a machine that has a panel.
 
-1. **Build the project**:
-   ```bash
-   zig build
-   ```
+To work on the UI without the hardware, use the
+[panel simulator](#panel-simulator), which runs the same renderer, fonts and
+layout with nothing behind them:
 
-2. **Run with BMP export enabled**:
-   ```bash
-   EXPORT_BMP=true BMP_EXPORT_PATH=/tmp/display.bmp ./zig-out/bin/sys-ink
-   ```
+```bash
+zig build sim
+```
 
-3. **View the output**:
-   Open `/tmp/display.bmp` in an image viewer. It will update whenever the display would update.
+Everything else that needs no panel is covered by the tests below, and
+[Build Instructions](#build-instructions) has the cross-compile for the Pi.
 
 ### Tests
 
@@ -109,7 +110,9 @@ Metrics are synthesized as smooth functions of time, which walks every slot
 through its own formatting without anyone driving it: traffic sweeps several
 orders of magnitude so each unit appears, the signal reading crosses the width
 where it drops its `dBm` suffix, and the fault overlay flares for six seconds
-out of every thirty so the inverted status bar can be checked too.
+out of every thirty so the inverted status bar can be checked too. For another
+six the disk temperature, the traffic rates and the APT count go
+[stale](#readings-that-cannot-be-taken), so the faded rendering can be as well.
 
 ### Regenerating fonts
 
@@ -128,6 +131,8 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 - `src/main.zig`: Entry point, signal handling, scheduled tasks, main event loop.
 - `src/scheduler.zig`: Monotonic-clock task scheduler for periodic updates.
 - `src/parse.zig`: I/O-free parsers for procfs/sysfs and command output (unit tested).
+- `src/reading.zig`: A reading together with how its latest measurement went:
+  current, stale or unavailable.
 - `src/display_renderer.zig`: High-level rendering logic (text, icons, fault overlay).
   Produces frames; knows nothing of the hardware.
 - `src/panel.zig`: Puts frames on the glass: partial or full refresh, deep
@@ -355,6 +360,30 @@ Values at or above these are rendered inverted.
 | `THRESHOLD_MEM_CRITICAL` | `95` | Memory usage critical threshold (%) |
 | `THRESHOLD_DISK_CRITICAL` | `95` | Disk usage critical threshold (%) |
 
+### Readings that cannot be taken
+
+Every reading is in one of three states, and the panel, the API and MQTT each
+say which:
+
+| State | Meaning | Panel | `/api/status` | MQTT |
+|-------|---------|-------|---------------|------|
+| Current | The latest attempt measured it | The value | The value | Published |
+| Stale | The latest attempt failed; the value is an earlier one's | The value, faded | The value, with its age in seconds under `stale` | Withheld |
+| Unavailable | No such sensor, or nothing measured yet | `-` | `null` | Withheld |
+
+A reading that fails once keeps its last value rather than blanking its slot,
+but no longer passes it off as live: before, a disk temperature whose sensor
+had stopped answering stayed on the panel and went out over MQTT every cycle
+for as long as the daemon ran. Withheld from MQTT, the entity goes unavailable
+in Home Assistant after three `INTERVAL_FAST` periods like any other that
+stops updating.
+
+The APT count is stale when the latest check failed, which makes it at least
+`INTERVAL_SLOW` old. The uptime, the IP address and the Wi-Fi signal are never
+stale: one that cannot be read is dropped at once. The fault bar goes by what
+under-voltage and SMART last reported, stale or not — failing to read a sensor
+is no evidence that the fault it reported has cleared.
+
 ### Internet check
 
 | Variable | Default | Description |
@@ -420,21 +449,26 @@ curl -s http://127.0.0.1:8390/api/status
 ```
 
 ```json
-{"cpu_load":12,"cpu_temp":48,"memory":31,"disk_usage":67,"disk_temp":null,
+{"cpu_load":12,"cpu_temp":48,"memory":31,"disk_usage":67,"disk_temp":41,
  "fan_speed":2100,"uptime_minutes":4445,"ip_address":"192.168.1.20","wired":true,
  "signal_strength":null,"internet":true,"download_bytes_per_second":1250000,
  "upload_bytes_per_second":0,"apt_updates":3,"undervoltage":false,
- "nvme_fault":null,"ssd_wear":2}
+ "nvme_fault":null,"ssd_wear":null,"stale":{"disk_temp":95}}
 ```
 
 The readings are the ones the panel was last drawn from, taken every
 `INTERVAL_FAST` seconds; asking more often returns the same numbers. Units are
 percent, °C, RPM, dBm and bytes per second. `null` means not known — no such
-sensor on this hardware, or no reading yet — never zero standing in for one.
-CPU load and temperature, memory and disk usage are the exception: every
-machine has them, so they are always numbers, and a read that fails keeps the
-previous value. Names follow the MQTT topics where there is one, except
-traffic: MQTT publishes `traffic_down` and `traffic_up` in kB/s, the API
+sensor on this hardware, or no reading yet — never zero standing in for one,
+and any reading but `wired` can be `null`.
+
+`stale` names the readings that could not be refreshed on the latest attempt,
+each with the age in seconds of the value still reported for it: above, the
+disk temperature was last read 95 seconds ago. It is `{}` when everything is
+current. See [Readings that cannot be taken](#readings-that-cannot-be-taken).
+
+Names follow the MQTT topics where there is one, except traffic: MQTT
+publishes `traffic_down` and `traffic_up` in kB/s, the API
 `download_bytes_per_second` and `upload_bytes_per_second` in bytes per second.
 
 A notice takes the same body as the pipe and MQTT, plain text or JSON (see
@@ -685,8 +719,15 @@ Entities go unavailable in Home Assistant after three `INTERVAL_FAST` periods
 without an update, so a panel that is switched off does not keep showing its last
 readings as current. The same applies to readings the daemon withholds on
 purpose: an IP address that is gone, a disk temperature or fan the hardware does
-not have. Numeric sensors carry `state_class: measurement`, so Home Assistant
-keeps long-term statistics for them.
+not have, and any reading it could not refresh on its latest attempt (see
+[Readings that cannot be taken](#readings-that-cannot-be-taken)). Numeric
+sensors carry `state_class: measurement`, so Home Assistant keeps long-term
+statistics for them.
+
+The broker's name is looked up off the main loop, which waits a second for the
+answer and otherwise connects on a later cycle, so a nameserver that has stopped
+answering delays MQTT and nothing else. A broker given by address is not looked
+up at all.
 
 **Storing the password:** avoid `Environment=MQTT_PASSWORD=...` in a unit file —
 it is readable by any local user via `systemctl show sys-ink`. Prefer a

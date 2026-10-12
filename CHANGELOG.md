@@ -23,7 +23,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- An NVMe SMART command the controller refused was read as a healthy drive.
+  The ioctl that carries it has three outcomes: an errno, zero, or the
+  controller's own status for a command it completed with an error — which is
+  positive, so the check for a failed system call let it through. The page
+  buffer, never written, was then decoded: no critical warning, 0% wear. Only
+  a return of zero counts as a page now, and the two failures are logged
+  apart, once when they start rather than every cycle.
+- Readings that could no longer be taken went on being reported as current. A
+  disk temperature whose sensor stopped answering stayed on the panel and was
+  published over MQTT every cycle with its last value, and because the
+  messages kept coming, Home Assistant's `expire_after` never expired it. The
+  same held for under-voltage, the SMART fault and SSD wear, the Wi-Fi signal,
+  the traffic rates, and an APT count whose later checks had failed. Every
+  reading is now current, stale or unavailable, and says so everywhere: the
+  panel draws a stale value faded and a missing one as `-`, `/api/status`
+  lists stale readings with their age under `stale`, and MQTT withholds
+  anything that is not current so the entity expires. See "Readings that
+  cannot be taken" in the README.
+- CPU load and temperature, memory and disk usage were published to MQTT and
+  reported by the API as `0` for as long as they could not be read at all — a
+  CPU temperature of 0 °C on a machine with no thermal zone, for one. They are
+  withheld, and `null`, instead, and the panel shows `-` where it used to leave
+  the slot empty.
+- A nameserver that did not answer held the whole daemon up while the MQTT
+  broker's name was looked up, for as long as the resolver cared to wait: no
+  panel updates, no notices, and no reaction to being stopped. The lookup now
+  runs off the main loop, which gives it a second and otherwise connects on a
+  later cycle. A broker given by address is not looked up at all.
+- A publisher that never stopped sending to the daemon's MQTT connection kept
+  the main loop reading for as long as it sent. One pass now reads at most
+  64 KiB before going back to everything else, as the notice pipe already did.
+- The README's development section told you to run the daemon with
+  `EXPORT_BMP=true` on a machine without the panel, which it has never been
+  able to do: it exits when it cannot open GPIO and SPI. It points at the
+  simulator instead.
+
 ### Changed
+- `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`,
+  `download_bytes_per_second` and `upload_bytes_per_second` can now be `null`,
+  like every other reading, and there is a new `stale` object. A client that
+  assumed those six were always numbers needs to allow for `null`.
+- MQTT: a reading whose latest measurement failed is no longer published, so
+  its entity goes unavailable after three `INTERVAL_FAST` periods instead of
+  holding its last value.
+- The uptime slot shows `-` when the uptime cannot be read, rather than the
+  last one it could.
 - Stopping the daemon no longer waits behind a preview client that has gone
   quiet. The server task is cancelled, which interrupts whatever it is blocked
   in, instead of being woken with a connection of the daemon's own; that

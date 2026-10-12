@@ -1,7 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const parse = @import("parse.zig");
-const syscall = @import("syscall.zig");
+const Reading = @import("reading.zig").Reading;
 
 // statfs comes from the target libc headers (src/c.h) rather than a
 // hand-rolled struct: fsblkcnt_t is 64-bit even on 32-bit ARM, so an
@@ -52,18 +52,32 @@ pub const SystemOps = struct {
     /// False until a check has actually produced a count, so the UI can tell
     /// "no updates" apart from "not known yet".
     apt_count_known: std.atomic.Value(bool),
-    // Cached values for MQTT (to avoid re-measuring)
-    last_cpu_load: u8 = 0,
-    last_cpu_temp: u32 = 0,
-    last_memory: u8 = 0,
-    last_disk_usage: u8 = 0,
-    /// Null when the hardware has no such sensor, which is published as nothing
-    /// rather than as a reading of zero.
-    last_disk_temp: ?u32 = null,
-    last_fan_speed: ?u32 = null,
-    last_undervoltage: bool = false,
-    last_nvme_health: ?parse.NvmeHealth = null,
+    /// Whether the latest check is the one that produced the count. A check
+    /// that fails leaves the count it found standing, as stale.
+    apt_count_fresh: std.atomic.Value(bool),
+    /// Monotonic seconds at which the count was produced. In 32 bits, which
+    /// hold 136 years of them: the ARMv6 of a Pi Zero or a Pi 1 has no
+    /// 64-bit atomics, and with one here the build for it did not compile.
+    apt_count_at: std.atomic.Value(u32),
+    // What each `get*` last came to, for the API and MQTT to report without
+    // measuring again. Each knows whether its latest attempt worked; see
+    // `reading.zig`. Unavailable where the hardware has no such sensor, which
+    // is reported as nothing rather than as a reading of zero.
+    cpu_load: Reading(u8) = .{},
+    cpu_temp: Reading(u32) = .{},
+    memory: Reading(u8) = .{},
+    disk_usage: Reading(u8) = .{},
+    disk_temp: Reading(u32) = .{},
+    fan_speed: Reading(u32) = .{},
+    undervoltage: Reading(bool) = .{},
+    nvme_health: Reading(parse.NvmeHealth) = .{},
+    /// Null when it could not be read. Not kept as stale: an uptime that has
+    /// stopped counting is not the last known value of anything, only a wrong
+    /// one, and the small print it is set in does not survive being faded.
     last_uptime: ?parse.Uptime = null,
+    /// Set while the SMART command keeps failing, so that is logged when it
+    /// starts rather than on every cycle.
+    nvme_failing: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, parent_env: ?*const std.process.Environ.Map) SystemOps {
         return .{
@@ -73,6 +87,8 @@ pub const SystemOps = struct {
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
             .apt_count_known = std.atomic.Value(bool).init(false),
+            .apt_count_fresh = std.atomic.Value(bool).init(false),
+            .apt_count_at = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -112,16 +128,26 @@ pub const SystemOps = struct {
         return parse.unsignedInt(try self.readFile(path, &buf));
     }
 
+    /// The time a reading is stamped with.
+    fn nowSeconds(self: *SystemOps) i64 {
+        return std.Io.Timestamp.now(self.io, .awake).toSeconds();
+    }
+
     // ------------------------------------------------------------------------
     // Metrics
     // ------------------------------------------------------------------------
 
+    // Each `get*` takes one measurement and records how it went in the reading
+    // of the same name. The measuring itself is in the `measure*` beside it,
+    // so that no way out of one can skip the recording.
+
     /// Get CPU temperature in Celsius from thermal zone
     pub fn getCpuTemperature(self: *SystemOps) !u32 {
-        if (self.cached_cpu_temp_path) |path| {
-            self.last_cpu_temp = try self.readTempFromFile(path);
-            return self.last_cpu_temp;
-        }
+        return self.cpu_temp.record(self.measureCpuTemperature(), self.nowSeconds());
+    }
+
+    fn measureCpuTemperature(self: *SystemOps) !u32 {
+        if (self.cached_cpu_temp_path) |path| return self.readTempFromFile(path);
 
         const zones = [_][]const u8{
             "/sys/class/thermal/thermal_zone0/temp",
@@ -131,7 +157,6 @@ pub const SystemOps = struct {
         for (zones) |zone_path| {
             const temp = self.readTempFromFile(zone_path) catch continue;
             self.cached_cpu_temp_path = try self.allocator.dupe(u8, zone_path);
-            self.last_cpu_temp = temp;
             return temp;
         }
 
@@ -140,6 +165,10 @@ pub const SystemOps = struct {
 
     /// Get CPU load percentage using cached measurements
     pub fn getCpuLoad(self: *SystemOps) !u8 {
+        return self.cpu_load.record(self.measureCpuLoad(), self.nowSeconds());
+    }
+
+    fn measureCpuLoad(self: *SystemOps) !u8 {
         var buf: [1024]u8 = undefined;
         const current = try parse.cpuStat(try self.readFile("/proc/stat", &buf));
 
@@ -148,8 +177,7 @@ pub const SystemOps = struct {
         // First call has no baseline to diff against.
         const prev = self.last_cpu_times orelse return 0;
 
-        self.last_cpu_load = parse.cpuUsagePercent(prev, current);
-        return self.last_cpu_load;
+        return parse.cpuUsagePercent(prev, current);
     }
 
     /// Fan speed in RPM, or null when no hwmon device has a fan input at all.
@@ -158,9 +186,12 @@ pub const SystemOps = struct {
     /// whenever it is cool enough; a machine with no fan is a different answer
     /// and gets null, so the panel shows a dash instead of claiming 0 RPM.
     pub fn getFanSpeed(self: *SystemOps) !?u32 {
+        return self.fan_speed.record(self.measureFanSpeed(), self.nowSeconds());
+    }
+
+    fn measureFanSpeed(self: *SystemOps) !?u32 {
         if (self.cached_fan_path) |path| {
             if (self.readIntFromFile(path)) |rpm| {
-                self.last_fan_speed = rpm;
                 return rpm;
             } else |_| {
                 // Sensor disappeared (module unloaded, device unplugged) — rescan.
@@ -181,19 +212,20 @@ pub const SystemOps = struct {
             if (rpm == 0) continue;
 
             self.cached_fan_path = try self.allocator.dupe(u8, path);
-            self.last_fan_speed = rpm;
             return rpm;
         }
 
-        self.last_fan_speed = if (any_fan) 0 else null;
-        return self.last_fan_speed;
+        return if (any_fan) 0 else null;
     }
 
     /// Get memory usage percentage
     pub fn getMemory(self: *SystemOps) !u8 {
+        return self.memory.record(self.measureMemory(), self.nowSeconds());
+    }
+
+    fn measureMemory(self: *SystemOps) !u8 {
         var buf: [2048]u8 = undefined;
-        self.last_memory = try parse.memoryUsagePercent(try self.readFile("/proc/meminfo", &buf));
-        return self.last_memory;
+        return parse.memoryUsagePercent(try self.readFile("/proc/meminfo", &buf));
     }
 
     /// Root filesystem usage as a percentage.
@@ -201,6 +233,10 @@ pub const SystemOps = struct {
     /// Matches `df`: capacity is measured against space available to
     /// unprivileged users, so the reserved blocks are excluded.
     pub fn getDiskUsage(self: *SystemOps) !u8 {
+        return self.disk_usage.record(measureDiskUsage(), self.nowSeconds());
+    }
+
+    fn measureDiskUsage() !u8 {
         var stat: c.struct_statfs = undefined;
         if (c.statfs("/", &stat) != 0) return error.StatfsFailed;
 
@@ -211,15 +247,11 @@ pub const SystemOps = struct {
         const used = blocks -| free;
         const usable = used + avail;
 
-        if (usable == 0) {
-            self.last_disk_usage = 0;
-            return 0;
-        }
+        if (usable == 0) return 0;
 
         // Round up, as df does, so the two agree rather than differing by one.
         const percent = @divCeil(100 * used, usable);
-        self.last_disk_usage = @intCast(@min(100, percent));
-        return self.last_disk_usage;
+        return @intCast(@min(100, percent));
     }
 
     /// Locate `file` inside the hwmon device whose name contains `sensor_name`,
@@ -250,29 +282,30 @@ pub const SystemOps = struct {
     /// answer, where `getUndervoltage` and `getNvmeHealth` already latch a
     /// missing sensor after the first look. A drive that appears later is not a
     /// case worth rescanning forever for: on this hardware it is soldered down.
+    ///
+    /// A sensor that was found and then stops answering is an error, not a
+    /// missing sensor: the reading goes stale rather than away. It used to
+    /// keep its last value with nothing to say so, on the panel and over MQTT
+    /// alike.
     pub fn getDiskTemp(self: *SystemOps) !?u32 {
-        if (self.cached_disk_temp_path) |path| {
-            self.last_disk_temp = try self.readTempFromFile(path);
-            return self.last_disk_temp;
-        }
+        return self.disk_temp.record(self.measureDiskTemp(), self.nowSeconds());
+    }
 
-        if (self.disk_temp_probed) {
-            self.last_disk_temp = null;
-            return null;
-        }
+    fn measureDiskTemp(self: *SystemOps) !?u32 {
+        if (self.cached_disk_temp_path) |path| return try self.readTempFromFile(path);
+
+        if (self.disk_temp_probed) return null;
         self.disk_temp_probed = true;
 
         var temp_path_buf: [64]u8 = undefined;
         if (self.findHwmonFile(&temp_path_buf, "nvme", "temp1_input")) |temp_path| {
             if (self.readTempFromFile(temp_path)) |temp| {
                 self.cached_disk_temp_path = try self.allocator.dupe(u8, temp_path);
-                self.last_disk_temp = temp;
                 return temp;
             } else |_| {}
         }
 
         log.debug("No NVMe hwmon sensor; disk temperature reporting disabled", .{});
-        self.last_disk_temp = null;
         return null;
     }
 
@@ -280,7 +313,8 @@ pub const SystemOps = struct {
     ///
     /// Returns null on hardware without the sensor, which is every non-Raspberry
     /// Pi and lets the caller hide the indicator entirely rather than claim the
-    /// supply is fine.
+    /// supply is fine. Null as well when the sensor is there and cannot be read:
+    /// the `undervoltage` reading then keeps what it last saw, as stale.
     ///
     /// Source is `in0_lcrit_alarm` on the `rpi_volt` hwmon device, which the
     /// raspberrypi-hwmon driver derives from the firmware's live under-voltage
@@ -289,9 +323,12 @@ pub const SystemOps = struct {
     /// the case that corrupts storage, is not.
     pub fn getUndervoltage(self: *SystemOps) ?bool {
         if (self.cached_undervoltage_path) |path| {
-            const alarm = self.readIntFromFile(path) catch return null;
-            self.last_undervoltage = alarm != 0;
-            return self.last_undervoltage;
+            const alarm = self.readIntFromFile(path) catch {
+                self.undervoltage.fail();
+                return null;
+            };
+            self.undervoltage.set(alarm != 0, self.nowSeconds());
+            return alarm != 0;
         }
 
         if (self.undervoltage_probed) return null;
@@ -305,8 +342,8 @@ pub const SystemOps = struct {
 
         const alarm = self.readIntFromFile(path) catch return null;
         self.cached_undervoltage_path = self.allocator.dupe(u8, path) catch return null;
-        self.last_undervoltage = alarm != 0;
-        return self.last_undervoltage;
+        self.undervoltage.set(alarm != 0, self.nowSeconds());
+        return alarm != 0;
     }
 
     // ------------------------------------------------------------------------
@@ -355,10 +392,16 @@ pub const SystemOps = struct {
     /// NVMe, or this process lacks the root needed to open the controller node
     /// (/dev/nvmeX is 0600 root). Null keeps the fault indicator off rather
     /// than inventing a healthy reading.
+    ///
+    /// Null as well when the controller is there and the page could not be
+    /// had from it. The `nvme_health` reading then keeps the page it last
+    /// got, as stale: a drive that stops answering has not become healthy.
     pub fn getNvmeHealth(self: *SystemOps) ?parse.NvmeHealth {
         const dev = self.nvmeDevPath() orelse return null;
 
-        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return null;
+        const fd = std.posix.openat(std.posix.AT.FDCWD, dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| {
+            return self.nvmeFailed("cannot open {s}: {t}", .{ dev, err });
+        };
         defer _ = std.os.linux.close(fd);
 
         // Zeroed, not undefined: a partially completed command would otherwise
@@ -372,17 +415,40 @@ pub const SystemOps = struct {
         // cdw10: number of dwords minus one in the upper half, log id below.
         cmd.cdw10 = ((page.len / 4 - 1) << 16) | nvme_log_smart;
 
+        // Only a return of zero means the page was written. The kernel's own
+        // failure comes back as an errno and the controller's as its status,
+        // which is positive: taken for success, that left the zeroed page above
+        // to be decoded as a drive with no critical warning.
         const rc = std.os.linux.ioctl(fd, NVME_IOCTL_ADMIN_CMD, @intFromPtr(&cmd));
-        if (!syscall.ok(rc)) {
-            // Node exists but is not a working controller: report nothing rather
-            // than a health struct decoded from a page the kernel never wrote.
-            log.debug("NVMe SMART command failed: {t}", .{syscall.errno(rc)});
-            return null;
+        switch (parse.nvmeCommandResult(rc)) {
+            .completed => {},
+            // Node exists but is not a working controller.
+            .failed => |err| return self.nvmeFailed("the kernel answered {t}", .{err}),
+            .status => |status| return self.nvmeFailed(
+                "the controller answered status 0x{x} (type {d}, code 0x{x}{s})",
+                .{ status.raw, status.codeType(), status.code(), if (status.doNotRetry()) ", do not retry" else "" },
+            ),
         }
 
-        const health = parse.nvmeSmartLog(&page) catch return null;
-        self.last_nvme_health = health;
+        const health = parse.nvmeSmartLog(&page) catch |err| return self.nvmeFailed("{t}", .{err});
+        if (self.nvme_failing) log.info("NVMe SMART page is readable again", .{});
+        self.nvme_failing = false;
+        self.nvme_health.set(health, self.nowSeconds());
         return health;
+    }
+
+    /// The SMART page could not be had this time. Says so once per run of
+    /// failures: this is asked every cycle, and a warning each time would have
+    /// journald drop the lines that matter.
+    fn nvmeFailed(self: *SystemOps, comptime reason: []const u8, args: anytype) ?parse.NvmeHealth {
+        if (self.nvme_failing) {
+            log.debug("NVMe SMART page still unreadable: " ++ reason, args);
+        } else {
+            log.warn("Cannot read the NVMe SMART page: " ++ reason, args);
+        }
+        self.nvme_failing = true;
+        self.nvme_health.fail();
+        return null;
     }
 
     /// Locate the first NVMe controller node, caching the result.
@@ -409,25 +475,29 @@ pub const SystemOps = struct {
 
     /// Get system uptime in days, hours, and minutes
     pub fn getUptime(self: *SystemOps) !parse.Uptime {
+        // Forgotten before looking, so a failure leaves nothing behind.
+        self.last_uptime = null;
+
         var buf: [64]u8 = undefined;
         self.last_uptime = try parse.uptime(try self.readFile("/proc/uptime", &buf));
         return self.last_uptime.?;
-    }
-
-    /// The most recent successful `getUptime`, or null before the first one.
-    pub fn lastUptime(self: *const SystemOps) ?parse.Uptime {
-        return self.last_uptime;
     }
 
     // ------------------------------------------------------------------------
     // APT updates
     // ------------------------------------------------------------------------
 
-    /// Number of available updates from the most recent completed check, or
-    /// null if no check has finished yet.
-    pub fn updatesCount(self: *SystemOps) ?u32 {
-        if (!self.apt_count_known.load(.acquire)) return null;
-        return self.apt_updates_count.load(.monotonic);
+    /// Number of available updates, as the most recent check to produce one
+    /// counted them. Unavailable until one has, and stale once a later check
+    /// fails — the count is then as old as the last one that worked, which at
+    /// the slow interval can be many hours.
+    pub fn aptUpdates(self: *SystemOps) Reading(u32) {
+        if (!self.apt_count_known.load(.acquire)) return .{};
+        return .{
+            .value = self.apt_updates_count.load(.monotonic),
+            .taken_at = self.apt_count_at.load(.monotonic),
+            .fresh = self.apt_count_fresh.load(.acquire),
+        };
     }
 
     /// Kick off an APT check in the background if one is not already running.
@@ -452,6 +522,7 @@ pub const SystemOps = struct {
             // this cycle instead.
             log.warn("Cannot run APT check concurrently: {t}", .{err});
             self.apt_check_running.store(false, .release);
+            self.apt_count_fresh.store(false, .release);
             return;
         };
     }
@@ -467,9 +538,23 @@ pub const SystemOps = struct {
     fn aptCheck(self: *SystemOps, run_update: bool) void {
         defer self.apt_check_running.store(false, .release);
 
+        const count = self.countUpgradable(run_update) orelse {
+            // The count from an earlier check stands, no longer the latest word.
+            self.apt_count_fresh.store(false, .release);
+            return;
+        };
+
+        self.apt_updates_count.store(count, .monotonic);
+        self.apt_count_at.store(std.math.lossyCast(u32, self.nowSeconds()), .monotonic);
+        self.apt_count_fresh.store(true, .release);
+        self.apt_count_known.store(true, .release);
+    }
+
+    /// Ask APT how many packages can be upgraded, or null if it would not say.
+    fn countUpgradable(self: *SystemOps, run_update: bool) ?u32 {
         var env = config.childEnvironment(self.allocator, self.parent_env) catch |err| {
             log.warn("Cannot prepare the APT check's environment: {t}", .{err});
-            return;
+            return null;
         };
         defer env.deinit();
 
@@ -491,14 +576,16 @@ pub const SystemOps = struct {
             .environ_map = &env,
         }) catch |err| {
             log.warn("Failed to check APT updates: {t}", .{err});
-            return;
+            return null;
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        if (result.term != .exited or result.term.exited != 0) return;
+        if (result.term != .exited or result.term.exited != 0) {
+            log.warn("Failed to check APT updates: apt list did not finish cleanly", .{});
+            return null;
+        }
 
-        self.apt_updates_count.store(parse.aptUpgradableCount(result.stdout), .monotonic);
-        self.apt_count_known.store(true, .release);
+        return parse.aptUpgradableCount(result.stdout);
     }
 };

@@ -6,6 +6,8 @@ const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const notice_text = @import("notice.zig");
+const parse = @import("parse.zig");
+const Reading = @import("reading.zig").Reading;
 
 /// Bytes per hardware row after the 90° rotation.
 const hw_bytes_per_row = display_config.DISPLAY_HEIGHT / 8;
@@ -165,17 +167,28 @@ pub const Renderer = struct {
     }
 
     /// Simple unified text rendering in a defined area with optional inversion
-    fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool) void {
+    fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool, stale: bool) void {
         // Clear the area
         self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
 
         // Draw text
         self.bitmap.drawTextFont(text_x, text_y, text, font, .Black);
 
+        // Before the inversion, so a critical value that has gone stale is
+        // faded white-on-black rather than having its background eaten into.
+        if (stale) self.bitmap.fadeRect(area_x, area_y, area_w, area_h);
+
         // Invert if critical
         if (invert) {
             self.bitmap.invertRect(area_x, area_y, area_w, area_h);
         }
+    }
+
+    /// What a slot says: the value through `fmt`, or a dash where there is
+    /// none — "0%" for a reading nobody took would claim one.
+    fn slotText(buf: []u8, comptime fmt: []const u8, value: anytype) []const u8 {
+        const known = value orelse return "-";
+        return std.mem.print(buf, fmt, .{known}) catch "?";
     }
 
     /// Show or clear the hardware-fault warning: the status bar is drawn inverted.
@@ -416,62 +429,72 @@ pub const Renderer = struct {
     // that fails leaves only its own slot stale. Load and temperature used to
     // be drawn together, and a machine without a thermal zone never showed its
     // load at all.
+    //
+    // A slot is drawn from the reading rather than from a bare value, so it
+    // can show which of three things it has: a current value as it always
+    // was, a stale one — the last value, when the latest attempt to take it
+    // failed — faded, and no value at all as a dash. A slot whose reading
+    // failed used to keep what it showed, indistinguishable from a live one.
 
     /// Render CPU load
-    pub fn renderCpuLoad(self: *Self, load: u8) void {
-        const is_critical = load >= config.Config.threshold_cpu_critical;
+    pub fn renderCpuLoad(self: *Self, load: Reading(u8)) void {
+        const is_critical = if (load.value) |v| v >= config.Config.threshold_cpu_critical else false;
 
         var buf: [16]u8 = undefined;
-        const text = std.mem.print(&buf, "{d}%", .{load}) catch "?";
-        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+        const text = slotText(&buf, "{d}%", load.value);
+        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical, load.isStale());
     }
 
     /// Render CPU temperature
-    pub fn renderCpuTemp(self: *Self, temp: u32) void {
-        const is_critical = temp >= config.Config.threshold_temp_critical;
+    pub fn renderCpuTemp(self: *Self, temp: Reading(u32)) void {
+        const is_critical = if (temp.value) |t| t >= config.Config.threshold_temp_critical else false;
 
         var buf: [16]u8 = undefined;
-        const text = std.mem.print(&buf, "{d}°C", .{temp}) catch "?";
-        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical);
+        const text = slotText(&buf, "{d}°C", temp.value);
+        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical, temp.isStale());
     }
 
     /// Render memory usage
-    pub fn renderMemory(self: *Self, usage: u8) void {
-        const is_critical = usage >= config.Config.threshold_mem_critical;
+    pub fn renderMemory(self: *Self, usage: Reading(u8)) void {
+        const is_critical = if (usage.value) |u| u >= config.Config.threshold_mem_critical else false;
 
         var buf: [16]u8 = undefined;
-        const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
-        self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical);
+        const text = slotText(&buf, "{d}%", usage.value);
+        self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical, usage.isStale());
     }
 
     /// Render root filesystem usage
-    pub fn renderDiskUsage(self: *Self, usage: u8) void {
-        const is_critical = usage >= config.Config.threshold_disk_critical;
+    pub fn renderDiskUsage(self: *Self, usage: Reading(u8)) void {
+        const is_critical = if (usage.value) |u| u >= config.Config.threshold_disk_critical else false;
 
         var buf: [16]u8 = undefined;
-        const text = std.mem.print(&buf, "{d}%", .{usage}) catch "?";
-        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+        const text = slotText(&buf, "{d}%", usage.value);
+        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical, usage.isStale());
     }
 
-    /// Render disk temperature. Null means the hardware has no sensor, shown
-    /// as a dash: "0°C" claimed a reading nobody took.
-    pub fn renderDiskTemp(self: *Self, temp: ?u32) void {
-        const is_critical = if (temp) |t| t >= config.Config.threshold_temp_critical else false;
+    /// Render disk temperature. Unavailable means the hardware has no sensor,
+    /// shown as a dash: "0°C" claimed a reading nobody took.
+    pub fn renderDiskTemp(self: *Self, temp: Reading(u32)) void {
+        const is_critical = if (temp.value) |t| t >= config.Config.threshold_temp_critical else false;
 
         var buf: [16]u8 = undefined;
-        const text = if (temp) |t| std.mem.print(&buf, "{d}°C", .{t}) catch "?" else "-";
-        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical);
+        const text = slotText(&buf, "{d}°C", temp.value);
+        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical, temp.isStale());
     }
 
-    /// Render fan speed. Null means there is no fan, shown as a dash; a fan
-    /// that is present and stopped still reads 0. The unit is in the header.
-    pub fn renderFanSpeed(self: *Self, rpm: ?u32) void {
+    /// Render fan speed. Unavailable means there is no fan, shown as a dash;
+    /// a fan that is present and stopped still reads 0. The unit is in the
+    /// header.
+    pub fn renderFanSpeed(self: *Self, rpm: Reading(u32)) void {
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
         self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
 
         var buf: [16]u8 = undefined;
-        const text = if (rpm) |r| std.mem.print(&buf, "{d}", .{r}) catch "?" else "-";
+        const text = slotText(&buf, "{d}", rpm.value);
         self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
+        // Before the unit goes on: it is a label, and no less true for the
+        // reading under it being old.
+        if (rpm.isStale()) self.bitmap.fadeRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height);
 
         // The unit sits in the header, as it does for traffic, and is drawn
         // here rather than with the grid for the same reason traffic's is:
@@ -493,13 +516,18 @@ pub const Renderer = struct {
     /// mid-glyph, so pick the most detailed form that fits its 84px:
     /// "11d 12h 20m" (83px) up to 99 days, then the compact "123d 23:59" (70px),
     /// which still carries minutes. Only truly absurd uptimes lose them.
-    pub fn renderUptime(self: *Self, days: u32, hours: u32, minutes: u32) void {
+    ///
+    /// Null, an uptime that could not be read, is a dash. There is no stale
+    /// form: the status bar's small print does not survive being faded, and an
+    /// uptime that has stopped counting would only be a wrong one.
+    pub fn renderUptime(self: *Self, uptime: ?parse.Uptime) void {
         self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
 
         var buf = display_config.UptimeBuffers{};
-        const candidates = display_config.uptimeCandidates(&buf, days, hours, minutes);
-
-        const text = self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
+        const text = if (uptime) |u| blk: {
+            const candidates = display_config.uptimeCandidates(&buf, u.days, u.hours, u.minutes);
+            break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
+        } else "-";
         self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
     }
 
@@ -538,11 +566,14 @@ pub const Renderer = struct {
         self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
     }
 
-    /// Render network traffic
-    pub fn renderTraffic(self: *Self, download_speed: f64, download_unit: []const u8, upload_speed: f64, upload_unit: []const u8) void {
+    /// Render network traffic, from rates in bytes per second.
+    pub fn renderTraffic(self: *Self, rates: Reading(parse.NetRates)) void {
+        const down: ?parse.Scaled = if (rates.value) |r| parse.scaleBytes(r.rx_bytes_per_sec) else null;
+        const up: ?parse.Scaled = if (rates.value) |r| parse.scaleBytes(r.tx_bytes_per_sec) else null;
+
         self.renderTrafficRow(
-            download_speed,
-            download_unit,
+            down,
+            rates.isStale(),
             display_config.TRAFFIC_DOWN_VALUE_X,
             display_config.TRAFFIC_DOWN_VALUE_Y,
             display_config.TRAFFIC_DOWN_AREA_Y,
@@ -551,8 +582,8 @@ pub const Renderer = struct {
             display_config.TRAFFIC_DOWN_UNIT_AREA_Y,
         );
         self.renderTrafficRow(
-            upload_speed,
-            upload_unit,
+            up,
+            rates.isStale(),
             display_config.TRAFFIC_UP_VALUE_X,
             display_config.TRAFFIC_UP_VALUE_Y,
             display_config.TRAFFIC_UP_AREA_Y,
@@ -562,10 +593,12 @@ pub const Renderer = struct {
         );
     }
 
+    /// One direction's rate. With no rate there is no unit to put on it
+    /// either, so the value is a dash and the unit's place stays empty.
     fn renderTrafficRow(
         self: *Self,
-        speed: f64,
-        unit: []const u8,
+        rate: ?parse.Scaled,
+        stale: bool,
         value_x: i32,
         value_y: i32,
         value_area_y: i32,
@@ -575,6 +608,12 @@ pub const Renderer = struct {
     ) void {
         self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
         self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+
+        const known = rate orelse {
+            self.bitmap.drawTextFont(value_x, value_y, "-", .Ubuntu20, .Black);
+            return;
+        };
+        const speed = known.value;
 
         // scaleBytes keeps the value under 1000, so two decimals always fit.
         // The ladder is a guard against that changing, since this slot ends at
@@ -591,18 +630,25 @@ pub const Renderer = struct {
         self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
 
         var unit_buf: [32]u8 = undefined;
-        const unit_text = std.mem.print(&unit_buf, "{s}/s", .{unit}) catch "?";
+        const unit_text = std.mem.print(&unit_buf, "{s}/s", .{known.unit}) catch "?";
         self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
+
+        // The value only. The unit is in the header's small print, which
+        // does not survive fading, and the number is no use without it.
+        if (stale) self.bitmap.fadeRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height);
     }
 
-    /// Render APT updates count. `null` means the background check has not
-    /// reported yet — show a dash rather than the "all up to date" tick, which
-    /// would claim more than is known.
-    pub fn renderAptUpdates(self: *Self, count: ?u32) void {
+    /// Render APT updates count. Unavailable means the background check has
+    /// not reported yet — show a dash rather than the "all up to date" tick,
+    /// which would claim more than is known. Stale means the latest check
+    /// failed and the count is an earlier one's, which at the slow interval
+    /// makes it hours old at the least.
+    pub fn renderAptUpdates(self: *Self, count: Reading(u32)) void {
         const ascent = self.bitmap.getFontAscent(.Ubuntu24);
         self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
+        defer if (count.isStale()) self.bitmap.fadeRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height);
 
-        const known = count orelse {
+        const known = count.value orelse {
             self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, "-", .Ubuntu24, .Black);
             return;
         };
@@ -653,17 +699,17 @@ pub const Renderer = struct {
     /// the test that checks against its output cannot drift apart.
     pub fn drawReferenceScreen(self: *Self) void {
         self.renderGrid();
-        self.renderCpuLoad(42);
-        self.renderCpuTemp(51);
-        self.renderMemory(28);
-        self.renderDiskUsage(84);
-        self.renderDiskTemp(33);
-        self.renderFanSpeed(543);
-        self.renderTraffic(999.99, "kB", 3.01, "B");
-        self.renderAptUpdates(35);
+        self.renderCpuLoad(.of(42));
+        self.renderCpuTemp(.of(51));
+        self.renderMemory(.of(28));
+        self.renderDiskUsage(.of(84));
+        self.renderDiskTemp(.of(33));
+        self.renderFanSpeed(.of(543));
+        self.renderTraffic(.of(.{ .rx_bytes_per_sec = 999_990, .tx_bytes_per_sec = 3.01 }));
+        self.renderAptUpdates(.of(35));
         self.renderInternetStatus(true);
         self.renderIpAddress("192.168.1.231");
-        self.renderUptime(11, 22, 47);
+        self.renderUptime(.{ .days = 11, .hours = 22, .minutes = 47 });
         self.renderWired();
     }
 };
@@ -758,8 +804,8 @@ test "a shrinking APT count leaves nothing behind outside its slot" {
     const before = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(before);
 
-    r.renderAptUpdates(888);
-    r.renderAptUpdates(35);
+    r.renderAptUpdates(.of(888));
+    r.renderAptUpdates(.of(35));
 
     try testing.expectEqualSlices(u8, before, r.bitmap.data);
 }
@@ -774,10 +820,10 @@ test "shrinking traffic and fan readings leave nothing behind" {
     const before = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(before);
 
-    r.renderTraffic(7.18, "MB", 118.0, "MB");
-    r.renderFanSpeed(8200);
-    r.renderTraffic(999.99, "kB", 3.01, "B");
-    r.renderFanSpeed(543);
+    r.renderTraffic(.of(.{ .rx_bytes_per_sec = 7_180_000, .tx_bytes_per_sec = 118_000_000 }));
+    r.renderFanSpeed(.of(8200));
+    r.renderTraffic(.of(.{ .rx_bytes_per_sec = 999_990, .tx_bytes_per_sec = 3.01 }));
+    r.renderFanSpeed(.of(543));
 
     try testing.expectEqualSlices(u8, before, r.bitmap.data);
 }
@@ -786,26 +832,214 @@ test "a missing sensor is drawn as a dash, not as zero" {
     var r = try Renderer.init(testing.allocator);
     defer r.deinit();
 
-    r.renderDiskTemp(0);
-    r.renderFanSpeed(0);
+    r.renderDiskTemp(.of(0));
+    r.renderFanSpeed(.of(0));
     const zero = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(zero);
 
-    r.renderDiskTemp(null);
-    r.renderFanSpeed(null);
+    r.renderDiskTemp(.{});
+    r.renderFanSpeed(.{});
     try testing.expect(!std.mem.eql(u8, zero, r.bitmap.data));
 
     // And the dash is exactly what it says, drawn where the reading would be.
     var expected = try Renderer.init(testing.allocator);
     defer expected.deinit();
-    expected.renderDiskTemp(0);
-    expected.renderFanSpeed(0);
+    expected.renderDiskTemp(.of(0));
+    expected.renderFanSpeed(.of(0));
     expected.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
     expected.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
     const fan_ascent = expected.bitmap.getFontAscent(.Ubuntu24);
     expected.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
     expected.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
     expected.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+    try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
+}
+
+// --- stale and unavailable readings --------------------------------------------
+
+/// A reading of `value` whose latest attempt failed.
+fn staleReading(comptime T: type, value: T) Reading(T) {
+    var reading: Reading(T) = .of(value);
+    reading.fail();
+    return reading;
+}
+
+fn currentReading(comptime T: type, value: T) Reading(T) {
+    return .of(value);
+}
+
+fn noReading(comptime T: type, value: T) Reading(T) {
+    _ = value;
+    return .{};
+}
+
+fn countBlack(r: *const Renderer) usize {
+    var n: usize = 0;
+    for (r.bitmap.data) |px| {
+        if (px < 128) n += 1;
+    }
+    return n;
+}
+
+/// Every slot that takes a reading, drawn from the reference screen's values
+/// as readings in the state `make` puts them in.
+fn drawEverySlot(r: *Renderer, comptime make: anytype) void {
+    r.renderCpuLoad(make(u8, 42));
+    r.renderCpuTemp(make(u32, 51));
+    r.renderMemory(make(u8, 28));
+    r.renderDiskUsage(make(u8, 84));
+    r.renderDiskTemp(make(u32, 33));
+    r.renderFanSpeed(make(u32, 543));
+    r.renderTraffic(make(parse.NetRates, .{ .rx_bytes_per_sec = 999_990, .tx_bytes_per_sec = 3.01 }));
+    r.renderAptUpdates(make(u32, 35));
+}
+
+test "a stale reading is drawn faded: the same value with pixels taken out" {
+    // The regression this pins: a slot whose reading had failed looked exactly
+    // like one that was live.
+    var live = try Renderer.init(testing.allocator);
+    defer live.deinit();
+    live.drawReferenceScreen();
+    const reference = try testing.allocator.dupe(u8, live.bitmap.data);
+    defer testing.allocator.free(reference);
+
+    // The helper draws what the reference screen does, or the comparison
+    // below would be between two different screens.
+    drawEverySlot(&live, currentReading);
+    try testing.expectEqualSlices(u8, reference, live.bitmap.data);
+
+    var stale = try Renderer.init(testing.allocator);
+    defer stale.deinit();
+    stale.drawReferenceScreen();
+    drawEverySlot(&stale, staleReading);
+
+    try testing.expect(!std.mem.eql(u8, live.bitmap.data, stale.bitmap.data));
+
+    // Fading only ever removes ink, and only from the live rendering: nothing
+    // is black in the stale frame that is not black in the live one.
+    for (live.bitmap.data, stale.bitmap.data) |was, is| {
+        if (is < 128) try testing.expect(was < 128);
+    }
+    try testing.expect(countBlack(&stale) < countBlack(&live));
+}
+
+test "each slot fades on its own and comes back whole" {
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
+    r.drawReferenceScreen();
+    const live = try testing.allocator.dupe(u8, r.bitmap.data);
+    defer testing.allocator.free(live);
+
+    r.renderDiskTemp(staleReading(u32, 33));
+    try testing.expect(!std.mem.eql(u8, live, r.bitmap.data));
+
+    // Only the disk temperature's own area changed.
+    const x0: usize = display_config.DISK_AREA_X;
+    const y0: usize = display_config.DISK_AREA_Y_TEMP;
+    for (0..display_config.DISPLAY_HEIGHT) |y| {
+        for (0..display_config.DISPLAY_WIDTH) |x| {
+            const inside = x >= x0 and x < x0 + display_config.TEXT_AREA_DISK.width and
+                y >= y0 and y < y0 + display_config.TEXT_AREA_DISK.height;
+            if (inside) continue;
+            const at = y * r.bitmap.stride + x;
+            try testing.expectEqual(live[at], r.bitmap.data[at]);
+        }
+    }
+
+    // The next good reading leaves no trace of it.
+    r.renderDiskTemp(.of(33));
+    try testing.expectEqualSlices(u8, live, r.bitmap.data);
+}
+
+test "a stale fan reading keeps its unit whole" {
+    var live = try Renderer.init(testing.allocator);
+    defer live.deinit();
+    live.renderFanSpeed(.of(543));
+
+    var stale = try Renderer.init(testing.allocator);
+    defer stale.deinit();
+    stale.renderFanSpeed(staleReading(u32, 543));
+
+    try testing.expect(!std.mem.eql(u8, live.bitmap.data, stale.bitmap.data));
+
+    // The header row the unit is drawn on, from the unit to the divider.
+    const unit_top: usize = @intCast(display_config.FAN_UNIT_Y - live.bitmap.getFontAscent(.Ubuntu14));
+    for (unit_top..display_config.FAN_UNIT_Y + 4) |y| {
+        const row = y * live.bitmap.stride;
+        try testing.expectEqualSlices(
+            u8,
+            live.bitmap.data[row + display_config.FAN_UNIT_X .. row + display_config.VERTICAL_LINE_2],
+            stale.bitmap.data[row + display_config.FAN_UNIT_X .. row + display_config.VERTICAL_LINE_2],
+        );
+    }
+}
+
+test "a stale critical value stays inverted" {
+    // Last known to be over the threshold is still worth the alarm.
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
+    r.bitmap.clear(.White);
+
+    r.renderCpuLoad(staleReading(u8, 100));
+    const stale_black = countBlack(&r);
+    r.renderCpuLoad(.of(100));
+    const live_black = countBlack(&r);
+
+    // Inverted, the slot is mostly black either way; faded, the text in it is
+    // dimmer, which on a black ground means more black, not less.
+    const area = display_config.TEXT_AREA_CPU.width * display_config.TEXT_AREA_CPU.height;
+    try testing.expect(live_black > area / 2);
+    try testing.expect(stale_black > live_black);
+}
+
+test "a reading with no value is a dash in every slot" {
+    var r = try Renderer.init(testing.allocator);
+    defer r.deinit();
+    r.drawReferenceScreen();
+    drawEverySlot(&r, noReading);
+    r.renderUptime(null);
+
+    var expected = try Renderer.init(testing.allocator);
+    defer expected.deinit();
+    expected.drawReferenceScreen();
+    const b = &expected.bitmap;
+    const dc = display_config;
+
+    const Slot = struct { area_x: i32, area_y: i32, w: u32, h: u32, x: i32, y: i32 };
+    const big = [_]Slot{
+        .{ .area_x = dc.CPU_AREA_X, .area_y = dc.CPU_AREA_Y_LOAD, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height, .x = dc.CPU_VALUE_X, .y = dc.CPU_VALUE_Y_LOAD },
+        .{ .area_x = dc.CPU_AREA_X, .area_y = dc.CPU_AREA_Y_TEMP, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height, .x = dc.CPU_VALUE_X, .y = dc.CPU_VALUE_Y_TEMP },
+        .{ .area_x = dc.MEM_AREA_X, .area_y = dc.MEM_AREA_Y, .w = dc.TEXT_AREA_MEM.width, .h = dc.TEXT_AREA_MEM.height, .x = dc.MEM_VALUE_X, .y = dc.MEM_VALUE_Y },
+        .{ .area_x = dc.DISK_AREA_X, .area_y = dc.DISK_AREA_Y_DISK, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height, .x = dc.DISK_VALUE_X, .y = dc.DISK_VALUE_Y_DISK },
+        .{ .area_x = dc.DISK_AREA_X, .area_y = dc.DISK_AREA_Y_TEMP, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height, .x = dc.DISK_VALUE_X, .y = dc.DISK_VALUE_Y_TEMP },
+    };
+    for (big) |slot| {
+        b.fillRect(slot.area_x, slot.area_y, slot.w, slot.h, .White);
+        b.drawTextFont(slot.x, slot.y, "-", .Ubuntu26, .Black);
+    }
+
+    const ascent24 = b.getFontAscent(.Ubuntu24);
+    b.fillRect(dc.FAN_VALUE_X, dc.FAN_VALUE_Y - ascent24, dc.TEXT_AREA_FAN.width, dc.TEXT_AREA_FAN.height, .White);
+    b.drawTextFont(dc.FAN_VALUE_X, dc.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
+    b.drawTextFont(dc.FAN_UNIT_X, dc.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+
+    b.fillRect(dc.APT_VALUE_X, dc.APT_VALUE_Y - ascent24, dc.TEXT_AREA_APT.width, dc.TEXT_AREA_APT.height, .White);
+    b.drawTextFont(dc.APT_VALUE_X, dc.APT_VALUE_Y, "-", .Ubuntu24, .Black);
+
+    b.fillRect(dc.UPTIME_VALUE_X, dc.UPTIME_AREA_Y, dc.TEXT_AREA_UPTIME.width, dc.TEXT_AREA_UPTIME.height, .White);
+    b.drawTextFont(dc.UPTIME_VALUE_X, dc.UPTIME_VALUE_Y, "-", .Ubuntu14, .Black);
+
+    // A rate that is not known has no unit either.
+    const traffic = [_][4]i32{
+        .{ dc.TRAFFIC_DOWN_VALUE_X, dc.TRAFFIC_DOWN_AREA_Y, dc.TRAFFIC_DOWN_VALUE_Y, dc.TRAFFIC_DOWN_UNIT_AREA_Y },
+        .{ dc.TRAFFIC_UP_VALUE_X, dc.TRAFFIC_UP_AREA_Y, dc.TRAFFIC_UP_VALUE_Y, dc.TRAFFIC_UP_UNIT_AREA_Y },
+    };
+    for (traffic) |row| {
+        b.fillRect(row[0], row[1], dc.TEXT_AREA_TRAFFIC_VALUE.width, dc.TEXT_AREA_TRAFFIC_VALUE.height, .White);
+        b.fillRect(dc.TRAFFIC_DOWN_UNIT_X, row[3], dc.TEXT_AREA_TRAFFIC_UNIT.width, dc.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+        b.drawTextFont(row[0], row[2], "-", .Ubuntu20, .Black);
+    }
+
     try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
 }
 
@@ -928,7 +1162,7 @@ test "the dashboard keeps updating underneath a notice" {
     defer testing.allocator.free(shown);
 
     // A reading lands while the notice is up: the panel does not change...
-    r.renderCpuLoad(99);
+    r.renderCpuLoad(.of(99));
     try testing.expectEqualSlices(u8, shown, r.packedFrame());
 
     // ...and the dashboard it returns to has it.
@@ -936,7 +1170,7 @@ test "the dashboard keeps updating underneath a notice" {
     var expected = try Renderer.init(testing.allocator);
     defer expected.deinit();
     expected.drawReferenceScreen();
-    expected.renderCpuLoad(99);
+    expected.renderCpuLoad(.of(99));
     try testing.expectEqualSlices(u8, expected.packedFrame(), r.packedFrame());
 }
 
