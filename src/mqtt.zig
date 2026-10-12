@@ -1021,8 +1021,10 @@ const Resolver = struct {
     answer: LookupError![4]u8 = error.DnsResolutionFailed,
     /// How long `resolve` waits on a lookup it has just started.
     wait_ms: u32 = default_wait_ms,
-    /// A seam for the tests, which need a lookup that takes its time.
-    lookup_fn: *const fn (name: [*:0]const u8) LookupError![4]u8 = &lookup,
+    /// A seam for the tests, which need a lookup that takes its time, and
+    /// whatever that lookup needs to know: handed to it as it is.
+    lookup_fn: *const fn (ctx: ?*anyopaque, name: [*:0]const u8) LookupError![4]u8 = &lookup,
+    lookup_ctx: ?*anyopaque = null,
 
     /// The same bound as the internet probe, which holds the same loop up
     /// for the same kind of reason.
@@ -1043,7 +1045,7 @@ const Resolver = struct {
                 // No thread to be had. Looked up here, as it always used to
                 // be, rather than never: a late connection beats none.
                 log.debug("Cannot resolve {s} off the main loop: {t}", .{ host, err });
-                return self.lookup_fn(name.ptr);
+                return self.lookup_fn(self.lookup_ctx, name.ptr);
             };
 
             // Only for a lookup started here. One still running from an
@@ -1059,7 +1061,7 @@ const Resolver = struct {
     }
 
     fn run(self: *Resolver, io: std.Io) void {
-        self.answer = self.lookup_fn(@ptrCast(&self.name));
+        self.answer = self.lookup_fn(self.lookup_ctx, @ptrCast(&self.name));
         self.done.set(io);
     }
 
@@ -1091,7 +1093,7 @@ const Resolver = struct {
 /// the target host rather than assumed. It is still an unbounded call —
 /// getaddrinfo has internal timeouts but none we control — which is why only
 /// `Resolver` calls it, off the main loop.
-fn lookup(host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
+fn lookup(_: ?*anyopaque, host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
     hints.ai_socktype = c.SOCK_STREAM;
@@ -1678,32 +1680,43 @@ test "a broker given by address is never looked up" {
     try testing.expect(resolver.task == null);
 }
 
-fn failingLookup(_: [*:0]const u8) Resolver.LookupError![4]u8 {
+fn failingLookup(_: ?*anyopaque, _: [*:0]const u8) Resolver.LookupError![4]u8 {
     return error.DnsResolutionFailed;
 }
 
 /// A lookup that answers only once the test lets it, standing in for a
 /// nameserver that takes its time.
+///
+/// Each test has its own: the gate and the count belong to the lookup they
+/// are passed with, and not to every test that uses one. Shared between the
+/// test and the task the lookup runs on, hence the atomics.
 const SlowLookup = struct {
-    var gate: std.Io.Event = .unset;
-    var calls: std.atomic.Value(u32) = .init(0);
+    gate: std.Io.Event = .unset,
+    calls: std.atomic.Value(u32) = .init(0),
 
-    fn lookup(name: [*:0]const u8) Resolver.LookupError![4]u8 {
-        _ = calls.fetchAdd(1, .monotonic);
-        gate.waitUncancelable(testing.io);
+    fn lookup(ctx: ?*anyopaque, name: [*:0]const u8) Resolver.LookupError![4]u8 {
+        const self: *SlowLookup = @ptrCast(@alignCast(ctx.?));
+        _ = self.calls.fetchAdd(1, .monotonic);
+        self.gate.waitUncancelable(testing.io);
         if (!std.mem.eql(u8, std.mem.span(name), "broker.example")) return error.DnsResolutionFailed;
         return .{ 10, 0, 0, 7 };
+    }
+
+    fn open(self: *SlowLookup) void {
+        self.gate.set(testing.io);
+    }
+
+    fn count(self: *const SlowLookup) u32 {
+        return self.calls.load(.monotonic);
     }
 };
 
 test "a slow lookup costs the caller one short wait, and its answer is collected later" {
-    SlowLookup.gate.reset();
-    SlowLookup.calls.store(0, .monotonic);
-
-    var resolver: Resolver = .{ .lookup_fn = &SlowLookup.lookup, .wait_ms = 20 };
+    var slow: SlowLookup = .{};
+    var resolver: Resolver = .{ .lookup_fn = &SlowLookup.lookup, .lookup_ctx = &slow, .wait_ms = 20 };
     defer resolver.deinit(testing.io);
     // Whatever fails below, the task must be let go or deinit waits for ever.
-    defer SlowLookup.gate.set(testing.io);
+    defer slow.open();
 
     // The regression: this call used to return only when the lookup did.
     try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
@@ -1711,16 +1724,16 @@ test "a slow lookup costs the caller one short wait, and its answer is collected
     try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
     try testing.expect(resolver.task != null);
 
-    SlowLookup.gate.set(testing.io);
+    slow.open();
     resolver.task.?.await(testing.io);
 
     try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolver.resolve(testing.io, "broker.example"));
-    try testing.expectEqual(@as(u32, 1), SlowLookup.calls.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), slow.count());
     try testing.expect(resolver.task == null);
 
     // The answer is used once: the next connect looks the name up afresh.
     try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolveEventually(&resolver, "broker.example"));
-    try testing.expectEqual(@as(u32, 2), SlowLookup.calls.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), slow.count());
 }
 
 /// `resolve`, carried on past `StillResolving` to the answer. A lookup that
