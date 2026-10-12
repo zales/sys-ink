@@ -27,7 +27,10 @@ jobs:
       - name: Unit tests, optimised as released
         run: zig build test -Doptimize=safe --summary all
 
-      - name: Type-check Linux-only modules
+      # The daemon itself, for the host's architecture and for both targets a
+      # release is built for. The tests cannot stand in for this: they run on
+      # one architecture, and the ARMv6 build has failed where they passed.
+      - name: Type-check for every release target
         run: zig build check
 
       - name: Formatting
