@@ -1,23 +1,23 @@
 const std = @import("std");
 const Frame = @import("waveshare_epd/epd2in9.zig").Frame;
-const display_config = @import("display_config.zig");
+const layout = @import("display_config.zig");
 const config = @import("config.zig");
+const parse = @import("parse.zig");
+const Reading = @import("reading.zig").Reading;
 const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const notice_text = @import("notice.zig");
-const parse = @import("parse.zig");
-const Reading = @import("reading.zig").Reading;
 
 /// Bytes per hardware row after the 90° rotation.
-const hw_bytes_per_row = display_config.DISPLAY_HEIGHT / 8;
+const hw_bytes_per_row = layout.DISPLAY_HEIGHT / 8;
 
 comptime {
     // The rotation below packs a whole hardware row from one logical column.
-    std.debug.assert(display_config.DISPLAY_HEIGHT % 8 == 0);
+    std.debug.assert(layout.DISPLAY_HEIGHT % 8 == 0);
     // Ties the layout constants to the driver: a mismatch would otherwise only
     // show up as a corrupted panel.
-    std.debug.assert(@sizeOf(Frame) == hw_bytes_per_row * display_config.DISPLAY_WIDTH);
+    std.debug.assert(@sizeOf(Frame) == hw_bytes_per_row * layout.DISPLAY_WIDTH);
 }
 
 /// Draws what the panel shows and hands it over as a frame.
@@ -26,6 +26,9 @@ comptime {
 /// and no I/O. Getting the frame onto the glass is `panel.zig`'s business, which
 /// is what lets the tests, the golden frame and the simulators run this on any
 /// host with nothing standing in for the hardware.
+///
+/// Where things go is `display_config.zig`'s business, imported as `layout`:
+/// this file says what is drawn and in which order, in the layout's own terms.
 pub const Renderer = struct {
     const Self = @This();
 
@@ -49,16 +52,16 @@ pub const Renderer = struct {
     grid_cached: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !Self {
-        var bitmap = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        var bitmap = try Bitmap.init(allocator, layout.DISPLAY_WIDTH, layout.DISPLAY_HEIGHT);
         errdefer bitmap.deinit();
-        var notice = try Bitmap.init(allocator, display_config.DISPLAY_WIDTH, display_config.DISPLAY_HEIGHT);
+        var notice = try Bitmap.init(allocator, layout.DISPLAY_WIDTH, layout.DISPLAY_HEIGHT);
         errdefer notice.deinit();
 
         const panel_buffer = try allocator.create(Frame);
         errdefer allocator.destroy(panel_buffer);
 
-        const bmp_row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
-        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * display_config.DISPLAY_HEIGHT);
+        const bmp_row_bytes = @divCeil(layout.DISPLAY_WIDTH, 8);
+        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * layout.DISPLAY_HEIGHT);
 
         return .{
             .bitmap = bitmap,
@@ -75,6 +78,74 @@ pub const Renderer = struct {
         self.allocator.free(self.bmp_buffer);
         self.allocator.destroy(self.panel_buffer);
     }
+
+    // ------------------------------------------------------------------------
+    // Drawing on the dashboard, in the layout's terms
+    // ------------------------------------------------------------------------
+
+    fn drawText(self: *Self, at: layout.Point, text: []const u8, font: FontType) void {
+        self.bitmap.drawTextFont(at.x, at.y, text, font, .Black);
+    }
+
+    fn drawIcon(self: *Self, icon: layout.Icon) void {
+        self.drawText(icon.at, icon.glyph, icon.font);
+    }
+
+    fn drawRule(self: *Self, rule: layout.Line) void {
+        self.bitmap.drawLine(rule.from.x, rule.from.y, rule.to.x, rule.to.y, .Black);
+    }
+
+    fn clearArea(self: *Self, area: layout.Rect) void {
+        self.bitmap.fillRect(area.x, area.y, area.width, area.height, .White);
+    }
+
+    /// Replace what `slot` shows with `text`, in the slot's own font.
+    fn fillSlot(self: *Self, slot: layout.Slot, text: []const u8) void {
+        self.clearArea(slot.area);
+        self.drawText(slot.text, text, slot.font);
+    }
+
+    fn fadeArea(self: *Self, area: layout.Rect) void {
+        self.bitmap.fadeRect(area.x, area.y, area.width, area.height);
+    }
+
+    /// How a reading is marked, besides what it says.
+    const Marks = struct {
+        /// At or over its threshold: the whole slot is inverted.
+        critical: bool = false,
+        /// The latest attempt to take it failed: the slot is faded.
+        stale: bool = false,
+    };
+
+    /// As `fillSlot`, marked as `marks` says.
+    fn fillReading(self: *Self, slot: layout.Slot, text: []const u8, marks: Marks) void {
+        self.fillSlot(slot, text);
+        // Before the inversion, so a critical value that has gone stale is
+        // faded white-on-black rather than having its background eaten into.
+        if (marks.stale) self.fadeArea(slot.area);
+        if (marks.critical) self.bitmap.invertRect(slot.area.x, slot.area.y, slot.area.width, slot.area.height);
+    }
+
+    /// What a slot says: the value through `fmt`, or a dash where there is
+    /// none — "0%" for a reading nobody took would claim one.
+    fn slotText(buf: []u8, comptime fmt: []const u8, value: anytype) []const u8 {
+        const known = value orelse return "-";
+        return std.mem.print(buf, fmt, .{known}) catch "?";
+    }
+
+    /// A reading that has a threshold, in its slot: inverted at or over it,
+    /// for as long as the last value known is.
+    fn renderGauge(self: *Self, slot: layout.Slot, comptime fmt: []const u8, reading: anytype, threshold: u8) void {
+        var buf: [16]u8 = undefined;
+        self.fillReading(slot, slotText(&buf, fmt, reading.value), .{
+            .critical = if (reading.value) |value| value >= threshold else false,
+            .stale = reading.isStale(),
+        });
+    }
+
+    // ------------------------------------------------------------------------
+    // Whole screens
+    // ------------------------------------------------------------------------
 
     /// Draw the transient loading screen, shown while metrics initialize.
     pub fn drawLoadingScreen(self: *Self) void {
@@ -94,101 +165,34 @@ pub const Renderer = struct {
     /// along with it; the daemon sets that again with its next reading.
     fn drawSplash(self: *Self, subtitle: []const u8, background: Graphics.Color) void {
         const ink: Graphics.Color = if (background == .White) .Black else .White;
+        const splash = layout.splash;
+        const b = &self.bitmap;
 
         self.notice_shown = false;
         self.warn_fault = false;
 
-        self.bitmap.clear(background);
-        self.bitmap.fillRect(display_config.SLEEP_LINE_X, display_config.SLEEP_LINE_Y, display_config.SLEEP_LINE_W, display_config.SLEEP_LINE_H, ink);
-        self.bitmap.drawTextFont(display_config.SLEEP_ICON_X, display_config.SLEEP_ICON_Y, display_config.ICON_SLEEP_NET, .Material50, ink);
-        self.bitmap.drawTextFont(display_config.SLEEP_TITLE_X, display_config.SLEEP_TITLE_Y, "SysInk", .Ubuntu34, ink);
-        self.bitmap.drawTextFont(display_config.SLEEP_SUBTITLE_X, display_config.SLEEP_SUBTITLE_Y, subtitle, .Ubuntu14, ink);
+        b.clear(background);
+        b.fillRect(splash.bar.x, splash.bar.y, splash.bar.width, splash.bar.height, ink);
+        b.drawTextFont(splash.emblem.at.x, splash.emblem.at.y, splash.emblem.glyph, splash.emblem.font, ink);
+        b.drawTextFont(splash.title_at.x, splash.title_at.y, "SysInk", .Ubuntu34, ink);
+        b.drawTextFont(splash.subtitle_at.x, splash.subtitle_at.y, subtitle, .Ubuntu14, ink);
     }
 
-    /// Render grid layout
+    /// Draw everything on the dashboard that never changes: the dividers, the
+    /// headings and the fixed icons.
     pub fn renderGrid(self: *Self) void {
         if (self.grid_cached) return;
 
         self.bitmap.clear(.White);
 
-        // Draw vertical divider lines
-        self.bitmap.drawLine(display_config.VERTICAL_LINE_1, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_1, display_config.HORIZONTAL_LINE_MAIN, .Black);
-        self.bitmap.drawLine(display_config.VERTICAL_LINE_2, display_config.CPU_LINE_Y, display_config.VERTICAL_LINE_2, display_config.HORIZONTAL_LINE_MAIN, .Black);
-
-        // Draw main horizontal divider
-        self.bitmap.drawLine(0, display_config.HORIZONTAL_LINE_MAIN, display_config.DISPLAY_WIDTH, display_config.HORIZONTAL_LINE_MAIN, .Black);
-
-        // CPU section
-        self.bitmap.drawLine(26, display_config.CPU_LINE_Y, 99, display_config.CPU_LINE_Y, .Black);
-        self.bitmap.drawTextFont(1, display_config.CPU_LABEL_Y, "cpu", .Ubuntu14, .Black);
-        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_LOAD, display_config.ICON_CPU, .Material24, .Black);
-        self.bitmap.drawTextFont(display_config.CPU_ICON_X, display_config.CPU_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
-
-        // APT section
-        self.bitmap.drawTextFont(display_config.APT_LABEL_X, display_config.APT_LABEL_Y, "apt", .Ubuntu14, .Black);
-        self.bitmap.drawLine(226, display_config.APT_LINE_Y, 248, display_config.APT_LINE_Y, .Black);
-
-        // NET section
-        self.bitmap.drawTextFont(display_config.NET_LABEL_X, display_config.NET_LABEL_Y, "net", .Ubuntu14, .Black);
-        self.bitmap.drawLine(display_config.NET_LINE_X, display_config.NET_LINE_Y, display_config.NET_LINE_X, display_config.HORIZONTAL_LINE_MAIN, .Black);
-        self.bitmap.drawLine(272, display_config.NET_LINE_Y, display_config.DISPLAY_WIDTH, display_config.NET_LINE_Y, .Black);
-
-        // MEM section
-        self.bitmap.drawTextFont(display_config.MEM_LABEL_X, display_config.MEM_LABEL_Y, "mem", .Ubuntu14, .Black);
-        self.bitmap.drawLine(38, display_config.MEM_LINE_Y, display_config.SECTION_CPU_RIGHT, display_config.MEM_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.MEM_ICON_X, display_config.MEM_ICON_Y, display_config.ICON_MEMORY, .Material24, .Black);
-
-        // Disk section
-        self.bitmap.drawTextFont(display_config.DISK_LABEL_X, display_config.DISK_LABEL_Y, "disk", .Ubuntu14, .Black);
-        self.bitmap.drawLine(130, display_config.DISK_LINE_Y, display_config.SECTION_DISK_RIGHT, display_config.DISK_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_DISK, display_config.ICON_HARD_DRIVE, .Material24, .Black);
-        self.bitmap.drawTextFont(display_config.DISK_ICON_X, display_config.DISK_ICON_Y_TEMP, display_config.ICON_TEMPERATURE, .Material24, .Black);
-
-        // FAN section
-        self.bitmap.drawTextFont(display_config.FAN_LABEL_X, display_config.FAN_LABEL_Y, "fan", .Ubuntu14, .Black);
-        // Stops short of the "rpm" that renderFanSpeed draws at its end.
-        self.bitmap.drawLine(124, display_config.FAN_LINE_Y, display_config.FAN_LINE_END_X, display_config.FAN_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.FAN_ICON_X, display_config.FAN_ICON_Y, display_config.ICON_FAN, .Material24, .Black);
-
-        // Traffic section
-        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_LABEL_X, display_config.TRAFFIC_DOWN_LABEL_Y, "down", .Ubuntu14, .Black);
-        self.bitmap.drawLine(242, display_config.TRAFFIC_DOWN_LINE_Y, 261, display_config.TRAFFIC_DOWN_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.TRAFFIC_DOWN_ICON_X, display_config.TRAFFIC_DOWN_ICON_Y, display_config.ICON_DOWNLOAD, .Material24, .Black);
-
-        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_LABEL_X, display_config.TRAFFIC_UP_LABEL_Y, "up", .Ubuntu14, .Black);
-        self.bitmap.drawLine(222, display_config.TRAFFIC_UP_LINE_Y, 261, display_config.TRAFFIC_UP_LINE_Y, .Black);
-        self.bitmap.drawTextFont(display_config.TRAFFIC_UP_ICON_X, display_config.TRAFFIC_UP_ICON_Y, display_config.ICON_UPLOAD, .Material24, .Black);
-
-        // Status bar icons
-        self.bitmap.drawTextFont(display_config.IP_ICON_X, display_config.IP_ICON_Y, display_config.ICON_NETWORK, .Material14, .Black);
-        self.bitmap.drawTextFont(display_config.UPTIME_ICON_X, display_config.UPTIME_ICON_Y, display_config.ICON_UPTIME, .Material14, .Black);
+        for (layout.grid.lines) |divider| self.drawRule(divider);
+        for (layout.headers) |header| {
+            self.drawText(header.at, header.label, .Ubuntu14);
+            self.drawRule(header.rule);
+        }
+        for (layout.icons) |icon| self.drawIcon(icon);
 
         self.grid_cached = true;
-    }
-
-    /// Simple unified text rendering in a defined area with optional inversion
-    fn drawTextInArea(self: *Self, text: []const u8, font: FontType, text_x: i32, text_y: i32, area_x: i32, area_y: i32, area_w: u32, area_h: u32, invert: bool, stale: bool) void {
-        // Clear the area
-        self.bitmap.fillRect(area_x, area_y, area_w, area_h, .White);
-
-        // Draw text
-        self.bitmap.drawTextFont(text_x, text_y, text, font, .Black);
-
-        // Before the inversion, so a critical value that has gone stale is
-        // faded white-on-black rather than having its background eaten into.
-        if (stale) self.bitmap.fadeRect(area_x, area_y, area_w, area_h);
-
-        // Invert if critical
-        if (invert) {
-            self.bitmap.invertRect(area_x, area_y, area_w, area_h);
-        }
-    }
-
-    /// What a slot says: the value through `fmt`, or a dash where there is
-    /// none — "0%" for a reading nobody took would claim one.
-    fn slotText(buf: []u8, comptime fmt: []const u8, value: anytype) []const u8 {
-        const known = value orelse return "-";
-        return std.mem.print(buf, fmt, .{known}) catch "?";
     }
 
     /// Show or clear the hardware-fault warning: the status bar is drawn inverted.
@@ -204,28 +208,30 @@ pub const Renderer = struct {
     /// smallest is cut off with an ellipsis.
     pub fn showNotice(self: *Self, text: []const u8) void {
         const b = &self.notice;
+        const page = layout.notice;
         b.clear(.White);
 
-        b.drawTextFont(display_config.NOTICE_LABEL_X, display_config.NOTICE_LABEL_Y, display_config.NOTICE_LABEL, .Ubuntu14, .Black);
-        const rule_x: i32 = @intCast(display_config.NOTICE_LABEL_X + b.measureText(display_config.NOTICE_LABEL, .Ubuntu14) + 3);
-        b.drawLine(rule_x, display_config.NOTICE_LINE_Y, display_config.DISPLAY_WIDTH - 1, display_config.NOTICE_LINE_Y, .Black);
+        b.drawTextFont(page.label_at.x, page.label_at.y, page.label, .Ubuntu14, .Black);
+        const label_width: i32 = @intCast(b.measureText(page.label, .Ubuntu14));
+        const rule_x = page.label_at.x + label_width + page.rule_gap;
+        b.drawLine(rule_x, page.rule_y, layout.DISPLAY_WIDTH - 1, page.rule_y, .Black);
 
         var folded_buf: [notice_text.max_len]u8 = undefined;
         const folded = notice_text.foldToAscii(&folded_buf, text);
 
-        var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+        var lines: [page.max_lines][]const u8 = undefined;
         var last_buf: [notice_text.max_len + 3]u8 = undefined;
-        const layout = self.layoutNotice(folded, &lines, &last_buf);
+        const fitted = self.layoutNotice(folded, &lines, &last_buf);
 
         // The block is centred vertically in the body, left-aligned.
-        const line_h = b.getLineHeight(layout.font);
-        const block_h = line_h * @as(u32, @intCast(layout.count));
-        var baseline: i32 = display_config.NOTICE_BODY_Y +
-            @as(i32, @intCast((display_config.NOTICE_BODY_H - block_h) / 2)) +
-            b.getFontAscent(layout.font);
+        const line_h = b.getLineHeight(fitted.font);
+        const block_h = line_h * @as(u32, @intCast(fitted.count));
+        var baseline: i32 = page.body.y +
+            @as(i32, @intCast((page.body.height - block_h) / 2)) +
+            Bitmap.fontAscent(fitted.font);
 
-        for (lines[0..layout.count]) |line| {
-            b.drawTextFont(display_config.NOTICE_BODY_X, baseline, line, layout.font, .Black);
+        for (lines[0..fitted.count]) |line| {
+            b.drawTextFont(page.body.x, baseline, line, fitted.font, .Black);
             baseline += @intCast(line_h);
         }
 
@@ -245,25 +251,31 @@ pub const Renderer = struct {
     /// Wrap `text` into `lines` in the largest notice font that holds all of
     /// it. Failing that, the smallest font's lines as far as they go, the last
     /// rebuilt in `last_buf` to end in an ellipsis.
-    fn layoutNotice(self: *Self, text: []const u8, lines: *[display_config.NOTICE_MAX_LINES][]const u8, last_buf: []u8) NoticeLayout {
+    fn layoutNotice(
+        self: *Self,
+        text: []const u8,
+        lines: *[layout.notice.max_lines][]const u8,
+        last_buf: []u8,
+    ) NoticeLayout {
         const b = &self.notice;
-        const width = display_config.NOTICE_BODY_W;
+        const body = layout.notice.body;
+        const fonts = layout.notice.fonts;
 
         var max: usize = 0;
-        for (display_config.NOTICE_FONTS) |font| {
-            max = @min(lines.len, display_config.NOTICE_BODY_H / b.getLineHeight(font));
-            const needed = b.wrapText(text, font, width, lines[0..max]);
+        for (fonts) |font| {
+            max = @min(lines.len, body.height / b.getLineHeight(font));
+            const needed = b.wrapText(text, font, body.width, lines[0..max]);
             if (needed <= max) return .{ .font = font, .count = needed };
         }
 
         // The loop left the smallest font's lines in place.
-        const font = display_config.NOTICE_FONTS[display_config.NOTICE_FONTS.len - 1];
+        const font = fonts[fonts.len - 1];
         const ellipsis = "...";
 
         var last = lines[max - 1];
         while (true) {
             last = std.mem.trimEnd(u8, last, " ");
-            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
+            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= body.width) break;
             // A whole codepoint at a time: the degree sign survives folding
             // and is two bytes, and half of it would eat the ellipsis.
             var cut = last.len - 1;
@@ -277,6 +289,10 @@ pub const Renderer = struct {
         return .{ .font = font, .count = max };
     }
 
+    // ------------------------------------------------------------------------
+    // Handing the frame over
+    // ------------------------------------------------------------------------
+
     /// What the panel shows: the notice while there is one, else the dashboard.
     fn frameBitmap(self: *Self) *Bitmap {
         return if (self.notice_shown) &self.notice else &self.bitmap;
@@ -285,7 +301,8 @@ pub const Renderer = struct {
     /// On whatever is shown: a notice can stay up for a day, and a hardware
     /// fault must not wait that long to be seen.
     fn invertStatusBar(self: *Self) void {
-        self.frameBitmap().invertRect(0, display_config.STATUS_BAR_Y, display_config.DISPLAY_WIDTH, display_config.STATUS_BAR_H);
+        const bar = layout.status_bar;
+        self.frameBitmap().invertRect(bar.x, bar.y, bar.width, bar.height);
     }
 
     /// Toggle the fault overlay on the frame being shown. Its own inverse, so a
@@ -302,7 +319,7 @@ pub const Renderer = struct {
     /// The current frame in the panel's own format, fault overlay included:
     /// rotated 90° and packed to 1 bit. Borrowed: valid until the next call.
     pub fn panelFrame(self: *Self) *const Frame {
-        if (display_config.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
+        if (layout.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
 
         self.toggleFaultOverlay();
         defer self.toggleFaultOverlay();
@@ -315,7 +332,7 @@ pub const Renderer = struct {
     /// sending it to the panel: the web preview, the BMP export and the
     /// simulators. Borrowed: valid until the next call.
     pub fn packedFrame(self: *Self) []const u8 {
-        if (display_config.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
+        if (layout.DEBUG_TEXT_AREAS) self.drawTextAreaFrames();
 
         self.toggleFaultOverlay();
         defer self.toggleFaultOverlay();
@@ -325,47 +342,10 @@ pub const Renderer = struct {
     }
 
     fn drawTextAreaFrames(self: *Self) void {
-        const color: Graphics.Color = .Black;
-
-        // CPU
-        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
-        self.bitmap.drawRect(display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, color);
-
-        // MEM
-        self.bitmap.drawRect(display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, color);
-
-        // Disk
-        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
-        self.bitmap.drawRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, color);
-
-        // FAN
-        const ascent_fan = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.drawRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent_fan, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, color);
-
-        // APT
-        const ascent_apt = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.drawRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent_apt, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, color);
-
-        // NET icon/state
-        const ascent_net = self.bitmap.getFontAscent(.Material24);
-        self.bitmap.drawRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent_net, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, color);
-
-        // IP
-        self.bitmap.drawRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, color);
-
-        // UPTIME
-        self.bitmap.drawRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, color);
-
-        // SIGNAL
-        self.bitmap.drawRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, color);
-
-        // Traffic down
-        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_VALUE_X, display_config.TRAFFIC_DOWN_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
-        self.bitmap.drawRect(display_config.TRAFFIC_DOWN_UNIT_X, display_config.TRAFFIC_DOWN_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
-
-        // Traffic up
-        self.bitmap.drawRect(display_config.TRAFFIC_UP_VALUE_X, display_config.TRAFFIC_UP_AREA_Y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, color);
-        self.bitmap.drawRect(display_config.TRAFFIC_UP_UNIT_X, display_config.TRAFFIC_UP_UNIT_AREA_Y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, color);
+        for (layout.areas) |named| {
+            const area = named.area;
+            self.bitmap.drawRect(area.x, area.y, area.width, area.height, .Black);
+        }
     }
 
     /// Convert the 8-bit bitmap to the panel's 1-bit packed format, rotating 90°
@@ -425,6 +405,10 @@ pub const Renderer = struct {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // Readings
+    // ------------------------------------------------------------------------
+    //
     // Each reading has a slot of its own, drawn by its own call, so a sensor
     // that fails leaves only its own slot stale. Load and temperature used to
     // be drawn together, and a machine without a thermal zone never showed its
@@ -438,76 +422,49 @@ pub const Renderer = struct {
 
     /// Render CPU load
     pub fn renderCpuLoad(self: *Self, load: Reading(u8)) void {
-        const is_critical = if (load.value) |v| v >= config.Config.threshold_cpu_critical else false;
-
-        var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}%", load.value);
-        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_LOAD, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_LOAD, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical, load.isStale());
+        self.renderGauge(layout.cpu.load, "{d}%", load, config.Config.threshold_cpu_critical);
     }
 
     /// Render CPU temperature
     pub fn renderCpuTemp(self: *Self, temp: Reading(u32)) void {
-        const is_critical = if (temp.value) |t| t >= config.Config.threshold_temp_critical else false;
-
-        var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}°C", temp.value);
-        self.drawTextInArea(text, .Ubuntu26, display_config.CPU_VALUE_X, display_config.CPU_VALUE_Y_TEMP, display_config.CPU_AREA_X, display_config.CPU_AREA_Y_TEMP, display_config.TEXT_AREA_CPU.width, display_config.TEXT_AREA_CPU.height, is_critical, temp.isStale());
+        self.renderGauge(layout.cpu.temp, "{d}°C", temp, config.Config.threshold_temp_critical);
     }
 
     /// Render memory usage
     pub fn renderMemory(self: *Self, usage: Reading(u8)) void {
-        const is_critical = if (usage.value) |u| u >= config.Config.threshold_mem_critical else false;
-
-        var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}%", usage.value);
-        self.drawTextInArea(text, .Ubuntu26, display_config.MEM_VALUE_X, display_config.MEM_VALUE_Y, display_config.MEM_AREA_X, display_config.MEM_AREA_Y, display_config.TEXT_AREA_MEM.width, display_config.TEXT_AREA_MEM.height, is_critical, usage.isStale());
+        self.renderGauge(layout.mem.usage, "{d}%", usage, config.Config.threshold_mem_critical);
     }
 
     /// Render root filesystem usage
     pub fn renderDiskUsage(self: *Self, usage: Reading(u8)) void {
-        const is_critical = if (usage.value) |u| u >= config.Config.threshold_disk_critical else false;
-
-        var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}%", usage.value);
-        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_DISK, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_DISK, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical, usage.isStale());
+        self.renderGauge(layout.disk.usage, "{d}%", usage, config.Config.threshold_disk_critical);
     }
 
     /// Render disk temperature. Unavailable means the hardware has no sensor,
     /// shown as a dash: "0°C" claimed a reading nobody took.
     pub fn renderDiskTemp(self: *Self, temp: Reading(u32)) void {
-        const is_critical = if (temp.value) |t| t >= config.Config.threshold_temp_critical else false;
-
-        var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}°C", temp.value);
-        self.drawTextInArea(text, .Ubuntu26, display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, is_critical, temp.isStale());
+        self.renderGauge(layout.disk.temp, "{d}°C", temp, config.Config.threshold_temp_critical);
     }
 
     /// Render fan speed. Unavailable means there is no fan, shown as a dash;
     /// a fan that is present and stopped still reads 0. The unit is in the
     /// header.
     pub fn renderFanSpeed(self: *Self, rpm: Reading(u32)) void {
-        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
-
         var buf: [16]u8 = undefined;
-        const text = slotText(&buf, "{d}", rpm.value);
-        self.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, text, .Ubuntu24, .Black);
+        self.fillSlot(layout.fan.speed, slotText(&buf, "{d}", rpm.value));
         // Before the unit goes on: it is a label, and no less true for the
         // reading under it being old.
-        if (rpm.isStale()) self.bitmap.fadeRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height);
+        if (rpm.isStale()) self.fadeArea(layout.fan.speed.area);
 
         // The unit sits in the header, as it does for traffic, and is drawn
         // here rather than with the grid for the same reason traffic's is:
         // the "p" descends into the value's clear area, which erases it.
-        self.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+        self.drawText(layout.fan.unit_at, "rpm", .Ubuntu14);
     }
 
     /// Render IP address
     pub fn renderIpAddress(self: *Self, ip: []const u8) void {
-        self.bitmap.fillRect(display_config.IP_VALUE_X, display_config.IP_AREA_Y, display_config.TEXT_AREA_IP.width, display_config.TEXT_AREA_IP.height, .White);
-
-        const display_ip = if (ip.len > 15) ip[0..15] else ip;
-        self.bitmap.drawTextFont(display_config.IP_VALUE_X, display_config.IP_VALUE_Y, display_ip, .Ubuntu14, .Black);
+        self.fillSlot(layout.ip.address, if (ip.len > 15) ip[0..15] else ip);
     }
 
     /// Render uptime.
@@ -521,14 +478,12 @@ pub const Renderer = struct {
     /// form: the status bar's small print does not survive being faded, and an
     /// uptime that has stopped counting would only be a wrong one.
     pub fn renderUptime(self: *Self, uptime: ?parse.Uptime) void {
-        self.bitmap.fillRect(display_config.UPTIME_VALUE_X, display_config.UPTIME_AREA_Y, display_config.TEXT_AREA_UPTIME.width, display_config.TEXT_AREA_UPTIME.height, .White);
+        const slot = layout.uptime.elapsed;
+        const known = uptime orelse return self.fillSlot(slot, "-");
 
-        var buf = display_config.UptimeBuffers{};
-        const text = if (uptime) |u| blk: {
-            const candidates = display_config.uptimeCandidates(&buf, u.days, u.hours, u.minutes);
-            break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.TEXT_AREA_UPTIME.width);
-        } else "-";
-        self.bitmap.drawTextFont(display_config.UPTIME_VALUE_X, display_config.UPTIME_VALUE_Y, text, .Ubuntu14, .Black);
+        var buf = layout.UptimeBuffers{};
+        const candidates = layout.uptimeCandidates(&buf, known.days, known.hours, known.minutes);
+        self.fillSlot(slot, self.bitmap.fitText(&candidates, slot.font, slot.area.width));
     }
 
     /// Render signal strength.
@@ -537,23 +492,16 @@ pub const Renderer = struct {
     /// dropped at that end of the range rather than clipping the number. -100
     /// dBm is effectively no signal, where the exact unit matters least.
     pub fn renderSignalStrength(self: *Self, signal: ?i32) void {
-        self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
-
-        const icon = if (signal != null) display_config.ICON_WIFI_SIGNAL else display_config.ICON_WIFI_NO_SIGNAL;
-        self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, icon, .Material14, .Black);
-
         var with_unit: [16]u8 = undefined;
         var bare: [16]u8 = undefined;
 
-        const text = if (signal) |s| blk: {
-            const candidates = [_][]const u8{
-                std.mem.print(&with_unit, "{d} dBm", .{s}) catch "?",
-                std.mem.print(&bare, "{d}", .{s}) catch "?",
-            };
-            break :blk self.bitmap.fitText(&candidates, .Ubuntu14, display_config.SIGNAL_VALUE_MAX_W);
-        } else "N/A";
-
-        self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, text, .Ubuntu14, .Black);
+        const known = signal orelse return self.fillSignalSlot(layout.glyph.wifi_no_signal, "N/A");
+        const candidates = [_][]const u8{
+            std.mem.print(&with_unit, "{d} dBm", .{known}) catch "?",
+            std.mem.print(&bare, "{d}", .{known}) catch "?",
+        };
+        const text = self.bitmap.fitText(&candidates, layout.signal.reading.font, layout.signal.text_max_width);
+        self.fillSignalSlot(layout.glyph.wifi_signal, text);
     }
 
     /// Show the machine as wired in the signal slot.
@@ -561,9 +509,14 @@ pub const Renderer = struct {
     /// On a cable there is no Wi-Fi reading, and the crossed-out Wi-Fi icon
     /// with "N/A" that used to fill the slot read as a fault.
     pub fn renderWired(self: *Self) void {
-        self.bitmap.fillRect(display_config.SIGNAL_AREA_X, display_config.SIGNAL_AREA_Y, display_config.TEXT_AREA_SIGNAL.width, display_config.TEXT_AREA_SIGNAL.height, .White);
-        self.bitmap.drawTextFont(display_config.SIGNAL_ICON_X, display_config.SIGNAL_ICON_Y, display_config.ICON_ETHERNET, .Material14, .Black);
-        self.bitmap.drawTextFont(display_config.SIGNAL_VALUE_X, display_config.SIGNAL_VALUE_Y, "LAN", .Ubuntu14, .Black);
+        self.fillSignalSlot(layout.glyph.ethernet, "LAN");
+    }
+
+    /// The signal slot holds an icon that changes with what is beside it.
+    fn fillSignalSlot(self: *Self, glyph: []const u8, text: []const u8) void {
+        self.clearArea(layout.signal.reading.area);
+        self.drawText(layout.signal.icon_at, glyph, .Material14);
+        self.drawText(layout.signal.reading.text, text, layout.signal.reading.font);
     }
 
     /// Render network traffic, from rates in bytes per second.
@@ -571,49 +524,17 @@ pub const Renderer = struct {
         const down: ?parse.Scaled = if (rates.value) |r| parse.scaleBytes(r.rx_bytes_per_sec) else null;
         const up: ?parse.Scaled = if (rates.value) |r| parse.scaleBytes(r.tx_bytes_per_sec) else null;
 
-        self.renderTrafficRow(
-            down,
-            rates.isStale(),
-            display_config.TRAFFIC_DOWN_VALUE_X,
-            display_config.TRAFFIC_DOWN_VALUE_Y,
-            display_config.TRAFFIC_DOWN_AREA_Y,
-            display_config.TRAFFIC_DOWN_UNIT_X,
-            display_config.TRAFFIC_DOWN_UNIT_Y,
-            display_config.TRAFFIC_DOWN_UNIT_AREA_Y,
-        );
-        self.renderTrafficRow(
-            up,
-            rates.isStale(),
-            display_config.TRAFFIC_UP_VALUE_X,
-            display_config.TRAFFIC_UP_VALUE_Y,
-            display_config.TRAFFIC_UP_AREA_Y,
-            display_config.TRAFFIC_UP_UNIT_X,
-            display_config.TRAFFIC_UP_UNIT_Y,
-            display_config.TRAFFIC_UP_UNIT_AREA_Y,
-        );
+        self.renderTrafficRow(layout.traffic.down, down, rates.isStale());
+        self.renderTrafficRow(layout.traffic.up, up, rates.isStale());
     }
 
     /// One direction's rate. With no rate there is no unit to put on it
     /// either, so the value is a dash and the unit's place stays empty.
-    fn renderTrafficRow(
-        self: *Self,
-        rate: ?parse.Scaled,
-        stale: bool,
-        value_x: i32,
-        value_y: i32,
-        value_area_y: i32,
-        unit_x: i32,
-        unit_y: i32,
-        unit_area_y: i32,
-    ) void {
-        self.bitmap.fillRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        self.bitmap.fillRect(unit_x, unit_area_y, display_config.TEXT_AREA_TRAFFIC_UNIT.width, display_config.TEXT_AREA_TRAFFIC_UNIT.height, .White);
+    fn renderTrafficRow(self: *Self, row: layout.TrafficRow, rate: ?parse.Scaled, stale: bool) void {
+        self.clearArea(row.value.area);
+        self.clearArea(row.unit.area);
 
-        const known = rate orelse {
-            self.bitmap.drawTextFont(value_x, value_y, "-", .Ubuntu20, .Black);
-            return;
-        };
-        const speed = known.value;
+        const known = rate orelse return self.drawText(row.value.text, "-", row.value.font);
 
         // scaleBytes keeps the value under 1000, so two decimals always fit.
         // The ladder is a guard against that changing, since this slot ends at
@@ -622,20 +543,20 @@ pub const Renderer = struct {
         var one_dp: [32]u8 = undefined;
         var no_dp: [32]u8 = undefined;
         const candidates = [_][]const u8{
-            std.mem.print(&two_dp, "{d:.2}", .{speed}) catch "?",
-            std.mem.print(&one_dp, "{d:.1}", .{speed}) catch "?",
-            std.mem.print(&no_dp, "{d:.0}", .{speed}) catch "?",
+            std.mem.print(&two_dp, "{d:.2}", .{known.value}) catch "?",
+            std.mem.print(&one_dp, "{d:.1}", .{known.value}) catch "?",
+            std.mem.print(&no_dp, "{d:.0}", .{known.value}) catch "?",
         };
-        const value_text = self.bitmap.fitText(&candidates, .Ubuntu20, display_config.TEXT_AREA_TRAFFIC_VALUE.width);
-        self.bitmap.drawTextFont(value_x, value_y, value_text, .Ubuntu20, .Black);
+        const value = self.bitmap.fitText(&candidates, row.value.font, row.value.area.width);
+        self.drawText(row.value.text, value, row.value.font);
 
         var unit_buf: [32]u8 = undefined;
-        const unit_text = std.mem.print(&unit_buf, "{s}/s", .{known.unit}) catch "?";
-        self.bitmap.drawTextFont(unit_x, unit_y, unit_text, .Ubuntu14, .Black);
+        const unit = std.mem.print(&unit_buf, "{s}/s", .{known.unit}) catch "?";
+        self.drawText(row.unit.text, unit, row.unit.font);
 
         // The value only. The unit is in the header's small print, which
         // does not survive fading, and the number is no use without it.
-        if (stale) self.bitmap.fadeRect(value_x, value_area_y, display_config.TEXT_AREA_TRAFFIC_VALUE.width, display_config.TEXT_AREA_TRAFFIC_VALUE.height);
+        if (stale) self.fadeArea(row.value.area);
     }
 
     /// Render APT updates count. Unavailable means the background check has
@@ -644,22 +565,16 @@ pub const Renderer = struct {
     /// failed and the count is an earlier one's, which at the slow interval
     /// makes it hours old at the least.
     pub fn renderAptUpdates(self: *Self, count: Reading(u32)) void {
-        const ascent = self.bitmap.getFontAscent(.Ubuntu24);
-        self.bitmap.fillRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height, .White);
-        defer if (count.isStale()) self.bitmap.fadeRect(display_config.APT_VALUE_X, display_config.APT_VALUE_Y - ascent, display_config.TEXT_AREA_APT.width, display_config.TEXT_AREA_APT.height);
+        const slot = layout.apt.count;
+        self.clearArea(slot.area);
+        defer if (count.isStale()) self.fadeArea(slot.area);
 
-        const known = count.value orelse {
-            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, "-", .Ubuntu24, .Black);
-            return;
-        };
+        const known = count.value orelse return self.drawText(slot.text, "-", slot.font);
+        if (known == 0) return self.drawText(slot.text, layout.glyph.check, .Material24);
 
-        if (known == 0) {
-            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, display_config.ICON_CHECK, .Material24, .Black);
-        } else {
-            var buf: [16]u8 = undefined;
-            const label = self.aptLabel(&buf, known);
-            self.bitmap.drawTextFont(display_config.APT_VALUE_X, display_config.APT_VALUE_Y, label.text, label.font, .Black);
-        }
+        var buf: [16]u8 = undefined;
+        const label = self.aptLabel(&buf, known);
+        self.drawText(slot.text, label.text, label.font);
     }
 
     /// Fonts the APT count steps down through, largest first.
@@ -668,7 +583,7 @@ pub const Renderer = struct {
     /// slot, and a freshly flashed image is routinely hundreds of packages
     /// behind. The overflow crossed the divider at x=249 and, lying outside
     /// the area this slot clears, stayed on the panel after the count shrank.
-    const apt_fonts = [_]FontType{ .Ubuntu24, .Ubuntu20, .Ubuntu14 };
+    const apt_fonts = [_]FontType{ layout.apt.count.font, .Ubuntu20, .Ubuntu14 };
 
     const AptLabel = struct { text: []const u8, font: FontType };
 
@@ -676,7 +591,7 @@ pub const Renderer = struct {
     /// font holds it. Same baseline in every font, so smaller ones sit on
     /// the same line.
     fn aptLabel(self: *Self, buf: []u8, count: u32) AptLabel {
-        const width = display_config.TEXT_AREA_APT.width;
+        const width = layout.apt.count.area.width;
         const text = std.mem.print(buf, "{d}", .{count}) catch "?";
 
         for (apt_fonts) |font| {
@@ -687,11 +602,7 @@ pub const Renderer = struct {
 
     /// Render internet connection status
     pub fn renderInternetStatus(self: *Self, connected: bool) void {
-        const ascent = self.bitmap.getFontAscent(.Material24);
-        self.bitmap.fillRect(display_config.NET_ICON_X, display_config.NET_ICON_Y - ascent, display_config.TEXT_AREA_NET.width, display_config.TEXT_AREA_NET.height, .White);
-
-        const icon = if (connected) display_config.ICON_WIFI_OK else display_config.ICON_WIFI_OFF;
-        self.bitmap.drawTextFont(display_config.NET_ICON_X, display_config.NET_ICON_Y, icon, .Material24, .Black);
+        self.fillSlot(layout.net.status, if (connected) layout.glyph.online else layout.glyph.offline);
     }
 
     /// Draw a fixed screen with hard-coded values, for the golden reference
@@ -744,7 +655,7 @@ test "the rendered screen matches the checked-in reference" {
         var differing_rows: usize = 0;
         var first_row: ?usize = null;
         var row: usize = 0;
-        while (row < display_config.DISPLAY_WIDTH) : (row += 1) {
+        while (row < layout.DISPLAY_WIDTH) : (row += 1) {
             const at = row * hw_bytes_per_row;
             if (!std.mem.eql(u8, golden_frame[at..][0..hw_bytes_per_row], actual[at..][0..hw_bytes_per_row])) {
                 differing_rows += 1;
@@ -754,7 +665,7 @@ test "the rendered screen matches the checked-in reference" {
         std.debug.print(
             "\n  rendered frame differs from {s}: {d} of {d} hardware rows, first at {d}\n" ++
                 "  run `zig build golden` to accept the new frame if this was intended\n",
-            .{ golden_path, differing_rows, display_config.DISPLAY_WIDTH, first_row.? },
+            .{ golden_path, differing_rows, layout.DISPLAY_WIDTH, first_row.? },
         );
         return error.GoldenFrameMismatch;
     }
@@ -778,7 +689,7 @@ test "the APT count fits its slot however large it gets" {
     var r = try Renderer.init(testing.allocator);
     defer r.deinit();
 
-    const width = display_config.TEXT_AREA_APT.width;
+    const width = layout.apt.count.area.width;
     var count: u32 = 1;
     while (count < 200_000) : (count = count * 3 / 2 + 1) {
         var buf: [16]u8 = undefined;
@@ -846,22 +757,18 @@ test "a missing sensor is drawn as a dash, not as zero" {
     defer expected.deinit();
     expected.renderDiskTemp(.of(0));
     expected.renderFanSpeed(.of(0));
-    expected.bitmap.fillRect(display_config.DISK_AREA_X, display_config.DISK_AREA_Y_TEMP, display_config.TEXT_AREA_DISK.width, display_config.TEXT_AREA_DISK.height, .White);
-    expected.bitmap.drawTextFont(display_config.DISK_VALUE_X, display_config.DISK_VALUE_Y_TEMP, "-", .Ubuntu26, .Black);
-    const fan_ascent = expected.bitmap.getFontAscent(.Ubuntu24);
-    expected.bitmap.fillRect(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y - fan_ascent, display_config.TEXT_AREA_FAN.width, display_config.TEXT_AREA_FAN.height, .White);
-    expected.bitmap.drawTextFont(display_config.FAN_VALUE_X, display_config.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
-    expected.bitmap.drawTextFont(display_config.FAN_UNIT_X, display_config.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
+    expected.fillSlot(layout.disk.temp, "-");
+    expected.fillSlot(layout.fan.speed, "-");
+    expected.drawText(layout.fan.unit_at, "rpm", .Ubuntu14);
     try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
 }
 
 // --- stale and unavailable readings --------------------------------------------
 
-/// A reading of `value` whose latest attempt failed.
+// The three states, in the one shape `drawEverySlot` takes them in.
+
 fn staleReading(comptime T: type, value: T) Reading(T) {
-    var reading: Reading(T) = .of(value);
-    reading.fail();
-    return reading;
+    return .staleOf(value);
 }
 
 fn currentReading(comptime T: type, value: T) Reading(T) {
@@ -930,16 +837,14 @@ test "each slot fades on its own and comes back whole" {
     const live = try testing.allocator.dupe(u8, r.bitmap.data);
     defer testing.allocator.free(live);
 
-    r.renderDiskTemp(staleReading(u32, 33));
+    r.renderDiskTemp(.staleOf(33));
     try testing.expect(!std.mem.eql(u8, live, r.bitmap.data));
 
     // Only the disk temperature's own area changed.
-    const x0: usize = display_config.DISK_AREA_X;
-    const y0: usize = display_config.DISK_AREA_Y_TEMP;
-    for (0..display_config.DISPLAY_HEIGHT) |y| {
-        for (0..display_config.DISPLAY_WIDTH) |x| {
-            const inside = x >= x0 and x < x0 + display_config.TEXT_AREA_DISK.width and
-                y >= y0 and y < y0 + display_config.TEXT_AREA_DISK.height;
+    const area = layout.disk.temp.area;
+    for (0..layout.DISPLAY_HEIGHT) |y| {
+        for (0..layout.DISPLAY_WIDTH) |x| {
+            const inside = x >= area.x and x < area.right() and y >= area.y and y < area.bottom();
             if (inside) continue;
             const at = y * r.bitmap.stride + x;
             try testing.expectEqual(live[at], r.bitmap.data[at]);
@@ -958,19 +863,19 @@ test "a stale fan reading keeps its unit whole" {
 
     var stale = try Renderer.init(testing.allocator);
     defer stale.deinit();
-    stale.renderFanSpeed(staleReading(u32, 543));
+    stale.renderFanSpeed(.staleOf(543));
 
     try testing.expect(!std.mem.eql(u8, live.bitmap.data, stale.bitmap.data));
 
     // The header row the unit is drawn on, from the unit to the divider.
-    const unit_top: usize = @intCast(display_config.FAN_UNIT_Y - live.bitmap.getFontAscent(.Ubuntu14));
-    for (unit_top..display_config.FAN_UNIT_Y + 4) |y| {
+    const unit = layout.fan.unit_at;
+    const left: usize = @intCast(unit.x);
+    const right: usize = layout.grid.right_divider;
+    const top: usize = @intCast(unit.y - Bitmap.fontAscent(.Ubuntu14));
+    const bottom: usize = @intCast(unit.y + 4);
+    for (top..bottom) |y| {
         const row = y * live.bitmap.stride;
-        try testing.expectEqualSlices(
-            u8,
-            live.bitmap.data[row + display_config.FAN_UNIT_X .. row + display_config.VERTICAL_LINE_2],
-            stale.bitmap.data[row + display_config.FAN_UNIT_X .. row + display_config.VERTICAL_LINE_2],
-        );
+        try testing.expectEqualSlices(u8, live.bitmap.data[row + left .. row + right], stale.bitmap.data[row + left .. row + right]);
     }
 }
 
@@ -980,14 +885,14 @@ test "a stale critical value stays inverted" {
     defer r.deinit();
     r.bitmap.clear(.White);
 
-    r.renderCpuLoad(staleReading(u8, 100));
+    r.renderCpuLoad(.staleOf(100));
     const stale_black = countBlack(&r);
     r.renderCpuLoad(.of(100));
     const live_black = countBlack(&r);
 
     // Inverted, the slot is mostly black either way; faded, the text in it is
     // dimmer, which on a black ground means more black, not less.
-    const area = display_config.TEXT_AREA_CPU.width * display_config.TEXT_AREA_CPU.height;
+    const area = layout.cpu.load.area.width * layout.cpu.load.area.height;
     try testing.expect(live_black > area / 2);
     try testing.expect(stale_black > live_black);
 }
@@ -999,45 +904,27 @@ test "a reading with no value is a dash in every slot" {
     drawEverySlot(&r, noReading);
     r.renderUptime(null);
 
+    // The same screen with each of those slots cleared and a dash put in it
+    // by hand, in the slot's own font.
     var expected = try Renderer.init(testing.allocator);
     defer expected.deinit();
     expected.drawReferenceScreen();
-    const b = &expected.bitmap;
-    const dc = display_config;
 
-    const Slot = struct { area_x: i32, area_y: i32, w: u32, h: u32, x: i32, y: i32 };
-    const big = [_]Slot{
-        .{ .area_x = dc.CPU_AREA_X, .area_y = dc.CPU_AREA_Y_LOAD, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height, .x = dc.CPU_VALUE_X, .y = dc.CPU_VALUE_Y_LOAD },
-        .{ .area_x = dc.CPU_AREA_X, .area_y = dc.CPU_AREA_Y_TEMP, .w = dc.TEXT_AREA_CPU.width, .h = dc.TEXT_AREA_CPU.height, .x = dc.CPU_VALUE_X, .y = dc.CPU_VALUE_Y_TEMP },
-        .{ .area_x = dc.MEM_AREA_X, .area_y = dc.MEM_AREA_Y, .w = dc.TEXT_AREA_MEM.width, .h = dc.TEXT_AREA_MEM.height, .x = dc.MEM_VALUE_X, .y = dc.MEM_VALUE_Y },
-        .{ .area_x = dc.DISK_AREA_X, .area_y = dc.DISK_AREA_Y_DISK, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height, .x = dc.DISK_VALUE_X, .y = dc.DISK_VALUE_Y_DISK },
-        .{ .area_x = dc.DISK_AREA_X, .area_y = dc.DISK_AREA_Y_TEMP, .w = dc.TEXT_AREA_DISK.width, .h = dc.TEXT_AREA_DISK.height, .x = dc.DISK_VALUE_X, .y = dc.DISK_VALUE_Y_TEMP },
-    };
-    for (big) |slot| {
-        b.fillRect(slot.area_x, slot.area_y, slot.w, slot.h, .White);
-        b.drawTextFont(slot.x, slot.y, "-", .Ubuntu26, .Black);
+    for ([_]layout.Slot{
+        layout.cpu.load,  layout.cpu.temp,  layout.mem.usage, layout.disk.usage,
+        layout.disk.temp, layout.fan.speed, layout.apt.count, layout.uptime.elapsed,
+    }) |slot| {
+        expected.clearArea(slot.area);
+        expected.drawText(slot.text, "-", slot.font);
     }
-
-    const ascent24 = b.getFontAscent(.Ubuntu24);
-    b.fillRect(dc.FAN_VALUE_X, dc.FAN_VALUE_Y - ascent24, dc.TEXT_AREA_FAN.width, dc.TEXT_AREA_FAN.height, .White);
-    b.drawTextFont(dc.FAN_VALUE_X, dc.FAN_VALUE_Y, "-", .Ubuntu24, .Black);
-    b.drawTextFont(dc.FAN_UNIT_X, dc.FAN_UNIT_Y, "rpm", .Ubuntu14, .Black);
-
-    b.fillRect(dc.APT_VALUE_X, dc.APT_VALUE_Y - ascent24, dc.TEXT_AREA_APT.width, dc.TEXT_AREA_APT.height, .White);
-    b.drawTextFont(dc.APT_VALUE_X, dc.APT_VALUE_Y, "-", .Ubuntu24, .Black);
-
-    b.fillRect(dc.UPTIME_VALUE_X, dc.UPTIME_AREA_Y, dc.TEXT_AREA_UPTIME.width, dc.TEXT_AREA_UPTIME.height, .White);
-    b.drawTextFont(dc.UPTIME_VALUE_X, dc.UPTIME_VALUE_Y, "-", .Ubuntu14, .Black);
+    // The fan's unit is a label, and stays.
+    expected.drawText(layout.fan.unit_at, "rpm", .Ubuntu14);
 
     // A rate that is not known has no unit either.
-    const traffic = [_][4]i32{
-        .{ dc.TRAFFIC_DOWN_VALUE_X, dc.TRAFFIC_DOWN_AREA_Y, dc.TRAFFIC_DOWN_VALUE_Y, dc.TRAFFIC_DOWN_UNIT_AREA_Y },
-        .{ dc.TRAFFIC_UP_VALUE_X, dc.TRAFFIC_UP_AREA_Y, dc.TRAFFIC_UP_VALUE_Y, dc.TRAFFIC_UP_UNIT_AREA_Y },
-    };
-    for (traffic) |row| {
-        b.fillRect(row[0], row[1], dc.TEXT_AREA_TRAFFIC_VALUE.width, dc.TEXT_AREA_TRAFFIC_VALUE.height, .White);
-        b.fillRect(dc.TRAFFIC_DOWN_UNIT_X, row[3], dc.TEXT_AREA_TRAFFIC_UNIT.width, dc.TEXT_AREA_TRAFFIC_UNIT.height, .White);
-        b.drawTextFont(row[0], row[2], "-", .Ubuntu20, .Black);
+    for ([_]layout.TrafficRow{ layout.traffic.down, layout.traffic.up }) |row| {
+        expected.clearArea(row.value.area);
+        expected.clearArea(row.unit.area);
+        expected.drawText(row.value.text, "-", row.value.font);
     }
 
     try testing.expectEqualSlices(u8, expected.bitmap.data, r.bitmap.data);
@@ -1047,8 +934,8 @@ test "a reading with no value is a dash in every slot" {
 
 /// Rows of the unrotated BMP buffer covering the status bar.
 fn statusBarRows(r: *Renderer) []const u8 {
-    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
-    return r.bmp_buffer[display_config.STATUS_BAR_Y * row_bytes ..];
+    const row_bytes = @divCeil(layout.DISPLAY_WIDTH, 8);
+    return r.bmp_buffer[layout.status_bar.y * row_bytes ..];
 }
 
 test "the warning inverts the status bar in the frame sent to the panel" {
@@ -1124,8 +1011,8 @@ test "the warning leaves everything above the status bar alone" {
 
     r.drawReferenceScreen();
     r.packBmpBuffer();
-    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
-    const above_len = display_config.STATUS_BAR_Y * row_bytes;
+    const row_bytes = @divCeil(layout.DISPLAY_WIDTH, 8);
+    const above_len = layout.status_bar.y * row_bytes;
     const clean_above = try testing.allocator.dupe(u8, r.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
 
@@ -1202,8 +1089,8 @@ test "a hardware fault shows over a notice too" {
     const faulted = r.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
-    const row_bytes = @divCeil(display_config.DISPLAY_WIDTH, 8);
-    const bar_start = display_config.STATUS_BAR_Y * row_bytes;
+    const row_bytes = @divCeil(layout.DISPLAY_WIDTH, 8);
+    const bar_start = layout.status_bar.y * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
 
@@ -1216,7 +1103,7 @@ test "the ellipsis never splits the degree sign" {
     var r = try Renderer.init(testing.allocator);
     defer r.deinit();
 
-    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var lines: [layout.notice.max_lines][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
     // Folded text keeps the degree sign as two bytes. Shifting the text a
     // character at a time moves the cut across it, whatever the font metrics.
@@ -1228,9 +1115,9 @@ test "the ellipsis never splits the degree sign" {
     for (0..8) |shift| {
         @memset(buf[0..shift], 'x');
         @memcpy(buf[shift..][0..body.len], body);
-        const layout = r.layoutNotice(buf[0 .. shift + body.len], &lines, &last_buf);
+        const fitted = r.layoutNotice(buf[0 .. shift + body.len], &lines, &last_buf);
 
-        const last = lines[layout.count - 1];
+        const last = lines[fitted.count - 1];
         try testing.expect(std.mem.endsWith(u8, last, "..."));
         try testing.expect(std.unicode.utf8ValidateSlice(last));
     }
@@ -1273,7 +1160,7 @@ test "a short notice gets the largest font, a longer one steps down" {
     var r = try Renderer.init(testing.allocator);
     defer r.deinit();
 
-    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var lines: [layout.notice.max_lines][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
 
     const short = r.layoutNotice("Backup done", &lines, &last_buf);
@@ -1287,7 +1174,7 @@ test "a short notice gets the largest font, a longer one steps down" {
     );
     try testing.expect(longer.font != .Ubuntu34);
     for (lines[0..longer.count]) |line| {
-        try testing.expect(r.notice.measureText(line, longer.font) <= display_config.NOTICE_BODY_W);
+        try testing.expect(r.notice.measureText(line, longer.font) <= layout.notice.body.width);
     }
 }
 
@@ -1296,7 +1183,7 @@ test "the lengths the Hermes skill promises hold" {
     var r = try Renderer.init(testing.allocator);
     defer r.deinit();
 
-    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var lines: [layout.notice.max_lines][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
 
     // About 30 characters: the largest font.
@@ -1308,8 +1195,8 @@ test "the lengths the Hermes skill promises hold" {
         const copies: [6][sentence.len]u8 = @splat(sentence.*);
         break :long @ptrCast(&copies);
     };
-    const layout = r.layoutNotice(long[0..250], &lines, &last_buf);
-    try testing.expect(!std.mem.endsWith(u8, lines[layout.count - 1], "..."));
+    const fitted = r.layoutNotice(long[0..250], &lines, &last_buf);
+    try testing.expect(!std.mem.endsWith(u8, lines[fitted.count - 1], "..."));
 }
 
 test "a notice too long for the smallest font ends in an ellipsis within the body" {
@@ -1320,16 +1207,16 @@ test "a notice too long for the smallest font ends in an ellipsis within the bod
         const words: [100][5]u8 = @splat("word ".*);
         break :long @ptrCast(&words);
     };
-    var lines: [display_config.NOTICE_MAX_LINES][]const u8 = undefined;
+    var lines: [layout.notice.max_lines][]const u8 = undefined;
     var last_buf: [notice_text.max_len + 3]u8 = undefined;
-    const layout = r.layoutNotice(long, &lines, &last_buf);
+    const fitted = r.layoutNotice(long, &lines, &last_buf);
 
-    try testing.expectEqual(FontType.Ubuntu14, layout.font);
-    const last = lines[layout.count - 1];
+    try testing.expectEqual(FontType.Ubuntu14, fitted.font);
+    const last = lines[fitted.count - 1];
     try testing.expect(std.mem.endsWith(u8, last, "..."));
-    try testing.expect(r.notice.measureText(last, .Ubuntu14) <= display_config.NOTICE_BODY_W);
+    try testing.expect(r.notice.measureText(last, .Ubuntu14) <= layout.notice.body.width);
     // And the block fits the body height.
-    try testing.expect(layout.count * r.notice.getLineHeight(.Ubuntu14) <= display_config.NOTICE_BODY_H);
+    try testing.expect(fitted.count * r.notice.getLineHeight(.Ubuntu14) <= layout.notice.body.height);
 }
 
 test "no warning means no overlay at all" {

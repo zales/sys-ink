@@ -10,12 +10,12 @@
 
 const std = @import("std");
 const parse = @import("parse.zig");
-const display_config = @import("display_config.zig");
+const layout = @import("display_config.zig");
 const Reading = @import("reading.zig").Reading;
 pub const Renderer = @import("display_renderer.zig").Renderer;
 
-pub const width = display_config.DISPLAY_WIDTH;
-pub const height = display_config.DISPLAY_HEIGHT;
+pub const width = layout.DISPLAY_WIDTH;
+pub const height = layout.DISPLAY_HEIGHT;
 /// Row stride of the renderer's 1-bit frame, matching `packBmpBuffer`.
 pub const row_bytes = @divCeil(width, 8);
 
@@ -34,9 +34,7 @@ pub fn staleActive(t: f64) bool {
 
 /// `value` as a reading: current, or stale while `stale` holds.
 fn reading(comptime T: type, value: T, stale: bool) Reading(T) {
-    var r: Reading(T) = .of(value);
-    if (stale) r.fail();
-    return r;
+    return if (stale) .staleOf(value) else .of(value);
 }
 
 /// Samples from one line up to one too long for the panel, with diacritics

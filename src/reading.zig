@@ -41,6 +41,12 @@ pub fn Reading(comptime T: type) type {
             return .{ .value = value, .fresh = true };
         }
 
+        /// A stale reading of `value`, likewise without a time: one whose
+        /// latest attempt failed, for a test or a simulator to draw.
+        pub fn staleOf(value: T) Self {
+            return .{ .value = value, .fresh = false };
+        }
+
         /// The attempt at `now` measured `value`.
         pub fn set(self: *Self, value: T, now: i64) void {
             self.* = .{ .value = value, .taken_at = now, .fresh = true };
@@ -155,6 +161,13 @@ test "a value that stands after a failed attempt is current again, as old as it 
     var none: Reading(u32) = .{};
     none.keep();
     try testing.expectEqual(State.unavailable, none.state());
+}
+
+test "a stale reading can be made without a clock" {
+    const r: Reading(u32) = .staleOf(33);
+    try testing.expectEqual(State.stale, r.state());
+    try testing.expectEqual(@as(?u32, 33), r.value);
+    try testing.expectEqual(@as(?u32, null), r.current());
 }
 
 test "clearing forgets the value" {

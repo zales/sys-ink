@@ -32,6 +32,7 @@ test {
     _ = @import("gpio_native.zig");
     _ = @import("ioctl.zig");
     _ = @import("panel.zig");
+    _ = @import("display_config.zig");
     _ = @import("display_renderer.zig");
     _ = @import("sim_frame.zig");
     _ = @import("frame_server.zig");
