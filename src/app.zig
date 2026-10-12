@@ -397,8 +397,8 @@ pub fn App(comptime Transport: type) type {
             self.bmp_exporter.save(
                 self.io,
                 self.renderer.packedFrame(),
-                layout.DISPLAY_WIDTH,
-                layout.DISPLAY_HEIGHT,
+                layout.display_width,
+                layout.display_height,
                 path,
             ) catch |err| {
                 log.err("Failed to export BMP: {t}", .{err});
@@ -1013,7 +1013,7 @@ test "every display update hands the frame on, with the readings it was drawn fr
     bench.app.updateDisplayAt(10);
 
     try testing.expectEqual(@as(u32, 1), collector.frames);
-    try testing.expectEqual(@as(usize, @divCeil(layout.DISPLAY_WIDTH, 8) * layout.DISPLAY_HEIGHT), collector.last_len);
+    try testing.expectEqual(@as(usize, @divCeil(layout.display_width, 8) * layout.display_height), collector.last_len);
     try testing.expectEqual(@as(?u8, 50), collector.last_cpu_load);
 
     // On request too, which is how a preview that has just started gets its

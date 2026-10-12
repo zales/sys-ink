@@ -41,8 +41,8 @@ const syscall = @import("syscall.zig");
 
 const log = std.log.scoped(.preview);
 
-const width = layout.DISPLAY_WIDTH;
-const height = layout.DISPLAY_HEIGHT;
+const width = layout.display_width;
+const height = layout.display_height;
 const frame_bytes = @divCeil(width, 8) * height;
 
 pub const WebPreview = struct {

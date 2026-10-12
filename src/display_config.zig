@@ -12,11 +12,11 @@ const std = @import("std");
 const Bitmap = @import("graphics.zig").Bitmap;
 const FontType = Bitmap.FontType;
 
-pub const DISPLAY_WIDTH = 296;
-pub const DISPLAY_HEIGHT = 128;
+pub const display_width = 296;
+pub const display_height = 128;
 
 /// Draw a frame around the area each slot clears, to see what it covers.
-pub const DEBUG_TEXT_AREAS = false;
+pub const debug_text_areas = false;
 
 pub const Point = struct { x: i32, y: i32 };
 
@@ -44,7 +44,7 @@ pub const Line = struct { from: Point, to: Point };
 pub const Icon = struct {
     glyph: []const u8,
     at: Point,
-    font: FontType = .Material24,
+    font: FontType = .material24,
 };
 
 /// A section's heading: its name, and a rule running on from it.
@@ -129,7 +129,7 @@ pub const grid = struct {
     pub const lines = [_]Line{
         .{ .from = .{ .x = left_divider, .y = top }, .to = .{ .x = left_divider, .y = bottom } },
         .{ .from = .{ .x = right_divider, .y = top }, .to = .{ .x = right_divider, .y = bottom } },
-        .{ .from = .{ .x = 0, .y = bottom }, .to = .{ .x = DISPLAY_WIDTH - 1, .y = bottom } },
+        .{ .from = .{ .x = 0, .y = bottom }, .to = .{ .x = display_width - 1, .y = bottom } },
         .{ .from = .{ .x = net_divider, .y = net.header.rule.from.y }, .to = .{ .x = net_divider, .y = bottom } },
     };
 };
@@ -143,12 +143,12 @@ pub const cpu = struct {
     pub const load: Slot = .{
         .area = .{ .x = 32, .y = 13, .width = 66, .height = 27 },
         .text = .{ .x = 34, .y = 35 },
-        .font = .Ubuntu26,
+        .font = .ubuntu26,
     };
     pub const temp: Slot = .{
         .area = .{ .x = 32, .y = 41, .width = 66, .height = 27 },
         .text = .{ .x = 34, .y = 63 },
-        .font = .Ubuntu26,
+        .font = .ubuntu26,
     };
 };
 
@@ -159,7 +159,7 @@ pub const mem = struct {
     pub const usage: Slot = .{
         .area = .{ .x = 32, .y = 81, .width = 65, .height = 25 },
         .text = .{ .x = 34, .y = 102 },
-        .font = .Ubuntu26,
+        .font = .ubuntu26,
     };
 };
 
@@ -173,12 +173,12 @@ pub const disk = struct {
     pub const usage: Slot = .{
         .area = .{ .x = 130, .y = 13, .width = 70, .height = 27 },
         .text = .{ .x = 132, .y = 35 },
-        .font = .Ubuntu26,
+        .font = .ubuntu26,
     };
     pub const temp: Slot = .{
         .area = .{ .x = 130, .y = 42, .width = 70, .height = 27 },
         .text = .{ .x = 132, .y = 64 },
-        .font = .Ubuntu26,
+        .font = .ubuntu26,
     };
 };
 
@@ -189,7 +189,7 @@ pub const fan = struct {
     /// unit: 26px wide, ending two pixels before the divider at 201.
     pub const unit_at: Point = .{ .x = 173, .y = 80 };
     pub const icons = [_]Icon{.{ .glyph = glyph.fan, .at = .{ .x = 103, .y = 105 } }};
-    pub const speed: Slot = .hung(.{ .x = 133, .y = 102 }, .Ubuntu24, 60, 27);
+    pub const speed: Slot = .hung(.{ .x = 133, .y = 102 }, .ubuntu24, 60, 27);
 };
 
 /// One direction of traffic: the rate in its slot, and the unit it is in up
@@ -212,12 +212,12 @@ pub const traffic = struct {
         .value = .{
             .area = .{ .x = 233, .y = 12, .width = 63, .height = 20 }, // baseline(30) - ascent(18)
             .text = .{ .x = 233, .y = 30 },
-            .font = .Ubuntu20,
+            .font = .ubuntu20,
         },
         .unit = .{
             .area = .{ .x = 263, .y = 0, .width = 33, .height = 14 }, // baseline(11) - ascent(11)
             .text = .{ .x = 263, .y = 11 },
-            .font = .Ubuntu14,
+            .font = .ubuntu14,
         },
     };
     pub const up: TrafficRow = .{
@@ -226,12 +226,12 @@ pub const traffic = struct {
         .value = .{
             .area = .{ .x = 233, .y = 47, .width = 63, .height = 20 }, // baseline(65) - ascent(18)
             .text = .{ .x = 233, .y = 65 },
-            .font = .Ubuntu20,
+            .font = .ubuntu20,
         },
         .unit = .{
             .area = .{ .x = 263, .y = 34, .width = 33, .height = 14 }, // baseline(45) - ascent(11)
             .text = .{ .x = 263, .y = 45 },
-            .font = .Ubuntu14,
+            .font = .ubuntu14,
         },
     };
 };
@@ -240,28 +240,28 @@ pub const apt = struct {
     pub const header = heading("apt", 203, 80, 226, 248);
     /// The count, in this font or a smaller one on the same baseline, or the
     /// tick that stands for none.
-    pub const count: Slot = .hung(.{ .x = 214, .y = 105 }, .Ubuntu24, 35, 24);
+    pub const count: Slot = .hung(.{ .x = 214, .y = 105 }, .ubuntu24, 35, 24);
 };
 
 pub const net = struct {
     /// Ruled to the right edge of the panel.
-    pub const header = heading("net", 250, 80, 272, DISPLAY_WIDTH - 1);
+    pub const header = heading("net", 250, 80, 272, display_width - 1);
     /// One glyph: whether the internet is reachable.
-    pub const status: Slot = .hung(.{ .x = 260, .y = 105 }, .Material24, 35, 24);
+    pub const status: Slot = .hung(.{ .x = 260, .y = 105 }, .material24, 35, 24);
 };
 
 /// The bottom status bar as a whole, inverted to signal a hardware fault.
-pub const status_bar: Rect = .{ .x = 0, .y = 113, .width = DISPLAY_WIDTH, .height = DISPLAY_HEIGHT - 113 };
+pub const status_bar: Rect = .{ .x = 0, .y = 113, .width = display_width, .height = display_height - 113 };
 
 // The three slots of the status bar. Their areas start a pixel above the top
 // of the text: baseline(125) - ascent(11) - 1 = 113.
 
 pub const ip = struct {
-    pub const icon: Icon = .{ .glyph = glyph.network, .at = .{ .x = 0, .y = 127 }, .font = .Material14 };
+    pub const icon: Icon = .{ .glyph = glyph.network, .at = .{ .x = 0, .y = 127 }, .font = .material14 };
     pub const address: Slot = .{
         .area = .{ .x = 15, .y = 113, .width = 105, .height = 14 },
         .text = .{ .x = 15, .y = 125 },
-        .font = .Ubuntu14,
+        .font = .ubuntu14,
     };
 };
 
@@ -273,7 +273,7 @@ pub const signal = struct {
     pub const reading: Slot = .{
         .area = .{ .x = 120, .y = 113, .width = 75, .height = 14 },
         .text = .{ .x = 137, .y = 125 },
-        .font = .Ubuntu14,
+        .font = .ubuntu14,
     };
     pub const icon_at: Point = .{ .x = 122, .y = 127 };
     /// Room for the reading itself: the area ends at 195, the text starts at 137.
@@ -281,12 +281,12 @@ pub const signal = struct {
 };
 
 pub const uptime = struct {
-    pub const icon: Icon = .{ .glyph = glyph.uptime, .at = .{ .x = 197, .y = 127 }, .font = .Material14 };
+    pub const icon: Icon = .{ .glyph = glyph.uptime, .at = .{ .x = 197, .y = 127 }, .font = .material14 };
     /// Runs to the right edge of the panel: 212 + 84 = 296.
     pub const elapsed: Slot = .{
         .area = .{ .x = 212, .y = 113, .width = 84, .height = 14 },
         .text = .{ .x = 212, .y = 125 },
-        .font = .Ubuntu14,
+        .font = .ubuntu14,
     };
 };
 
@@ -308,7 +308,7 @@ pub const NamedArea = struct { name: []const u8, area: Rect };
 /// Found rather than listed. Every `Slot` a section above declares is here,
 /// and both of each `TrafficRow`'s, so a slot added to the layout cannot be
 /// left out of the tests that hold each one to the panel's edges and to its
-/// neighbours, nor of the frames `DEBUG_TEXT_AREAS` draws.
+/// neighbours, nor of the frames `debug_text_areas` draws.
 pub const areas = findAreas();
 
 fn findAreas() []const NamedArea {
@@ -354,7 +354,7 @@ fn isSection(comptime T: type) bool {
 
 /// The loading and sleep screens: an emblem, a bar, and two lines of text.
 pub const splash = struct {
-    pub const emblem: Icon = .{ .glyph = glyph.ethernet, .at = .{ .x = 50, .y = 82 }, .font = .Material50 };
+    pub const emblem: Icon = .{ .glyph = glyph.ethernet, .at = .{ .x = 50, .y = 82 }, .font = .material50 };
     pub const bar: Rect = .{ .x = 124, .y = 15, .width = 3, .height = 95 };
     pub const title_at: Point = .{ .x = 155, .y = 60 };
     pub const subtitle_at: Point = .{ .x = 155, .y = 82 };
@@ -368,9 +368,9 @@ pub const notice = struct {
     /// The rule runs from this far past the label to the right edge.
     pub const rule_gap = 3;
     pub const rule_y = label_at.y - rule_rise;
-    pub const body: Rect = .{ .x = 4, .y = 16, .width = DISPLAY_WIDTH - 2 * 4, .height = DISPLAY_HEIGHT - 16 - 2 };
+    pub const body: Rect = .{ .x = 4, .y = 16, .width = display_width - 2 * 4, .height = display_height - 16 - 2 };
     /// Largest first. Six lines of the smallest is as many as the body holds.
-    pub const fonts = [_]FontType{ .Ubuntu34, .Ubuntu26, .Ubuntu20, .Ubuntu14 };
+    pub const fonts = [_]FontType{ .ubuntu34, .ubuntu26, .ubuntu20, .ubuntu14 };
     pub const max_lines = 6;
 };
 
@@ -456,10 +456,10 @@ test "no slot extends past the panel" {
     // showed up once a value happened to be wide enough.
     for (areas) |named| {
         const area = named.area;
-        if (area.x < 0 or area.y < 0 or area.right() > DISPLAY_WIDTH or area.bottom() > DISPLAY_HEIGHT) {
+        if (area.x < 0 or area.y < 0 or area.right() > display_width or area.bottom() > display_height) {
             std.debug.print(
                 "\n  '{s}' spans {d}..{d} x {d}..{d}, panel is {d}x{d}\n",
-                .{ named.name, area.x, area.right(), area.y, area.bottom(), DISPLAY_WIDTH, DISPLAY_HEIGHT },
+                .{ named.name, area.x, area.right(), area.y, area.bottom(), display_width, display_height },
             );
             return error.SlotOutsidePanel;
         }
@@ -492,9 +492,9 @@ test "no two slots overlap" {
 }
 
 test "a slot hung from its baseline starts at the top of its text" {
-    try testing.expectEqual(fan.speed.text.y - Bitmap.fontAscent(.Ubuntu24), fan.speed.area.y);
-    try testing.expectEqual(apt.count.text.y - Bitmap.fontAscent(.Ubuntu24), apt.count.area.y);
-    try testing.expectEqual(net.status.text.y - Bitmap.fontAscent(.Material24), net.status.area.y);
+    try testing.expectEqual(fan.speed.text.y - Bitmap.fontAscent(.ubuntu24), fan.speed.area.y);
+    try testing.expectEqual(apt.count.text.y - Bitmap.fontAscent(.ubuntu24), apt.count.area.y);
+    try testing.expectEqual(net.status.text.y - Bitmap.fontAscent(.material24), net.status.area.y);
     try testing.expectEqual(fan.speed.text.x, fan.speed.area.x);
 }
 
@@ -502,11 +502,11 @@ test "every heading is ruled level, left to right, starting past its label" {
     for (headers) |header| {
         try testing.expectEqual(header.rule.from.y, header.rule.to.y);
         try testing.expect(header.rule.from.x < header.rule.to.x);
-        try testing.expect(header.rule.to.x < DISPLAY_WIDTH);
+        try testing.expect(header.rule.to.x < display_width);
 
         // The label's advance may end exactly where the rule begins, as
         // "net" does: its last glyph stops short of its own advance.
-        const label_end = header.at.x + @as(i32, @intCast(try measure(header.label, .Ubuntu14)));
+        const label_end = header.at.x + @as(i32, @intCast(try measure(header.label, .ubuntu14)));
         try testing.expect(label_end <= header.rule.from.x);
     }
 }
@@ -525,9 +525,9 @@ test "uptime keeps its minutes across realistic values" {
     }) |v| {
         var buf = UptimeBuffers{};
         const candidates = uptimeCandidates(&buf, v[0], v[1], v[2]);
-        const chosen = try fit(&candidates, .Ubuntu14, slot);
+        const chosen = try fit(&candidates, .ubuntu14, slot);
 
-        try testing.expect(try measure(chosen, .Ubuntu14) <= slot);
+        try testing.expect(try measure(chosen, .ubuntu14) <= slot);
         // Whichever form is chosen, it must still carry minutes.
         try testing.expect(chosen.ptr == candidates[0].ptr or chosen.ptr == candidates[1].ptr);
     }
@@ -537,13 +537,13 @@ test "uptime spells out minutes up to 99 days" {
     var buf = UptimeBuffers{};
     const c = uptimeCandidates(&buf, 11, 12, 20);
     try testing.expectEqualStrings("11d 12h 20m", c[0]);
-    try testing.expectEqualStrings("11d 12h 20m", try fit(&c, .Ubuntu14, uptime.elapsed.area.width));
+    try testing.expectEqualStrings("11d 12h 20m", try fit(&c, .ubuntu14, uptime.elapsed.area.width));
 }
 
 test "uptime falls back to the compact form past 99 days" {
     var buf = UptimeBuffers{};
     const c = uptimeCandidates(&buf, 123, 23, 59);
-    try testing.expectEqualStrings("123d 23:59", try fit(&c, .Ubuntu14, uptime.elapsed.area.width));
+    try testing.expectEqualStrings("123d 23:59", try fit(&c, .ubuntu14, uptime.elapsed.area.width));
 }
 
 test "uptime formats zero days and pads minutes" {
@@ -559,11 +559,11 @@ test "uptime degrades instead of clipping at absurd values" {
 
     // ~27 years still keeps its minutes via the compact form.
     const long = uptimeCandidates(&buf, 9999, 23, 59);
-    try testing.expectEqualStrings("9999d 23:59", try fit(&long, .Ubuntu14, slot));
+    try testing.expectEqualStrings("9999d 23:59", try fit(&long, .ubuntu14, slot));
 
     // Past that the ladder drops units rather than clipping.
     const absurd = uptimeCandidates(&buf, 999_999, 23, 59);
-    try testing.expect(try measure(try fit(&absurd, .Ubuntu14, slot), .Ubuntu14) <= slot);
+    try testing.expect(try measure(try fit(&absurd, .ubuntu14, slot), .ubuntu14) <= slot);
 }
 
 test "signal reading fits its slot across the whole dBm range" {
@@ -575,13 +575,13 @@ test "signal reading fits its slot across the whole dBm range" {
             try std.mem.print(&with_unit, "{d} dBm", .{s}),
             try std.mem.print(&bare, "{d}", .{s}),
         };
-        const chosen = try fit(&candidates, .Ubuntu14, signal.text_max_width);
-        try testing.expect(try measure(chosen, .Ubuntu14) <= signal.text_max_width);
+        const chosen = try fit(&candidates, .ubuntu14, signal.text_max_width);
+        try testing.expect(try measure(chosen, .ubuntu14) <= signal.text_max_width);
     }
 
     // Two-digit readings keep the unit; only the three-digit extreme drops it.
     const normal = [_][]const u8{ "-40 dBm", "-40" };
-    try testing.expectEqualStrings("-40 dBm", try fit(&normal, .Ubuntu14, signal.text_max_width));
+    try testing.expectEqualStrings("-40 dBm", try fit(&normal, .ubuntu14, signal.text_max_width));
 }
 
 test "traffic values fit their slot across the whole range" {
@@ -618,7 +618,7 @@ test "the fan slot ends before the divider" {
 }
 
 test "the fan header fits its label, rule and unit" {
-    const unit_end = fan.unit_at.x + @as(i32, @intCast(try measure("rpm", .Ubuntu14)));
+    const unit_end = fan.unit_at.x + @as(i32, @intCast(try measure("rpm", .ubuntu14)));
 
     try testing.expect(fan.header.rule.to.x < fan.unit_at.x);
     try testing.expect(unit_end < grid.right_divider);
@@ -627,13 +627,13 @@ test "the fan header fits its label, rule and unit" {
 test "status bar slots do not overlap or run off the panel" {
     try testing.expect(ip.address.area.right() <= signal.reading.area.x);
     try testing.expect(signal.reading.area.right() <= uptime.icon.at.x);
-    try testing.expectEqual(@as(i32, DISPLAY_WIDTH), uptime.elapsed.area.right());
+    try testing.expectEqual(@as(i32, display_width), uptime.elapsed.area.right());
 
     // The signal icon and reading sit inside the area that clears them.
     try testing.expect(signal.icon_at.x >= signal.reading.area.x);
     try testing.expect(signal.reading.text.x + signal.text_max_width <= signal.reading.area.right());
     // The widest IPv4 address must still fit.
-    try testing.expect(try measure("255.255.255.255", .Ubuntu14) <= ip.address.area.width);
+    try testing.expect(try measure("255.255.255.255", .ubuntu14) <= ip.address.area.width);
 
     // And all three lie within the bar a fault inverts.
     for ([_]Rect{ ip.address.area, signal.reading.area, uptime.elapsed.area }) |area| {
@@ -647,5 +647,5 @@ test "the notice body holds as many lines of the smallest font as it promises" {
 
     const smallest = notice.fonts[notice.fonts.len - 1];
     try testing.expectEqual(@as(u32, notice.max_lines), notice.body.height / bmp.getLineHeight(smallest));
-    try testing.expect(notice.body.right() <= DISPLAY_WIDTH and notice.body.bottom() <= DISPLAY_HEIGHT);
+    try testing.expect(notice.body.right() <= display_width and notice.body.bottom() <= display_height);
 }

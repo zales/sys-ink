@@ -13,7 +13,7 @@ const ioctl = @import("ioctl.zig");
 const syscall = @import("syscall.zig");
 
 pub const GpioNative = struct {
-    pub const RequestType = enum { Input, Output };
+    pub const RequestType = enum { input, output };
 
     pub const Handle = struct {
         fd: std.posix.fd_t,
@@ -122,8 +122,8 @@ pub const GpioNative = struct {
         req.num_lines = 1;
         req.offsets[0] = pin;
         req.config.flags = switch (direction) {
-            .Input => flag_input,
-            .Output => flag_output,
+            .input => flag_input,
+            .output => flag_output,
         };
 
         const label = "sys-ink";

@@ -2,8 +2,8 @@ const std = @import("std");
 const font_data = @import("font_data.zig");
 
 pub const Color = enum {
-    White,
-    Black,
+    white,
+    black,
 };
 
 pub const Bitmap = struct {
@@ -14,14 +14,14 @@ pub const Bitmap = struct {
     allocator: std.mem.Allocator,
 
     pub const FontType = enum {
-        Ubuntu14,
-        Ubuntu20,
-        Ubuntu24,
-        Ubuntu26,
-        Ubuntu34,
-        Material14,
-        Material24,
-        Material50,
+        ubuntu14,
+        ubuntu20,
+        ubuntu24,
+        ubuntu26,
+        ubuntu34,
+        material14,
+        material24,
+        material50,
     };
 
     /// Advance used for codepoints the font has no glyph for.
@@ -50,7 +50,7 @@ pub const Bitmap = struct {
     }
 
     fn colorValue(color: Color) u8 {
-        return if (color == .White) 255 else 0;
+        return if (color == .white) 255 else 0;
     }
 
     const ClipRect = struct { x: usize, y: usize, w: usize, h: usize };
@@ -159,7 +159,7 @@ pub const Bitmap = struct {
     /// rectangle's, so fading the same area again changes nothing.
     pub fn fadeRect(self: *Bitmap, x: i32, y: i32, w: u32, h: u32) void {
         const r = self.clipRect(x, y, w, h) orelse return;
-        const white = colorValue(.White);
+        const white = colorValue(.white);
 
         var py = r.y;
         while (py < r.y + r.h) : (py += 1) {
@@ -177,14 +177,14 @@ pub const Bitmap = struct {
 
     fn getFont(font_type: FontType) *const font_data.Font {
         return switch (font_type) {
-            .Ubuntu14 => &font_data.ubuntu_14,
-            .Ubuntu20 => &font_data.ubuntu_20,
-            .Ubuntu24 => &font_data.ubuntu_24,
-            .Ubuntu26 => &font_data.ubuntu_26,
-            .Ubuntu34 => &font_data.ubuntu_34,
-            .Material14 => &font_data.material_14,
-            .Material24 => &font_data.material_24,
-            .Material50 => &font_data.material_50,
+            .ubuntu14 => &font_data.ubuntu_14,
+            .ubuntu20 => &font_data.ubuntu_20,
+            .ubuntu24 => &font_data.ubuntu_24,
+            .ubuntu26 => &font_data.ubuntu_26,
+            .ubuntu34 => &font_data.ubuntu_34,
+            .material14 => &font_data.material_14,
+            .material24 => &font_data.material_24,
+            .material50 => &font_data.material_50,
         };
     }
 
@@ -362,14 +362,14 @@ test "wrapText breaks at spaces and keeps every line within the width" {
     defer bmp.deinit();
 
     const text = "the quick brown fox jumps over the lazy dog";
-    const max_width = bmp.measureText("the quick brown", .Ubuntu14);
+    const max_width = bmp.measureText("the quick brown", .ubuntu14);
 
     var lines: [8][]const u8 = undefined;
-    const n = bmp.wrapText(text, .Ubuntu14, max_width, &lines);
+    const n = bmp.wrapText(text, .ubuntu14, max_width, &lines);
 
     try testing.expectEqualStrings("the quick brown", lines[0]);
     for (lines[0..n]) |line| {
-        try testing.expect(bmp.measureText(line, .Ubuntu14) <= max_width);
+        try testing.expect(bmp.measureText(line, .ubuntu14) <= max_width);
         try testing.expect(line[0] != ' ' and line[line.len - 1] != ' ');
     }
     // Nothing lost: the lines joined by spaces are the text again.
@@ -383,8 +383,8 @@ test "wrapText splits a word too wide for any line" {
     defer bmp.deinit();
 
     var lines: [8][]const u8 = undefined;
-    const max_width = bmp.measureText("abcd", .Ubuntu14);
-    const n = bmp.wrapText("abcdefghij", .Ubuntu14, max_width, &lines);
+    const max_width = bmp.measureText("abcd", .ubuntu14);
+    const n = bmp.wrapText("abcdefghij", .ubuntu14, max_width, &lines);
 
     try testing.expectEqual(@as(usize, 3), n);
     try testing.expectEqualStrings("abcd", lines[0]);
@@ -397,8 +397,8 @@ test "wrapText counts the lines it had no room to return" {
     defer bmp.deinit();
 
     var lines: [2][]const u8 = undefined;
-    const max_width = bmp.measureText("aa", .Ubuntu14);
-    try testing.expectEqual(@as(usize, 4), bmp.wrapText("aa aa aa aa", .Ubuntu14, max_width, &lines));
+    const max_width = bmp.measureText("aa", .ubuntu14);
+    try testing.expectEqual(@as(usize, 4), bmp.wrapText("aa aa aa aa", .ubuntu14, max_width, &lines));
     try testing.expectEqualStrings("aa", lines[1]);
 }
 
@@ -407,8 +407,8 @@ test "wrapText makes progress even when one glyph is wider than the line" {
     defer bmp.deinit();
 
     var lines: [4][]const u8 = undefined;
-    try testing.expectEqual(@as(usize, 2), bmp.wrapText("WW", .Ubuntu34, 1, &lines));
-    try testing.expectEqual(@as(usize, 0), bmp.wrapText("   ", .Ubuntu14, 100, &lines));
+    try testing.expectEqual(@as(usize, 2), bmp.wrapText("WW", .ubuntu34, 1, &lines));
+    try testing.expectEqual(@as(usize, 0), bmp.wrapText("   ", .ubuntu14, 100, &lines));
 }
 
 test "malformed UTF-8 decodes to question marks, never to other letters" {
@@ -424,7 +424,7 @@ test "fillRect fills exactly the requested area" {
     var bmp = try testBitmap(10, 10);
     defer bmp.deinit();
 
-    bmp.fillRect(2, 3, 4, 2, .Black);
+    bmp.fillRect(2, 3, 4, 2, .black);
     try testing.expectEqual(@as(u32, 8), countBlack(&bmp));
     try testing.expectEqual(@as(u8, 0), bmp.data[3 * 10 + 2]);
     try testing.expectEqual(@as(u8, 0), bmp.data[4 * 10 + 5]);
@@ -440,12 +440,12 @@ test "fillRect clips against every edge" {
     defer bmp.deinit();
 
     // Straddles the top-left corner: only the 2x2 overlap should land.
-    bmp.fillRect(-3, -3, 5, 5, .Black);
+    bmp.fillRect(-3, -3, 5, 5, .black);
     try testing.expectEqual(@as(u32, 4), countBlack(&bmp));
 
-    bmp.clear(.White);
+    bmp.clear(.white);
     // Straddles the bottom-right corner.
-    bmp.fillRect(8, 8, 5, 5, .Black);
+    bmp.fillRect(8, 8, 5, 5, .black);
     try testing.expectEqual(@as(u32, 4), countBlack(&bmp));
 }
 
@@ -453,12 +453,12 @@ test "fillRect ignores fully off-screen and empty rectangles" {
     var bmp = try testBitmap(10, 10);
     defer bmp.deinit();
 
-    bmp.fillRect(-100, 0, 5, 5, .Black);
-    bmp.fillRect(100, 0, 5, 5, .Black);
-    bmp.fillRect(0, -100, 5, 5, .Black);
-    bmp.fillRect(0, 100, 5, 5, .Black);
-    bmp.fillRect(2, 2, 0, 5, .Black);
-    bmp.fillRect(2, 2, 5, 0, .Black);
+    bmp.fillRect(-100, 0, 5, 5, .black);
+    bmp.fillRect(100, 0, 5, 5, .black);
+    bmp.fillRect(0, -100, 5, 5, .black);
+    bmp.fillRect(0, 100, 5, 5, .black);
+    bmp.fillRect(2, 2, 0, 5, .black);
+    bmp.fillRect(2, 2, 5, 0, .black);
 
     try testing.expectEqual(@as(u32, 0), countBlack(&bmp));
 }
@@ -478,7 +478,7 @@ test "invertRect flips only the clipped region" {
 test "fadeRect knocks out every other pixel and nothing outside the area" {
     var bmp = try testBitmap(6, 4);
     defer bmp.deinit();
-    bmp.clear(.Black);
+    bmp.clear(.black);
 
     bmp.fadeRect(1, 1, 4, 2);
 
@@ -505,15 +505,15 @@ test "drawLine handles horizontal, vertical and diagonal runs" {
     var bmp = try testBitmap(10, 10);
     defer bmp.deinit();
 
-    bmp.drawLine(0, 0, 9, 0, .Black);
+    bmp.drawLine(0, 0, 9, 0, .black);
     try testing.expectEqual(@as(u32, 10), countBlack(&bmp));
 
-    bmp.clear(.White);
-    bmp.drawLine(0, 0, 0, 9, .Black);
+    bmp.clear(.white);
+    bmp.drawLine(0, 0, 0, 9, .black);
     try testing.expectEqual(@as(u32, 10), countBlack(&bmp));
 
-    bmp.clear(.White);
-    bmp.drawLine(0, 0, 9, 9, .Black);
+    bmp.clear(.white);
+    bmp.drawLine(0, 0, 9, 9, .black);
     try testing.expectEqual(@as(u32, 10), countBlack(&bmp));
 }
 
@@ -523,8 +523,8 @@ test "drawLine is direction-independent" {
     var backward = try testBitmap(10, 10);
     defer backward.deinit();
 
-    forward.drawLine(1, 4, 8, 4, .Black);
-    backward.drawLine(8, 4, 1, 4, .Black);
+    forward.drawLine(1, 4, 8, 4, .black);
+    backward.drawLine(8, 4, 1, 4, .black);
     try testing.expectEqualSlices(u8, forward.data, backward.data);
 }
 
@@ -532,7 +532,7 @@ test "drawLine clips off-screen endpoints" {
     var bmp = try testBitmap(10, 10);
     defer bmp.deinit();
 
-    bmp.drawLine(-5, 5, 15, 5, .Black);
+    bmp.drawLine(-5, 5, 15, 5, .black);
     try testing.expectEqual(@as(u32, 10), countBlack(&bmp));
 }
 
@@ -540,10 +540,10 @@ test "setPixel rejects out-of-bounds coordinates" {
     var bmp = try testBitmap(4, 4);
     defer bmp.deinit();
 
-    bmp.setPixel(-1, 0, .Black);
-    bmp.setPixel(0, -1, .Black);
-    bmp.setPixel(4, 0, .Black);
-    bmp.setPixel(0, 4, .Black);
+    bmp.setPixel(-1, 0, .black);
+    bmp.setPixel(0, -1, .black);
+    bmp.setPixel(4, 0, .black);
+    bmp.setPixel(0, 4, .black);
 
     try testing.expectEqual(@as(u32, 0), countBlack(&bmp));
 }
@@ -605,15 +605,15 @@ test "measureText sums advances and handles missing glyphs" {
     var bmp = try testBitmap(4, 4);
     defer bmp.deinit();
 
-    try testing.expectEqual(@as(u32, 0), bmp.measureText("", .Ubuntu14));
+    try testing.expectEqual(@as(u32, 0), bmp.measureText("", .ubuntu14));
 
     const digit = font_data.ubuntu_14.get('0').?;
-    try testing.expectEqual(digit.advance_x * 3, bmp.measureText("000", .Ubuntu14));
+    try testing.expectEqual(digit.advance_x * 3, bmp.measureText("000", .ubuntu14));
 
     // An emoji has no glyph, so it falls back to the fixed advance.
     try testing.expectEqual(
         @as(u32, Bitmap.missing_glyph_advance),
-        bmp.measureText("\u{1F600}", .Ubuntu14),
+        bmp.measureText("\u{1F600}", .ubuntu14),
     );
 }
 
@@ -627,13 +627,13 @@ test "fitText picks the first candidate that fits" {
     const candidates = [_][]const u8{ wide, medium, narrow };
 
     // Roomy: keep the most detailed form.
-    try testing.expectEqualStrings(wide, bmp.fitText(&candidates, .Ubuntu14, 200));
+    try testing.expectEqualStrings(wide, bmp.fitText(&candidates, .ubuntu14, 200));
     // The real status-bar slot is 76px, where the full form overflows at 83px.
-    try testing.expectEqualStrings(medium, bmp.fitText(&candidates, .Ubuntu14, 76));
+    try testing.expectEqualStrings(medium, bmp.fitText(&candidates, .ubuntu14, 76));
     // Tighter still.
-    try testing.expectEqualStrings(narrow, bmp.fitText(&candidates, .Ubuntu14, 30));
+    try testing.expectEqualStrings(narrow, bmp.fitText(&candidates, .ubuntu14, 30));
     // Nothing fits: fall back to the last, most compact candidate.
-    try testing.expectEqualStrings(narrow, bmp.fitText(&candidates, .Ubuntu14, 1));
+    try testing.expectEqualStrings(narrow, bmp.fitText(&candidates, .ubuntu14, 1));
 }
 
 test "drawTextFont stays inside the bitmap when drawn off-screen" {
@@ -641,8 +641,8 @@ test "drawTextFont stays inside the bitmap when drawn off-screen" {
     defer bmp.deinit();
 
     // Far outside in both directions; must not touch memory or trap.
-    bmp.drawTextFont(-500, -500, "123", .Ubuntu26, .Black);
-    bmp.drawTextFont(500, 500, "123", .Ubuntu26, .Black);
+    bmp.drawTextFont(-500, -500, "123", .ubuntu26, .black);
+    bmp.drawTextFont(500, 500, "123", .ubuntu26, .black);
     try testing.expectEqual(@as(u32, 0), countBlack(&bmp));
 }
 
@@ -652,8 +652,8 @@ test "drawTextFont marks pixels and advances the cursor" {
     var two = try testBitmap(60, 40);
     defer two.deinit();
 
-    one.drawTextFont(2, 30, "8", .Ubuntu14, .Black);
-    two.drawTextFont(2, 30, "88", .Ubuntu14, .Black);
+    one.drawTextFont(2, 30, "8", .ubuntu14, .black);
+    two.drawTextFont(2, 30, "88", .ubuntu14, .black);
 
     try testing.expect(countBlack(&one) > 0);
     // The second glyph must add ink rather than overprint the first.
@@ -665,7 +665,7 @@ test "malformed UTF-8 does not hang the decoder" {
     defer bmp.deinit();
 
     // Truncated multi-byte sequence and a stray continuation byte.
-    bmp.drawTextFont(0, 20, "\xC3", .Ubuntu14, .Black);
-    bmp.drawTextFont(0, 20, "\x80\x80", .Ubuntu14, .Black);
-    _ = bmp.measureText("\xF0\x9F", .Ubuntu14);
+    bmp.drawTextFont(0, 20, "\xC3", .ubuntu14, .black);
+    bmp.drawTextFont(0, 20, "\x80\x80", .ubuntu14, .black);
+    _ = bmp.measureText("\xF0\x9F", .ubuntu14);
 }

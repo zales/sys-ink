@@ -14,8 +14,8 @@ const layout = @import("display_config.zig");
 const Reading = @import("reading.zig").Reading;
 pub const Renderer = @import("display_renderer.zig").Renderer;
 
-pub const width = layout.DISPLAY_WIDTH;
-pub const height = layout.DISPLAY_HEIGHT;
+pub const width = layout.display_width;
+pub const height = layout.display_height;
 /// Row stride of the renderer's 1-bit frame, matching `packBmpBuffer`.
 pub const row_bytes = @divCeil(width, 8);
 

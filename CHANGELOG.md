@@ -102,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that need it, where it was a set of globals read from anywhere. The layout
   in `src/display_config.zig` is grouped by section of the dashboard, with a
   slot per reading, and the renderer draws in those terms; what reaches the
-  panel is unchanged, byte for byte.
+  panel is unchanged, byte for byte. Enum fields and the project's own
+  constants are `snake_case`; ioctl request numbers keep the kernel's names.
 - Internal: the modules that read the machine take the directory procfs and
   sysfs are read under, so `system_ops` and `network_ops` are tested against
   a tree of fixtures on any host. The daemon's tasks moved out of `main.zig`

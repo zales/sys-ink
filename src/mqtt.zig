@@ -256,15 +256,15 @@ pub const MqttClient = struct {
 
     // MQTT Control Packet Types
     const PacketType = enum(u4) {
-        CONNECT = 1,
-        CONNACK = 2,
-        PUBLISH = 3,
-        PUBACK = 4,
-        SUBSCRIBE = 8,
-        SUBACK = 9,
-        PINGREQ = 12,
-        PINGRESP = 13,
-        DISCONNECT = 14,
+        connect = 1,
+        connack = 2,
+        publish = 3,
+        puback = 4,
+        subscribe = 8,
+        suback = 9,
+        pingreq = 12,
+        pingresp = 13,
+        disconnect = 14,
     };
 
     /// Must stay where it is once `connect` has been called: a lookup in
@@ -478,7 +478,7 @@ pub const MqttClient = struct {
     /// copied into `notice_buf`, if it was one.
     fn handlePacket(self: *Self, packet: Packet) ?usize {
         switch (packet.kind()) {
-            @backingInt(PacketType.PUBLISH) => {
+            @backingInt(PacketType.publish) => {
                 const message = parsePublish(packet) catch {
                     log.warn("Malformed PUBLISH from the MQTT broker", .{});
                     return null;
@@ -502,7 +502,7 @@ pub const MqttClient = struct {
                 @memcpy(self.notice_buf[0..message.payload.len], message.payload);
                 return message.payload.len;
             },
-            @backingInt(PacketType.SUBACK) => {
+            @backingInt(PacketType.suback) => {
                 // Packet id, then one return code per filter; 0x80 is refusal.
                 if (packet.body.len >= 3 and packet.body[2] == 0x80) {
                     log.warn("MQTT broker refused the subscription to {s}; check its ACL", .{self.notifyTopic()});
@@ -514,7 +514,7 @@ pub const MqttClient = struct {
     }
 
     fn sendPuback(self: *Self, packet_id: u16) void {
-        var packet = [_]u8{ @as(u8, @backingInt(PacketType.PUBACK)) << 4, 0x02, 0, 0 };
+        var packet = [_]u8{ @as(u8, @backingInt(PacketType.puback)) << 4, 0x02, 0, 0 };
         std.mem.writeInt(u16, packet[2..4], packet_id, .big);
         self.sendPacket(&packet) catch {};
     }
@@ -834,7 +834,7 @@ fn notifyDiscoveryPayload(buf: []u8, node_id: []const u8, topic_prefix: []const 
 
 /// Validate a CONNACK packet and map its return code to an error.
 fn interpretConnack(packet: [4]u8) !void {
-    if (packet[0] >> 4 != @backingInt(MqttClient.PacketType.CONNACK)) return error.UnexpectedPacket;
+    if (packet[0] >> 4 != @backingInt(MqttClient.PacketType.connack)) return error.UnexpectedPacket;
 
     return switch (packet[3]) {
         0 => {},
@@ -878,7 +878,7 @@ fn buildPublish(buf: []u8, topic: []const u8, payload: []const u8, retain: bool)
     if (5 + remaining_len > buf.len) return error.PayloadTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.PUBLISH)) << 4) | @intFromBool(retain);
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.publish)) << 4) | @intFromBool(retain);
     pos += 1;
 
     pos += encodeRemainingLength(buf[pos..], remaining_len);
@@ -902,7 +902,7 @@ fn buildSubscribe(buf: []u8, packet_id: u16, topic: []const u8) ![]const u8 {
 
     var pos: usize = 0;
     // MQTT-3.8.1-1: the reserved flags of SUBSCRIBE are 0b0010.
-    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.SUBSCRIBE)) << 4) | 0x02;
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.subscribe)) << 4) | 0x02;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
     std.mem.writeInt(u16, buf[pos..][0..2], packet_id, .big);
@@ -1068,7 +1068,7 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
     if (5 + remaining_len > buf.len) return error.PacketTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = @as(u8, @backingInt(MqttClient.PacketType.CONNECT)) << 4;
+    buf[pos] = @as(u8, @backingInt(MqttClient.PacketType.connect)) << 4;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
 
@@ -1759,7 +1759,7 @@ pub const LoopbackClient = struct {
         while (true) {
             const waiting = self.arrived.next() catch return null;
             if (waiting) |packet| {
-                if (packet.kind() != @backingInt(MqttClient.PacketType.PUBLISH)) continue;
+                if (packet.kind() != @backingInt(MqttClient.PacketType.publish)) continue;
                 return parsePublish(packet) catch null;
             }
 
