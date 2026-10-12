@@ -55,8 +55,10 @@ pub const SystemOps = struct {
     /// Whether the latest check is the one that produced the count. A check
     /// that fails leaves the count it found standing, as stale.
     apt_count_fresh: std.atomic.Value(bool),
-    /// Monotonic seconds at which the count was produced.
-    apt_count_at: std.atomic.Value(i64),
+    /// Monotonic seconds at which the count was produced. In 32 bits, which
+    /// hold 136 years of them: the ARMv6 of a Pi Zero or a Pi 1 has no
+    /// 64-bit atomics, and with one here the build for it did not compile.
+    apt_count_at: std.atomic.Value(u32),
     // What each `get*` last came to, for the API and MQTT to report without
     // measuring again. Each knows whether its latest attempt worked; see
     // `reading.zig`. Unavailable where the hardware has no such sensor, which
@@ -86,7 +88,7 @@ pub const SystemOps = struct {
             .apt_updates_count = std.atomic.Value(u32).init(0),
             .apt_count_known = std.atomic.Value(bool).init(false),
             .apt_count_fresh = std.atomic.Value(bool).init(false),
-            .apt_count_at = std.atomic.Value(i64).init(0),
+            .apt_count_at = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -543,7 +545,7 @@ pub const SystemOps = struct {
         };
 
         self.apt_updates_count.store(count, .monotonic);
-        self.apt_count_at.store(self.nowSeconds(), .monotonic);
+        self.apt_count_at.store(std.math.lossyCast(u32, self.nowSeconds()), .monotonic);
         self.apt_count_fresh.store(true, .release);
         self.apt_count_known.store(true, .release);
     }
