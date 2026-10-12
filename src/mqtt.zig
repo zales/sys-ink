@@ -27,26 +27,124 @@ pub const Sensor = struct {
 
 /// Every entity published under the SysInk device.
 pub const sensors = [_]Sensor{
-    .{ .id = "cpu_load", .name = "CPU Load", .unit = "%", .state_class = measurement, .icon = "mdi:cpu-64-bit" },
-    .{ .id = "cpu_temp", .name = "CPU Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
-    .{ .id = "memory", .name = "Memory Usage", .unit = "%", .state_class = measurement, .icon = "mdi:memory" },
-    .{ .id = "disk_usage", .name = "Disk Usage", .unit = "%", .state_class = measurement, .icon = "mdi:harddisk" },
-    .{ .id = "disk_temp", .name = "Disk Temperature", .unit = "°C", .device_class = "temperature", .state_class = measurement, .icon = "mdi:thermometer" },
-    .{ .id = "fan_speed", .name = "Fan Speed", .unit = "RPM", .state_class = measurement, .icon = "mdi:fan" },
-    .{ .id = "signal_strength", .name = "WiFi Signal", .unit = "dBm", .device_class = "signal_strength", .state_class = measurement, .icon = "mdi:wifi" },
-    .{ .id = "ip_address", .name = "IP Address", .icon = "mdi:ip-network" },
-    .{ .id = "internet", .name = "Internet Connected", .component = .binary_sensor, .device_class = "connectivity", .icon = "mdi:web" },
-    .{ .id = "traffic_down", .name = "Download Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:download" },
-    .{ .id = "traffic_up", .name = "Upload Speed", .unit = "kB/s", .device_class = "data_rate", .state_class = measurement, .icon = "mdi:upload" },
-    .{ .id = "uptime_days", .name = "Uptime Days", .unit = "d", .state_class = measurement, .icon = "mdi:clock-outline" },
-    .{ .id = "apt_updates", .name = "APT Updates", .state_class = measurement, .icon = "mdi:package-up" },
+    .{
+        .id = "cpu_load",
+        .name = "CPU Load",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:cpu-64-bit",
+    },
+    .{
+        .id = "cpu_temp",
+        .name = "CPU Temperature",
+        .unit = "°C",
+        .device_class = "temperature",
+        .state_class = measurement,
+        .icon = "mdi:thermometer",
+    },
+    .{
+        .id = "memory",
+        .name = "Memory Usage",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:memory",
+    },
+    .{
+        .id = "disk_usage",
+        .name = "Disk Usage",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:harddisk",
+    },
+    .{
+        .id = "disk_temp",
+        .name = "Disk Temperature",
+        .unit = "°C",
+        .device_class = "temperature",
+        .state_class = measurement,
+        .icon = "mdi:thermometer",
+    },
+    .{
+        .id = "fan_speed",
+        .name = "Fan Speed",
+        .unit = "RPM",
+        .state_class = measurement,
+        .icon = "mdi:fan",
+    },
+    .{
+        .id = "signal_strength",
+        .name = "WiFi Signal",
+        .unit = "dBm",
+        .device_class = "signal_strength",
+        .state_class = measurement,
+        .icon = "mdi:wifi",
+    },
+    .{
+        .id = "ip_address",
+        .name = "IP Address",
+        .icon = "mdi:ip-network",
+    },
+    .{
+        .id = "internet",
+        .name = "Internet Connected",
+        .component = .binary_sensor,
+        .device_class = "connectivity",
+        .icon = "mdi:web",
+    },
+    .{
+        .id = "traffic_down",
+        .name = "Download Speed",
+        .unit = "kB/s",
+        .device_class = "data_rate",
+        .state_class = measurement,
+        .icon = "mdi:download",
+    },
+    .{
+        .id = "traffic_up",
+        .name = "Upload Speed",
+        .unit = "kB/s",
+        .device_class = "data_rate",
+        .state_class = measurement,
+        .icon = "mdi:upload",
+    },
+    .{
+        .id = "uptime_days",
+        .name = "Uptime Days",
+        .unit = "d",
+        .state_class = measurement,
+        .icon = "mdi:clock-outline",
+    },
+    .{
+        .id = "apt_updates",
+        .name = "APT Updates",
+        .state_class = measurement,
+        .icon = "mdi:package-up",
+    },
     // device_class problem makes Home Assistant treat ON as a fault, so it shows
     // up in the "problems" view and can drive a notification without a template.
-    .{ .id = "undervoltage", .name = "Under-voltage", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:flash-alert" },
-    .{ .id = "nvme_fault", .name = "NVMe SMART Fault", .component = .binary_sensor, .device_class = "problem", .icon = "mdi:harddisk-remove" },
+    .{
+        .id = "undervoltage",
+        .name = "Under-voltage",
+        .component = .binary_sensor,
+        .device_class = "problem",
+        .icon = "mdi:flash-alert",
+    },
+    .{
+        .id = "nvme_fault",
+        .name = "NVMe SMART Fault",
+        .component = .binary_sensor,
+        .device_class = "problem",
+        .icon = "mdi:harddisk-remove",
+    },
     // Vendor's life-used estimate from the same SMART page; the long-term trend
     // is the early warning the fault bit only gives at the end.
-    .{ .id = "ssd_wear", .name = "SSD Wear", .unit = "%", .state_class = measurement, .icon = "mdi:chart-donut" },
+    .{
+        .id = "ssd_wear",
+        .name = "SSD Wear",
+        .unit = "%",
+        .state_class = measurement,
+        .icon = "mdi:chart-donut",
+    },
 };
 
 const measurement = "measurement";
@@ -97,7 +195,6 @@ pub fn nodeId(buf: *[max_node_id_len]u8, client_id: []const u8) []const u8 {
 
 /// Simple MQTT 3.1.1 client for Home Assistant integration
 pub const MqttClient = struct {
-    allocator: std.mem.Allocator,
     io: std.Io,
     stream: ?net.Stream = null,
     host: []const u8,
@@ -109,6 +206,9 @@ pub const MqttClient = struct {
     discovery_enabled: bool,
     /// Subscribe to the notice topic on every connect.
     notices_enabled: bool,
+    /// Seconds without a state update before Home Assistant shows an entity as
+    /// unavailable.
+    expire_after: u64,
     notify_topic_buf: [256]u8 = undefined,
     notify_topic_len: usize = 0,
     /// Packets from the broker, reassembled.
@@ -156,24 +256,21 @@ pub const MqttClient = struct {
 
     // MQTT Control Packet Types
     const PacketType = enum(u4) {
-        CONNECT = 1,
-        CONNACK = 2,
-        PUBLISH = 3,
-        PUBACK = 4,
-        SUBSCRIBE = 8,
-        SUBACK = 9,
-        PINGREQ = 12,
-        PINGRESP = 13,
-        DISCONNECT = 14,
+        connect = 1,
+        connack = 2,
+        publish = 3,
+        puback = 4,
+        subscribe = 8,
+        suback = 9,
+        pingreq = 12,
+        pingresp = 13,
+        disconnect = 14,
     };
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        cfg: MqttConfig,
-    ) Self {
+    /// Must stay where it is once `connect` has been called: a lookup in
+    /// flight holds a pointer into it.
+    pub fn init(io: std.Io, cfg: MqttConfig) Self {
         var self: Self = .{
-            .allocator = allocator,
             .io = io,
             .host = cfg.host,
             .port = cfg.port,
@@ -183,6 +280,7 @@ pub const MqttClient = struct {
             .topic_prefix = cfg.topic_prefix,
             .discovery_enabled = cfg.discovery_enabled,
             .notices_enabled = cfg.notices_enabled,
+            .expire_after = expireAfterSeconds(cfg.publish_interval),
         };
         if (std.mem.print(&self.notify_topic_buf, "{s}/{s}", .{ cfg.topic_prefix, notify_suffix })) |topic| {
             self.notify_topic_len = topic.len;
@@ -240,7 +338,9 @@ pub const MqttClient = struct {
 
         self.stream = bounded_connect.connectStream(address, self.port, connect_timeout_ms) catch |err| {
             self.recordFailure();
-            log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{ self.host, self.port, err, self.backoffDelay() });
+            log.err("Failed to connect to MQTT broker {s}:{d}: {t} (next retry in {d}s)", .{
+                self.host, self.port, err, self.backoffDelay(),
+            });
             return err;
         };
         errdefer self.closeStream();
@@ -378,7 +478,7 @@ pub const MqttClient = struct {
     /// copied into `notice_buf`, if it was one.
     fn handlePacket(self: *Self, packet: Packet) ?usize {
         switch (packet.kind()) {
-            @backingInt(PacketType.PUBLISH) => {
+            @backingInt(PacketType.publish) => {
                 const message = parsePublish(packet) catch {
                     log.warn("Malformed PUBLISH from the MQTT broker", .{});
                     return null;
@@ -402,7 +502,7 @@ pub const MqttClient = struct {
                 @memcpy(self.notice_buf[0..message.payload.len], message.payload);
                 return message.payload.len;
             },
-            @backingInt(PacketType.SUBACK) => {
+            @backingInt(PacketType.suback) => {
                 // Packet id, then one return code per filter; 0x80 is refusal.
                 if (packet.body.len >= 3 and packet.body[2] == 0x80) {
                     log.warn("MQTT broker refused the subscription to {s}; check its ACL", .{self.notifyTopic()});
@@ -414,7 +514,7 @@ pub const MqttClient = struct {
     }
 
     fn sendPuback(self: *Self, packet_id: u16) void {
-        var packet = [_]u8{ @as(u8, @backingInt(PacketType.PUBACK)) << 4, 0x02, 0, 0 };
+        var packet = [_]u8{ @as(u8, @backingInt(PacketType.puback)) << 4, 0x02, 0, 0 };
         std.mem.writeInt(u16, packet[2..4], packet_id, .big);
         self.sendPacket(&packet) catch {};
     }
@@ -556,7 +656,7 @@ pub const MqttClient = struct {
         const payload = try discoveryPayload(&payload_buf, sensor, .{
             .node_id = self.node(),
             .topic_prefix = self.topic_prefix,
-            .expire_after = expireAfterSeconds(),
+            .expire_after = self.expire_after,
         });
 
         try self.publishRaw(topic, payload, true);
@@ -576,10 +676,18 @@ pub const MqttClient = struct {
     }
 
     /// Send one whole packet, waiting at most `send_timeout_ms` for room.
+    ///
+    /// Written as to a stream, which has no use for a destination: the
+    /// connection is one. `Socket.send` is the datagram call and wants an
+    /// address to go with every packet. TCP on Linux ignores it once
+    /// connected, which is all that made it work; the Unix socket that stands
+    /// in for the broker under test refuses it there, as it is entitled to.
     fn sendPacket(self: *Self, packet: []const u8) !void {
         const stream = self.stream orelse return error.NotConnected;
         try bounded_connect.waitWritable(stream.socket.handle, send_timeout_ms);
-        try stream.socket.send(self.io, &stream.socket.address, packet);
+
+        var writer = stream.writer(self.io, &.{});
+        writer.interface.writeAll(packet) catch return writer.err orelse error.WriteFailed;
     }
 
     fn receiveConnack(self: *Self) !void {
@@ -644,8 +752,8 @@ const DiscoveryOptions = struct {
 /// Without an expiry a Pi that is switched off, or a daemon that has stopped,
 /// leaves every entity showing its last value indefinitely, which reads as a
 /// healthy machine. Three intervals ride out a missed cycle or two.
-fn expireAfterSeconds() u64 {
-    return 3 * @as(u64, config.Config.interval_fast);
+fn expireAfterSeconds(publish_interval: u32) u64 {
+    return 3 * @as(u64, publish_interval);
 }
 
 /// Build `sensor`'s discovery config as JSON.
@@ -726,7 +834,7 @@ fn notifyDiscoveryPayload(buf: []u8, node_id: []const u8, topic_prefix: []const 
 
 /// Validate a CONNACK packet and map its return code to an error.
 fn interpretConnack(packet: [4]u8) !void {
-    if (packet[0] >> 4 != @backingInt(MqttClient.PacketType.CONNACK)) return error.UnexpectedPacket;
+    if (packet[0] >> 4 != @backingInt(MqttClient.PacketType.connack)) return error.UnexpectedPacket;
 
     return switch (packet[3]) {
         0 => {},
@@ -770,7 +878,7 @@ fn buildPublish(buf: []u8, topic: []const u8, payload: []const u8, retain: bool)
     if (5 + remaining_len > buf.len) return error.PayloadTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.PUBLISH)) << 4) | @intFromBool(retain);
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.publish)) << 4) | @intFromBool(retain);
     pos += 1;
 
     pos += encodeRemainingLength(buf[pos..], remaining_len);
@@ -794,7 +902,7 @@ fn buildSubscribe(buf: []u8, packet_id: u16, topic: []const u8) ![]const u8 {
 
     var pos: usize = 0;
     // MQTT-3.8.1-1: the reserved flags of SUBSCRIBE are 0b0010.
-    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.SUBSCRIBE)) << 4) | 0x02;
+    buf[pos] = (@as(u8, @backingInt(MqttClient.PacketType.subscribe)) << 4) | 0x02;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
     std.mem.writeInt(u16, buf[pos..][0..2], packet_id, .big);
@@ -960,7 +1068,7 @@ fn buildConnect(buf: []u8, client_id: []const u8, will: ?Will, username: ?[]cons
     if (5 + remaining_len > buf.len) return error.PacketTooLarge;
 
     var pos: usize = 0;
-    buf[pos] = @as(u8, @backingInt(MqttClient.PacketType.CONNECT)) << 4;
+    buf[pos] = @as(u8, @backingInt(MqttClient.PacketType.connect)) << 4;
     pos += 1;
     pos += encodeRemainingLength(buf[pos..], remaining_len);
 
@@ -1013,8 +1121,10 @@ const Resolver = struct {
     answer: LookupError![4]u8 = error.DnsResolutionFailed,
     /// How long `resolve` waits on a lookup it has just started.
     wait_ms: u32 = default_wait_ms,
-    /// A seam for the tests, which need a lookup that takes its time.
-    lookup_fn: *const fn (name: [*:0]const u8) LookupError![4]u8 = &lookup,
+    /// A seam for the tests, which need a lookup that takes its time, and
+    /// whatever that lookup needs to know: handed to it as it is.
+    lookup_fn: *const fn (ctx: ?*anyopaque, name: [*:0]const u8) LookupError![4]u8 = &lookup,
+    lookup_ctx: ?*anyopaque = null,
 
     /// The same bound as the internet probe, which holds the same loop up
     /// for the same kind of reason.
@@ -1035,7 +1145,7 @@ const Resolver = struct {
                 // No thread to be had. Looked up here, as it always used to
                 // be, rather than never: a late connection beats none.
                 log.debug("Cannot resolve {s} off the main loop: {t}", .{ host, err });
-                return self.lookup_fn(name.ptr);
+                return self.lookup_fn(self.lookup_ctx, name.ptr);
             };
 
             // Only for a lookup started here. One still running from an
@@ -1051,7 +1161,7 @@ const Resolver = struct {
     }
 
     fn run(self: *Resolver, io: std.Io) void {
-        self.answer = self.lookup_fn(@ptrCast(&self.name));
+        self.answer = self.lookup_fn(self.lookup_ctx, @ptrCast(&self.name));
         self.done.set(io);
     }
 
@@ -1083,7 +1193,7 @@ const Resolver = struct {
 /// the target host rather than assumed. It is still an unbounded call —
 /// getaddrinfo has internal timeouts but none we control — which is why only
 /// `Resolver` calls it, off the main loop.
-fn lookup(host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
+fn lookup(_: ?*anyopaque, host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
     hints.ai_socktype = c.SOCK_STREAM;
@@ -1111,27 +1221,31 @@ pub const MqttConfig = struct {
     discovery_enabled: bool = true,
     /// Set from `NOTIFY_ENABLED` by the caller, which owns that setting.
     notices_enabled: bool = true,
+    /// Seconds between state updates. Set from `INTERVAL_FAST` by the caller,
+    /// which owns that one too; entities expire after three of these.
+    publish_interval: u32 = 30,
 
-    pub fn load(init: std.process.Init) MqttConfig {
-        return fromEnv(init.environ_map);
-    }
+    /// The broker settings `map` gives. Read through `config.Env`, as every
+    /// setting is, so that a value that cannot be used and a misspelt name
+    /// end up in `report` with the rest.
+    pub fn fromEnv(map: *const std.process.Environ.Map, report: *config.Report) MqttConfig {
+        const env: config.Env = .{ .map = map, .report = report };
+        const defaults: MqttConfig = .{};
 
-    pub fn fromEnv(env: *const std.process.Environ.Map) MqttConfig {
-        var cfg = MqttConfig{};
-
-        if (env.get("MQTT_ENABLED")) |val| cfg.enabled = config.parseBool(val);
-        if (env.get("MQTT_HOST")) |val| cfg.host = val;
-        if (env.get("MQTT_PORT")) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
-        if (env.get("MQTT_USERNAME")) |val| cfg.username = val;
-        if (env.get("MQTT_PASSWORD")) |val| cfg.password = val;
-        if (env.get("MQTT_CLIENT_ID")) |val| cfg.client_id = val;
-        // Follows the client id unless set, so a second panel on the same broker
-        // needs one variable changed rather than two. The defaults are equal, so
-        // an existing setup keeps its topics.
-        cfg.topic_prefix = env.get("MQTT_TOPIC_PREFIX") orelse cfg.client_id;
-        if (env.get("MQTT_DISCOVERY")) |val| cfg.discovery_enabled = config.parseBool(val);
-
-        return cfg;
+        const client_id = env.string("MQTT_CLIENT_ID", defaults.client_id);
+        return .{
+            .enabled = env.boolean("MQTT_ENABLED", defaults.enabled),
+            .host = env.string("MQTT_HOST", defaults.host),
+            .port = env.int(u16, "MQTT_PORT", defaults.port, 0),
+            .username = env.get("MQTT_USERNAME"),
+            .password = env.get("MQTT_PASSWORD"),
+            .client_id = client_id,
+            // Follows the client id unless set, so a second panel on the same
+            // broker needs one variable changed rather than two. The defaults
+            // are equal, so an existing setup keeps its topics.
+            .topic_prefix = env.get("MQTT_TOPIC_PREFIX") orelse client_id,
+            .discovery_enabled = env.boolean("MQTT_DISCOVERY", defaults.discovery_enabled),
+        };
     }
 };
 
@@ -1253,7 +1367,7 @@ test "interpretConnack rejects a non-CONNACK packet" {
 test "publishing on a dropped connection does not reconnect behind the caller" {
     // `io` is left undefined on purpose: any attempt to resolve, connect or read
     // the clock would trip over it. Reconnecting is `connect`'s job only.
-    var client = MqttClient.init(testing.allocator, undefined, .{});
+    var client = MqttClient.init(undefined, .{});
     defer client.deinit();
 
     try testing.expectError(error.NotConnected, client.publish("cpu_load", "1", false));
@@ -1416,14 +1530,77 @@ test "numeric sensors keep statistics and the rest do not" {
 test "the topic prefix follows the client id unless set" {
     var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
+    var report: config.Report = .{};
 
-    try testing.expectEqualStrings("sysink", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("sysink", MqttConfig.fromEnv(&env, &report).topic_prefix);
 
     try env.put("MQTT_CLIENT_ID", "office");
-    try testing.expectEqualStrings("office", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("office", MqttConfig.fromEnv(&env, &report).topic_prefix);
 
     try env.put("MQTT_TOPIC_PREFIX", "custom");
-    try testing.expectEqualStrings("custom", MqttConfig.fromEnv(&env).topic_prefix);
+    try testing.expectEqualStrings("custom", MqttConfig.fromEnv(&env, &report).topic_prefix);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+}
+
+test "broker settings that cannot be used are turned down, not passed over" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("MQTT_ENABLED", "ture");
+    try env.put("MQTT_PORT", "mqtt");
+    try env.put("MQTT_HOST", "broker.lan");
+    var report: config.Report = .{};
+
+    const cfg = MqttConfig.fromEnv(&env, &report);
+    try testing.expect(!cfg.enabled);
+    try testing.expectEqual(@as(u16, 1883), cfg.port);
+    try testing.expectEqualStrings("broker.lan", cfg.host);
+
+    try testing.expectEqual(@as(usize, 2), report.rejected().len);
+    try testing.expectEqualStrings("MQTT_ENABLED", report.rejected()[0].name);
+    try testing.expectEqualStrings("MQTT_PORT", report.rejected()[1].name);
+    try testing.expectEqualStrings("1883", report.rejected()[1].used());
+}
+
+test "broker settings left blank are the defaults, and credentials left blank are none" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    for ([_][]const u8{ "MQTT_HOST", "MQTT_PORT", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CLIENT_ID", "MQTT_TOPIC_PREFIX" }) |name| {
+        try env.put(name, "");
+    }
+    var report: config.Report = .{};
+
+    const cfg = MqttConfig.fromEnv(&env, &report);
+    // An empty name to look up, or an empty user to log in as, is nobody's
+    // intention: it used to be what a blank line in the file came to.
+    try testing.expectEqualStrings("localhost", cfg.host);
+    try testing.expectEqual(@as(u16, 1883), cfg.port);
+    try testing.expect(cfg.username == null);
+    try testing.expect(cfg.password == null);
+    try testing.expectEqualStrings("sysink", cfg.client_id);
+    try testing.expectEqualStrings("sysink", cfg.topic_prefix);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
+}
+
+test "a broker setting misspelt is pointed out by name, and its value is not kept" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("MQTT_PASSWRD", "hunter2");
+    try env.put("MQTT_KEEPALIVE", "60");
+    var report: config.Report = .{};
+
+    _ = MqttConfig.fromEnv(&env, &report);
+    report.findUnknown(&env);
+
+    try testing.expectEqual(@as(usize, 2), report.unknown().len);
+    for (report.unknown()) |stray| {
+        if (std.mem.eql(u8, stray.name, "MQTT_PASSWRD")) try testing.expectEqualStrings("MQTT_PASSWORD", stray.meant.?);
+        if (std.mem.eql(u8, stray.name, "MQTT_KEEPALIVE")) try testing.expect(stray.meant == null);
+    }
+}
+
+test "entities expire after three publish intervals" {
+    const client = MqttClient.init(undefined, .{ .publish_interval = 10 });
+    try testing.expectEqual(@as(u64, 30), client.expire_after);
 }
 
 test "sensor ids are unique" {
@@ -1542,16 +1719,22 @@ test "parsePublish rejects a topic length the packet cannot hold" {
 
 /// A client whose connection is one end of a socket pair, the other end
 /// standing in for the broker.
-const LoopbackClient = struct {
+///
+/// Public for the tests of whatever publishes through a client, which read
+/// what it sent with `nextPublished`. Keep it where `init` put it while
+/// anything holds a pointer to `client`.
+pub const LoopbackClient = struct {
     client: MqttClient,
     broker: c_int,
+    /// What has arrived at the broker's end, reassembled.
+    arrived: Inbound = .{},
 
-    fn init() !LoopbackClient {
+    pub fn init() !LoopbackClient {
         var fds: [2]c_int = undefined;
         if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) return error.SocketPairFailed;
 
         var self: LoopbackClient = .{
-            .client = MqttClient.init(testing.allocator, testing.io, .{}),
+            .client = MqttClient.init(testing.io, .{}),
             .broker = fds[1],
         };
         self.client.stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .loopback(0) } } };
@@ -1559,7 +1742,7 @@ const LoopbackClient = struct {
         return self;
     }
 
-    fn deinit(self: *LoopbackClient) void {
+    pub fn deinit(self: *LoopbackClient) void {
         // No DISCONNECT: nothing reads it, and a full buffer would block.
         self.client.connected = false;
         self.client.deinit();
@@ -1569,7 +1752,43 @@ const LoopbackClient = struct {
     fn send(self: *LoopbackClient, bytes: []const u8) !void {
         if (std.c.write(self.broker, bytes.ptr, bytes.len) != bytes.len) return error.WriteFailed;
     }
+
+    /// The next message the client published, in the order it sent them, or
+    /// null once the broker's end has no more. Borrowed until the next call.
+    pub fn nextPublished(self: *LoopbackClient) ?Publish {
+        while (true) {
+            const waiting = self.arrived.next() catch return null;
+            if (waiting) |packet| {
+                if (packet.kind() != @backingInt(MqttClient.PacketType.publish)) continue;
+                return parsePublish(packet) catch null;
+            }
+
+            const space = self.arrived.free();
+            const rc = c.recv(self.broker, space.ptr, space.len, c.MSG_DONTWAIT);
+            if (rc <= 0) return null;
+            self.arrived.commit(@intCast(rc));
+        }
+    }
 };
+
+test "what the client publishes can be read back at the broker's end" {
+    var lb = try LoopbackClient.init();
+    defer lb.deinit();
+    try testing.expect(lb.nextPublished() == null);
+
+    try lb.client.publish("cpu_load", "12", false);
+    try lb.client.publish("status", "online", true);
+
+    const first = lb.nextPublished().?;
+    try testing.expectEqualStrings("sysink/cpu_load", first.topic);
+    try testing.expectEqualStrings("12", first.payload);
+    try testing.expect(!first.retain);
+
+    const second = lb.nextPublished().?;
+    try testing.expectEqualStrings("sysink/status", second.topic);
+    try testing.expect(second.retain);
+    try testing.expect(lb.nextPublished() == null);
+}
 
 test "a notice published to the topic is received" {
     var lb = try LoopbackClient.init();
@@ -1670,32 +1889,43 @@ test "a broker given by address is never looked up" {
     try testing.expect(resolver.task == null);
 }
 
-fn failingLookup(_: [*:0]const u8) Resolver.LookupError![4]u8 {
+fn failingLookup(_: ?*anyopaque, _: [*:0]const u8) Resolver.LookupError![4]u8 {
     return error.DnsResolutionFailed;
 }
 
 /// A lookup that answers only once the test lets it, standing in for a
 /// nameserver that takes its time.
+///
+/// Each test has its own: the gate and the count belong to the lookup they
+/// are passed with, and not to every test that uses one. Shared between the
+/// test and the task the lookup runs on, hence the atomics.
 const SlowLookup = struct {
-    var gate: std.Io.Event = .unset;
-    var calls: std.atomic.Value(u32) = .init(0);
+    gate: std.Io.Event = .unset,
+    calls: std.atomic.Value(u32) = .init(0),
 
-    fn lookup(name: [*:0]const u8) Resolver.LookupError![4]u8 {
-        _ = calls.fetchAdd(1, .monotonic);
-        gate.waitUncancelable(testing.io);
+    fn lookup(ctx: ?*anyopaque, name: [*:0]const u8) Resolver.LookupError![4]u8 {
+        const self: *SlowLookup = @ptrCast(@alignCast(ctx.?));
+        _ = self.calls.fetchAdd(1, .monotonic);
+        self.gate.waitUncancelable(testing.io);
         if (!std.mem.eql(u8, std.mem.span(name), "broker.example")) return error.DnsResolutionFailed;
         return .{ 10, 0, 0, 7 };
+    }
+
+    fn open(self: *SlowLookup) void {
+        self.gate.set(testing.io);
+    }
+
+    fn count(self: *const SlowLookup) u32 {
+        return self.calls.load(.monotonic);
     }
 };
 
 test "a slow lookup costs the caller one short wait, and its answer is collected later" {
-    SlowLookup.gate.reset();
-    SlowLookup.calls.store(0, .monotonic);
-
-    var resolver: Resolver = .{ .lookup_fn = &SlowLookup.lookup, .wait_ms = 20 };
+    var slow: SlowLookup = .{};
+    var resolver: Resolver = .{ .lookup_fn = &SlowLookup.lookup, .lookup_ctx = &slow, .wait_ms = 20 };
     defer resolver.deinit(testing.io);
     // Whatever fails below, the task must be let go or deinit waits for ever.
-    defer SlowLookup.gate.set(testing.io);
+    defer slow.open();
 
     // The regression: this call used to return only when the lookup did.
     try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
@@ -1703,16 +1933,16 @@ test "a slow lookup costs the caller one short wait, and its answer is collected
     try testing.expectError(error.StillResolving, resolver.resolve(testing.io, "broker.example"));
     try testing.expect(resolver.task != null);
 
-    SlowLookup.gate.set(testing.io);
+    slow.open();
     resolver.task.?.await(testing.io);
 
     try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolver.resolve(testing.io, "broker.example"));
-    try testing.expectEqual(@as(u32, 1), SlowLookup.calls.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), slow.count());
     try testing.expect(resolver.task == null);
 
     // The answer is used once: the next connect looks the name up afresh.
     try testing.expectEqual([4]u8{ 10, 0, 0, 7 }, try resolveEventually(&resolver, "broker.example"));
-    try testing.expectEqual(@as(u32, 2), SlowLookup.calls.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), slow.count());
 }
 
 /// `resolve`, carried on past `StillResolving` to the answer. A lookup that

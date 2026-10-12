@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const GpioNative = @import("../gpio_native.zig").GpioNative;
+const ioctl = @import("../ioctl.zig");
 const syscall = @import("../syscall.zig");
 
 const log = std.log.scoped(.epd_config);
@@ -10,29 +11,32 @@ const is_linux = builtin.target.os.tag == .linux;
 /// GPIO and SPI configuration for Waveshare e-ink display using native chardev
 pub const EpdConfig = struct {
     // Pin definitions (BCM numbering)
-    pub const RST_PIN: u32 = 17;
-    pub const DC_PIN: u32 = 25;
-    pub const CS_PIN: u32 = 8;
-    pub const BUSY_PIN: u32 = 24;
-    pub const PWR_PIN: u32 = 18;
+    pub const rst_pin: u32 = 17;
+    pub const dc_pin: u32 = 25;
+    pub const cs_pin: u32 = 8;
+    pub const busy_pin: u32 = 24;
+    pub const pwr_pin: u32 = 18;
 
-    allocator: std.mem.Allocator,
-    spi_fd: std.posix.fd_t,
+    pub const Options = struct {
+        /// GPIO chip the panel's lines are on. Null: the one whose label says
+        /// it is the header's, and failing that `fallback_gpio_chip`.
+        gpio_chip: ?[]const u8 = null,
+        spi_device: []const u8 = "/dev/spidev0.0",
+    };
 
-    line_rst: ?GpioNative.Handle,
-    line_dc: ?GpioNative.Handle,
-    line_pwr: ?GpioNative.Handle,
-    line_busy: ?GpioNative.Handle,
+    /// Where the header is on every Pi up to the 4.
+    const fallback_gpio_chip = "/dev/gpiochip0";
 
-    pub fn init(allocator: std.mem.Allocator) EpdConfig {
-        return .{
-            .allocator = allocator,
-            .spi_fd = -1,
-            .line_rst = null,
-            .line_dc = null,
-            .line_pwr = null,
-            .line_busy = null,
-        };
+    options: Options,
+    spi_fd: std.posix.fd_t = -1,
+
+    line_rst: ?GpioNative.Handle = null,
+    line_dc: ?GpioNative.Handle = null,
+    line_pwr: ?GpioNative.Handle = null,
+    line_busy: ?GpioNative.Handle = null,
+
+    pub fn init(options: Options) EpdConfig {
+        return .{ .options = options };
     }
 
     /// Initialize SPI and GPIO using chardev
@@ -43,23 +47,26 @@ pub const EpdConfig = struct {
         // idempotent, so the later deinit-time call is a no-op.
         errdefer self.moduleExit();
 
-        const chip_path = @import("../config.zig").Config.gpio_chip;
+        var found_chip: [GpioNative.chip_path_max]u8 = undefined;
+        const chip_path = self.options.gpio_chip orelse
+            GpioNative.findChip(&found_chip) orelse
+            fallback_gpio_chip;
         log.info("Requesting GPIO lines from {s}", .{chip_path});
 
         // Request pins
-        self.line_rst = try GpioNative.requestLine(chip_path, RST_PIN, .Output);
-        self.line_dc = try GpioNative.requestLine(chip_path, DC_PIN, .Output);
-        self.line_pwr = try GpioNative.requestLine(chip_path, PWR_PIN, .Output);
-        self.line_busy = try GpioNative.requestLine(chip_path, BUSY_PIN, .Input);
+        self.line_rst = try GpioNative.requestLine(chip_path, rst_pin, .output);
+        self.line_dc = try GpioNative.requestLine(chip_path, dc_pin, .output);
+        self.line_pwr = try GpioNative.requestLine(chip_path, pwr_pin, .output);
+        self.line_busy = try GpioNative.requestLine(chip_path, busy_pin, .input);
 
         log.info("All GPIO lines requested successfully", .{});
 
         // Set initial values - PWR high (on)
-        try self.digitalWrite(PWR_PIN, 1);
+        try self.digitalWrite(pwr_pin, 1);
         log.info("Power on, waiting for display to stabilize", .{});
         self.delayMs(200); // Give display time to power up
 
-        const spi_path = @import("../config.zig").Config.spi_device;
+        const spi_path = self.options.spi_device;
         log.info("Opening SPI device {s}", .{spi_path});
         self.spi_fd = std.posix.openat(std.posix.AT.FDCWD, spi_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch |err| {
             log.err("Failed to open SPI device {s}: {t}", .{ spi_path, err });
@@ -68,9 +75,6 @@ pub const EpdConfig = struct {
         };
 
         log.info("Configuring SPI", .{});
-        const SPI_IOC_WR_MODE: u32 = 0x40016b01;
-        const SPI_IOC_WR_BITS_PER_WORD: u32 = 0x40016b03;
-        const SPI_IOC_WR_MAX_SPEED_HZ: u32 = 0x40046b04;
 
         var mode: u8 = 0; // SPI_MODE_0
         var bits: u8 = 8;
@@ -82,6 +86,13 @@ pub const EpdConfig = struct {
 
         log.info("SPI configured successfully", .{});
     }
+
+    // uapi/linux/spi/spidev.h, under the names it gives them. Derived from
+    // the type each takes, as the GPIO and NVMe requests are from theirs, and
+    // pinned by the test below.
+    const SPI_IOC_WR_MODE = ioctl.iow('k', 1, u8);
+    const SPI_IOC_WR_BITS_PER_WORD = ioctl.iow('k', 3, u8);
+    const SPI_IOC_WR_MAX_SPEED_HZ = ioctl.iow('k', 4, u32);
 
     fn spiIoctl(self: *EpdConfig, request: u32, arg: usize, what: []const u8) !void {
         const rc = std.os.linux.ioctl(self.spi_fd, request, arg);
@@ -97,9 +108,9 @@ pub const EpdConfig = struct {
         if (!is_linux) return;
 
         // Set pins low before releasing
-        self.digitalWrite(RST_PIN, 0) catch {};
-        self.digitalWrite(DC_PIN, 0) catch {};
-        self.digitalWrite(PWR_PIN, 0) catch {};
+        self.digitalWrite(rst_pin, 0) catch {};
+        self.digitalWrite(dc_pin, 0) catch {};
+        self.digitalWrite(pwr_pin, 0) catch {};
 
         // Release lines
         inline for (.{ "line_rst", "line_dc", "line_pwr", "line_busy" }) |field| {
@@ -120,14 +131,14 @@ pub const EpdConfig = struct {
     pub fn digitalWrite(self: *EpdConfig, pin: u32, value: u8) !void {
         if (!is_linux) return;
 
-        // CS_PIN (Chip Select) is automatically controlled by SPI hardware driver
+        // cs_pin (Chip Select) is automatically controlled by SPI hardware driver
         // when using /dev/spidev. Manual GPIO control would interfere with SPI timing.
-        if (pin == CS_PIN) return;
+        if (pin == cs_pin) return;
 
         const handle = switch (pin) {
-            RST_PIN => self.line_rst,
-            DC_PIN => self.line_dc,
-            PWR_PIN => self.line_pwr,
+            rst_pin => self.line_rst,
+            dc_pin => self.line_dc,
+            pwr_pin => self.line_pwr,
             else => return error.InvalidPin,
         };
 
@@ -142,7 +153,7 @@ pub const EpdConfig = struct {
     pub fn digitalRead(self: *EpdConfig, pin: u32) !u8 {
         if (!is_linux) return 0;
 
-        if (pin != BUSY_PIN) return error.InvalidPin;
+        if (pin != busy_pin) return error.InvalidPin;
 
         if (self.line_busy) |h| {
             return try h.getValue();
@@ -202,3 +213,24 @@ pub const EpdConfig = struct {
         }
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "the SPI request numbers are the ones the kernel's headers define" {
+    // As `tools/check_ioctl.c` prints them from uapi/linux/spi/spidev.h.
+    try testing.expectEqual(@as(u32, 0x40016b01), EpdConfig.SPI_IOC_WR_MODE);
+    try testing.expectEqual(@as(u32, 0x40016b03), EpdConfig.SPI_IOC_WR_BITS_PER_WORD);
+    try testing.expectEqual(@as(u32, 0x40046b04), EpdConfig.SPI_IOC_WR_MAX_SPEED_HZ);
+}
+
+test "nothing is driven before the transport is brought up" {
+    var transport = EpdConfig.init(.{});
+    try testing.expectError(error.NotInitialized, transport.spiWrite("x"));
+    // Safe on a transport that never came up, and safe to repeat.
+    transport.moduleExit();
+    transport.moduleExit();
+}

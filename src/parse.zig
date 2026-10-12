@@ -97,7 +97,16 @@ pub fn unsignedInt(content: []const u8) !u32 {
     return std.fmt.parseInt(u32, trimmed, 10);
 }
 
-pub const Uptime = struct { days: u32, hours: u32, minutes: u32 };
+pub const Uptime = struct {
+    days: u32,
+    hours: u32,
+    minutes: u32,
+
+    /// The whole of it in minutes.
+    pub fn totalMinutes(self: Uptime) u64 {
+        return @as(u64, self.days) * 24 * 60 + @as(u64, self.hours) * 60 + self.minutes;
+    }
+};
 
 /// Parse /proc/uptime ("<seconds>.<frac> <idle>").
 pub fn uptime(content: []const u8) !Uptime {
@@ -132,6 +141,19 @@ pub fn wirelessSignal(content: []const u8, interface: []const u8) ?i32 {
         const level = parts.next() orelse return null;
         // Values carry a trailing '.' to mark them as updated.
         return std.fmt.parseInt(i32, std.mem.trimEnd(u8, level, "."), 10) catch null;
+    }
+    return null;
+}
+
+/// Name of the first interface /proc/net/wireless lists, or null when it lists
+/// none. Only wireless interfaces appear there, whatever they are called.
+pub fn firstWirelessInterface(content: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        // The two header lines have no colon.
+        const colon = std.mem.find(u8, line, ":") orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], &std.ascii.whitespace);
+        if (name.len > 0) return name;
     }
     return null;
 }
@@ -234,8 +256,9 @@ pub fn netDevTotalsWhere(content: []const u8, filter: anytype) ?NetTotals {
 /// A package line starts with `name/suite`, and that part is never translated.
 /// Everything else apt prints here may be: the "Listing... Done" header is
 /// translated under a non-English locale, and matching on the English word
-/// used to count it as a package, so the tick for "up to date" never showed. The daemon also runs apt in the C locale, but the count should not
-/// depend on that.
+/// used to count it as a package, so the tick for "up to date" never showed.
+/// The daemon also runs apt in the C locale, but the count should not depend
+/// on that.
 pub fn aptUpgradableCount(stdout: []const u8) u32 {
     var count: u32 = 0;
     var lines = std.mem.splitScalar(u8, stdout, '\n');
@@ -555,6 +578,35 @@ test "wirelessSignal does not match on a name prefix" {
     // "wlan0" is a prefix of "wlan01" but must not match.
     try testing.expectEqual(@as(?i32, null), wirelessSignal(content, "wlan0"));
     try testing.expectEqual(@as(?i32, -55), wirelessSignal(content, "wlan01"));
+}
+
+test "an uptime adds up to its minutes" {
+    try testing.expectEqual(@as(u64, 0), (Uptime{ .days = 0, .hours = 0, .minutes = 0 }).totalMinutes());
+    try testing.expectEqual(@as(u64, 4445), (Uptime{ .days = 3, .hours = 2, .minutes = 5 }).totalMinutes());
+    // Past what 32 bits of minutes hold: the sum is widened before it is taken.
+    try testing.expectEqual(
+        @as(u64, 6_184_752_906_239),
+        (Uptime{ .days = std.math.maxInt(u32), .hours = 23, .minutes = 59 }).totalMinutes(),
+    );
+}
+
+test "the first wireless interface is found whatever it is called" {
+    const content =
+        \\Inter-| sta-|   Quality        |   Discarded packets
+        \\ face | tus | link level noise |  nwid crypt frag retry misc
+        \\wlp2s0: 0000   55.  -62.  -256        0     0    0     0    0
+        \\ wlan1: 0000   70.  -40.  -256        0     0    0     0    0
+    ;
+    try testing.expectEqualStrings("wlp2s0", firstWirelessInterface(content).?);
+    try testing.expectEqual(@as(?i32, -62), wirelessSignal(content, firstWirelessInterface(content).?));
+
+    // No Wi-Fi at all: the two header lines and nothing else.
+    const headers_only =
+        \\Inter-| sta-|   Quality        |   Discarded packets
+        \\ face | tus | link level noise |  nwid crypt frag retry misc
+    ;
+    try testing.expect(firstWirelessInterface(headers_only) == null);
+    try testing.expect(firstWirelessInterface("") == null);
 }
 
 test "a cable outranks Wi-Fi whatever the port is called" {

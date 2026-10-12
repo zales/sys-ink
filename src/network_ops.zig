@@ -1,8 +1,8 @@
 const std = @import("std");
-const config = @import("config.zig");
 const parse = @import("parse.zig");
-const Reading = @import("reading.zig").Reading;
 const bounded_connect = @import("bounded_connect.zig");
+const Reading = @import("reading.zig").Reading;
+const Root = @import("sysroot.zig").Root;
 
 const c = @import("c"); // src/c.h
 
@@ -10,6 +10,9 @@ const log = std.log.scoped(.network);
 
 /// Longest IPv4 dotted quad ("255.255.255.255").
 pub const max_ip_len = 15;
+
+/// Longest interface name the kernel allows, IFNAMSIZ less its terminator.
+const max_interface_len = 15;
 
 /// How long an internet-reachability probe stays valid. Several callers ask for
 /// it each cycle and the probe blocks while it runs.
@@ -19,9 +22,19 @@ const internet_cache_seconds = 60;
 /// render loop for the kernel's TCP timeout.
 const probe_timeout_ms = 1000;
 
+/// The host a TCP connection is tried to, to decide whether the machine has
+/// internet access.
+pub const Probe = struct {
+    ip: [4]u8 = .{ 8, 8, 8, 8 },
+    port: u16 = 53,
+};
+
 /// Network operations for gathering network metrics
 pub const NetworkOps = struct {
     io: std.Io,
+    /// Where procfs and sysfs are read from: `/`, or a tree of fixtures.
+    root: Root,
+    probe: Probe,
     cached_internet: ?bool = null,
     cached_internet_at: i64 = 0,
 
@@ -30,11 +43,12 @@ pub const NetworkOps = struct {
     last_signal: ?i32 = null,
     last_ip: [max_ip_len]u8 = undefined,
     last_ip_len: usize = 0,
-    /// Whether that address is on a wired interface. See `lastIpIsWired`.
-    last_ip_wired: bool = false,
+    /// The interface that address is on.
+    last_ip_interface: [max_interface_len]u8 = undefined,
+    last_ip_interface_len: usize = 0,
 
-    pub fn init(io: std.Io) NetworkOps {
-        return .{ .io = io };
+    pub fn init(io: std.Io, root: Root, probe: Probe) NetworkOps {
+        return .{ .io = io, .root = root, .probe = probe };
     }
 
     /// The most recent signal reading, or null if there was none.
@@ -54,7 +68,8 @@ pub const NetworkOps = struct {
     /// and everything else that carries an address here — eth0, end0, enp*,
     /// USB adapters — is wired.
     pub fn lastIpIsWired(self: *const NetworkOps) bool {
-        return self.last_ip_len != 0 and self.last_ip_wired;
+        const interface = self.lastIpInterface() orelse return false;
+        return !isWireless(interface);
     }
 
     /// The address the most recent look found, or null if it found none.
@@ -63,48 +78,62 @@ pub const NetworkOps = struct {
         return self.last_ip[0..self.last_ip_len];
     }
 
+    /// The interface that address is on, or null if there is none.
+    fn lastIpInterface(self: *const NetworkOps) ?[]const u8 {
+        if (self.last_ip_len == 0) return null;
+        return self.last_ip_interface[0..self.last_ip_interface_len];
+    }
+
     /// Whether the machine can reach the configured probe host.
     ///
     /// Results are cached for `internet_cache_seconds` so the display, the APT
     /// check and MQTT publishing share a single probe.
     pub fn checkInternetConnection(self: *NetworkOps) bool {
         const now = std.Io.Timestamp.now(self.io, .awake).toSeconds();
+        return self.checkInternetAt(now, TcpProber{});
+    }
 
+    /// `checkInternetConnection` at an explicit time, asking `prober` whether
+    /// the host answers: anything with a `reaches(Probe) bool`. So that the
+    /// caching is testable without a clock or a network.
+    fn checkInternetAt(self: *NetworkOps, now: i64, prober: anytype) bool {
         if (self.cached_internet) |cached| {
             if (now - self.cached_internet_at < internet_cache_seconds) return cached;
         }
 
-        const reachable = probeInternet();
+        const reachable = prober.reaches(self.probe);
         self.cached_internet = reachable;
         self.cached_internet_at = now;
         return reachable;
     }
 
-    /// Bounded TCP connect against the configured probe host.
-    fn probeInternet() bool {
-        const fd = bounded_connect.connect(
-            config.Config.internet_check_ip,
-            config.Config.internet_check_port,
-            probe_timeout_ms,
-        ) catch return false;
-        bounded_connect.closeFd(fd);
-        return true;
-    }
+    /// Asks by trying a TCP connection, bounded in time.
+    const TcpProber = struct {
+        fn reaches(_: TcpProber, probe: Probe) bool {
+            const fd = bounded_connect.connect(probe.ip, probe.port, probe_timeout_ms) catch return false;
+            bounded_connect.closeFd(fd);
+            return true;
+        }
+    };
 
-    /// Get WiFi signal strength in dBm from /proc/net/wireless
-    pub fn getSignalStrength(self: *NetworkOps, interface: []const u8) ?i32 {
-        // Forgotten before looking, as the address is: a look that finds
-        // nothing, or cannot look at all, must not leave the last reading
-        // behind for MQTT to go on publishing.
+    /// Wi-Fi signal strength in dBm from /proc/net/wireless, or null when
+    /// there is no Wi-Fi.
+    ///
+    /// Of the interface the panel's address is on when that one is wireless,
+    /// and otherwise of the first one listed: on a cable the reading is still
+    /// taken, for MQTT. No name is assumed. `wlan0` is what Raspberry Pi OS
+    /// calls it, and `wlp2s0` or `wlx…` is what predictable names do, where a
+    /// fixed `wlan0` never showed a signal at all.
+    pub fn getSignalStrength(self: *NetworkOps) ?i32 {
         self.last_signal = null;
 
-        const file = std.Io.Dir.openFileAbsolute(self.io, "/proc/net/wireless", .{}) catch return null;
-        defer file.close(self.io);
-
         var buf: [2048]u8 = undefined;
-        const bytes_read = file.readPositionalAll(self.io, &buf, 0) catch return null;
+        const content = self.root.read("/proc/net/wireless", &buf) catch return null;
 
-        self.last_signal = parse.wirelessSignal(buf[0..bytes_read], interface);
+        const carrying = if (self.lastIpInterface()) |name| (if (isWireless(name)) name else null) else null;
+        const interface = carrying orelse parse.firstWirelessInterface(content) orelse return null;
+
+        self.last_signal = parse.wirelessSignal(content, interface);
         return self.last_signal;
     }
 
@@ -128,7 +157,7 @@ pub const NetworkOps = struct {
         // Null means nothing usable has been seen yet.
         var best_rank: ?parse.InterfaceRank = null;
         var best_len: usize = 0;
-        var best_wired = false;
+        var best_name: []const u8 = "";
 
         var current = ifap;
         while (current) |ifa| : (current = ifa.ifa_next) {
@@ -140,7 +169,7 @@ pub const NetworkOps = struct {
             const addr = ifa.ifa_addr orelse continue;
             if (addr.*.sa_family != c.AF_INET) continue;
 
-            const rank = parse.interfaceRank(name, hasDevice(self.io, name));
+            const rank = parse.interfaceRank(name, hasDevice(self.root, name));
 
             // Ties go to the earlier entry, matching the old first-match order.
             if (best_rank) |best| {
@@ -155,30 +184,45 @@ pub const NetworkOps = struct {
             @memcpy(buf[0..ip.len], ip);
             best_rank = rank;
             best_len = ip.len;
-            best_wired = !std.mem.startsWith(u8, name, "wl");
+            // Borrowed from the list, which lives until this returns.
+            best_name = name;
 
             if (rank == .wired) break; // nothing outranks a cable
         }
 
         if (best_rank == null) return null;
 
-        // Kept for MQTT, which publishes the address the panel is showing rather
-        // than walking the interface list a second time.
-        @memcpy(self.last_ip[0..best_len], buf[0..best_len]);
-        self.last_ip_len = best_len;
-        self.last_ip_wired = best_wired;
-
+        self.rememberAddress(buf[0..best_len], best_name);
         return buf[0..best_len];
+    }
+
+    /// Keep `ip` and the interface it is on, for MQTT and the API, which
+    /// report the address the panel is showing rather than walking the
+    /// interface list a second time, and for the signal slot, which depends
+    /// on what kind of interface that is. Public for the tests of whatever
+    /// reads those back, which have no interface list to walk.
+    pub fn rememberAddress(self: *NetworkOps, ip: []const u8, interface: []const u8) void {
+        const ip_len = @min(ip.len, max_ip_len);
+        @memcpy(self.last_ip[0..ip_len], ip[0..ip_len]);
+        self.last_ip_len = ip_len;
+
+        const name_len = @min(interface.len, max_interface_len);
+        @memcpy(self.last_ip_interface[0..name_len], interface[0..name_len]);
+        self.last_ip_interface_len = name_len;
     }
 };
 
+/// `wl` is the kernel's and udev's prefix for wireless interfaces.
+fn isWireless(interface: []const u8) bool {
+    return std.mem.startsWith(u8, interface, "wl");
+}
+
 /// Whether hardware backs the interface, which shows as a `device` link in
 /// sysfs. Bridges, veth pairs and tunnels have none.
-fn hasDevice(io: std.Io, name: []const u8) bool {
+fn hasDevice(root: Root, name: []const u8) bool {
     var path_buf: [64]u8 = undefined;
     const path = std.mem.print(&path_buf, "/sys/class/net/{s}/device", .{name}) catch return false;
-    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
-    return true;
+    return root.exists(path);
 }
 
 /// Shortest interval a rate is measured over.
@@ -187,6 +231,8 @@ const min_interval_ms = 1000;
 /// Traffic monitor for tracking network traffic
 pub const TrafficMonitor = struct {
     io: std.Io,
+    /// Where procfs and sysfs are read from: `/`, or a tree of fixtures.
+    root: Root,
     last_rx_bytes: ?u64 = null,
     last_tx_bytes: ?u64 = null,
     /// Monotonic, in milliseconds.
@@ -195,34 +241,37 @@ pub const TrafficMonitor = struct {
     /// the API and MQTT to report. Stale once the counters cannot be read.
     rates: Reading(parse.NetRates) = .{},
 
-    pub fn init(io: std.Io) TrafficMonitor {
-        return .{ .io = io };
+    pub fn init(io: std.Io, root: Root) TrafficMonitor {
+        return .{ .io = io, .root = root };
     }
 
     /// Current traffic rate, measured against the previous sample.
     pub fn getCurrentTraffic(self: *TrafficMonitor) !parse.NetRates {
-        return self.sample() catch |err| {
+        const totals = self.readTotals() catch |err| {
             self.rates.fail();
             return err;
         };
-    }
-
-    fn sample(self: *TrafficMonitor) !parse.NetRates {
-        const file = try std.Io.Dir.openFileAbsolute(self.io, "/proc/net/dev", .{});
-        defer file.close(self.io);
-
-        var buf: [8192]u8 = undefined;
-        const bytes_read = try file.readPositionalAll(self.io, &buf, 0);
-        const content = buf[0..bytes_read];
-        // Where nothing has a device — a container, say — count what there is
-        // rather than report no traffic at all.
-        const totals = parse.netDevTotalsWhere(content, Physical{ .io = self.io }) orelse
-            parse.netDevTotals(content);
 
         // Monotonic: a wall-clock step would otherwise fabricate a huge or
         // negative interval and with it a nonsense rate.
         const now = std.Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        return self.sampleAt(totals, now);
+    }
 
+    /// The byte counters of the interfaces that carry the machine's traffic.
+    fn readTotals(self: *TrafficMonitor) !parse.NetTotals {
+        var buf: [8192]u8 = undefined;
+        const content = try self.root.read("/proc/net/dev", &buf);
+        // Where nothing has a device — a container, say — count what there is
+        // rather than report no traffic at all.
+        return parse.netDevTotalsWhere(content, Physical{ .root = self.root }) orelse
+            parse.netDevTotals(content);
+    }
+
+    /// Take `totals`, read at `now`, as the next sample and return the rates it
+    /// gives. Apart from the reading and the clock, so that the intervals are
+    /// testable.
+    fn sampleAt(self: *TrafficMonitor, totals: parse.NetTotals, now: i64) parse.NetRates {
         const last_rx = self.last_rx_bytes;
         const last_tx = self.last_tx_bytes;
         const last_time = self.last_time;
@@ -243,6 +292,11 @@ pub const TrafficMonitor = struct {
         // untouched so the next real interval still measures against a
         // matching timestamp.
         if (interval_ms < min_interval_ms) {
+            // The counters were read, though: the rates held are not stale for
+            // want of a reading, only not yet due to be worked out again. Left
+            // as they were, a failed look followed by a good one inside the
+            // second kept them marked stale for a whole cycle.
+            self.rates.keep();
             return self.rates.value orelse .{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0 };
         }
 
@@ -268,10 +322,10 @@ pub const TrafficMonitor = struct {
     /// counts: container traffic crosses a veth, the Docker bridge and eth0,
     /// and summing all three reported it three times over.
     const Physical = struct {
-        io: std.Io,
+        root: Root,
 
         pub fn counts(self: Physical, name: []const u8) bool {
-            return hasDevice(self.io, name);
+            return hasDevice(self.root, name);
         }
     };
 
@@ -282,3 +336,230 @@ pub const TrafficMonitor = struct {
         self.last_time = now;
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+//
+// Against a tree of fixtures in place of procfs and sysfs, and with the clock
+// and the probe passed in. What the interface list holds comes from
+// `getifaddrs`, which only a real machine can answer; how its entries are
+// ranked is tested in `parse.zig`.
+
+const testing = std.testing;
+const Fixture = @import("sysroot.zig").Fixture;
+const State = @import("reading.zig").State;
+
+const wireless_table =
+    \\Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+    \\ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+    \\wlp2s0: 0000   55.  -62.  -256        0      0      0      0      0        0
+    \\ wlan1: 0000   70.  -40.  -256        0      0      0      0      0        0
+    \\
+;
+
+fn opsOn(fixture: *const Fixture) NetworkOps {
+    return NetworkOps.init(testing.io, fixture.root(), .{});
+}
+
+test "the signal is read without knowing what the Wi-Fi interface is called" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/wireless", wireless_table);
+
+    var ops = opsOn(&fixture);
+    try testing.expectEqual(@as(?i32, -62), ops.getSignalStrength());
+    try testing.expectEqual(@as(?i32, -62), ops.lastSignalStrength());
+}
+
+test "the signal is that of the interface the address is on" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/wireless", wireless_table);
+
+    var ops = opsOn(&fixture);
+    ops.rememberAddress("192.168.1.20", "wlan1");
+    try testing.expectEqual(@as(?i32, -40), ops.getSignalStrength());
+    try testing.expect(!ops.lastIpIsWired());
+
+    // On a cable there is still a reading, for MQTT: the first one listed.
+    ops.rememberAddress("192.168.1.20", "end0");
+    try testing.expectEqual(@as(?i32, -62), ops.getSignalStrength());
+    try testing.expect(ops.lastIpIsWired());
+}
+
+test "no Wi-Fi means no signal, and the last reading does not linger" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/wireless", wireless_table);
+
+    var ops = opsOn(&fixture);
+    try testing.expectEqual(@as(?i32, -62), ops.getSignalStrength());
+
+    // The adapter is unplugged: the table is down to its headers.
+    try fixture.put("/proc/net/wireless",
+        \\Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+        \\ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+        \\
+    );
+    try testing.expectEqual(@as(?i32, null), ops.getSignalStrength());
+    try testing.expectEqual(@as(?i32, null), ops.lastSignalStrength());
+
+    // A kernel built without wireless support has no table at all.
+    try fixture.remove("/proc/net/wireless");
+    try testing.expectEqual(@as(?i32, null), ops.getSignalStrength());
+}
+
+test "with no address there is no interface, wired or otherwise" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    try testing.expect(!ops.lastIpIsWired());
+    try testing.expect(ops.lastIpAddress() == null);
+
+    ops.rememberAddress("192.168.1.20", "eth0");
+    try testing.expect(ops.lastIpIsWired());
+    try testing.expectEqualStrings("192.168.1.20", ops.lastIpAddress().?);
+}
+
+/// Answers as it is told to, and counts how often it was asked.
+const CountingProber = struct {
+    asked: u32 = 0,
+    answer: bool = true,
+
+    fn reaches(self: *CountingProber, _: Probe) bool {
+        self.asked += 1;
+        return self.answer;
+    }
+};
+
+test "one reachability probe serves a minute of callers" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    var ops = opsOn(&fixture);
+
+    var prober: CountingProber = .{};
+    try testing.expect(ops.lastInternet() == null);
+
+    try testing.expect(ops.checkInternetAt(1000, &prober));
+    try testing.expect(ops.checkInternetAt(1001, &prober));
+    try testing.expect(ops.checkInternetAt(1059, &prober));
+    try testing.expectEqual(@as(u32, 1), prober.asked);
+    try testing.expectEqual(@as(?bool, true), ops.lastInternet());
+
+    // After a minute it is taken again, and a different answer replaces the old.
+    prober.answer = false;
+    try testing.expect(!ops.checkInternetAt(1060, &prober));
+    try testing.expectEqual(@as(u32, 2), prober.asked);
+    try testing.expectEqual(@as(?bool, false), ops.lastInternet());
+}
+
+const net_dev =
+    \\Inter-|   Receive                                                |  Transmit
+    \\ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    \\    lo:    9000      10    0    0    0     0          0         0     9000      10    0    0    0     0       0          0
+    \\  eth0:    5000      10    0    0    0     0          0         0     2000      10    0    0    0     0       0          0
+    \\docker0:   3000      10    0    0    0     0          0         0     1000      10    0    0    0     0       0          0
+    \\veth1a2b:  3000      10    0    0    0     0          0         0     1000      10    0    0    0     0       0          0
+    \\
+;
+
+test "traffic counts the interfaces with hardware behind them, once each" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/dev", net_dev);
+    try fixture.makeDir("/sys/class/net/eth0/device");
+    try fixture.makeDir("/sys/class/net/docker0");
+    try fixture.makeDir("/sys/class/net/veth1a2b");
+
+    var traffic = TrafficMonitor.init(testing.io, fixture.root());
+    try testing.expectEqual(parse.NetTotals{ .rx_bytes = 5000, .tx_bytes = 2000 }, try traffic.readTotals());
+}
+
+test "where nothing has hardware behind it, traffic counts what there is" {
+    // A container: every interface is virtual, and no traffic at all would be
+    // the wrong answer.
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/dev", net_dev);
+
+    var traffic = TrafficMonitor.init(testing.io, fixture.root());
+    try testing.expectEqual(parse.NetTotals{ .rx_bytes = 11000, .tx_bytes = 4000 }, try traffic.readTotals());
+}
+
+test "a rate is what moved between two samples, over the time between them" {
+    var traffic = TrafficMonitor.init(undefined, undefined);
+    try testing.expect(traffic.rates.value == null);
+
+    // Nothing to measure against yet, which reads as no traffic.
+    const first = traffic.sampleAt(.{ .rx_bytes = 1_000_000, .tx_bytes = 500_000 }, 10_000);
+    try testing.expectEqual(@as(f64, 0), first.rx_bytes_per_sec);
+    try testing.expectEqual(@as(f64, 0), traffic.rates.current().?.tx_bytes_per_sec);
+
+    // 250 kB down and 5 kB up in ten seconds.
+    const second = traffic.sampleAt(.{ .rx_bytes = 1_250_000, .tx_bytes = 505_000 }, 20_000);
+    try testing.expectEqual(@as(f64, 25_000), second.rx_bytes_per_sec);
+    try testing.expectEqual(@as(f64, 500), second.tx_bytes_per_sec);
+    // Kept for the API and MQTT, stamped with when it was measured.
+    try testing.expectEqual(second, traffic.rates.current().?);
+    try testing.expectEqual(@as(i64, 20), traffic.rates.taken_at);
+}
+
+test "a second sample within the second keeps the rate and the baseline" {
+    var traffic = TrafficMonitor.init(undefined, undefined);
+    _ = traffic.sampleAt(.{ .rx_bytes = 0, .tx_bytes = 0 }, 0);
+    _ = traffic.sampleAt(.{ .rx_bytes = 100_000, .tx_bytes = 0 }, 10_000);
+    try testing.expectEqual(@as(f64, 10_000), traffic.rates.value.?.rx_bytes_per_sec);
+
+    // Half a second on: too short to measure over, so nothing moves.
+    const kept = traffic.sampleAt(.{ .rx_bytes = 900_000, .tx_bytes = 0 }, 10_500);
+    try testing.expectEqual(@as(f64, 10_000), kept.rx_bytes_per_sec);
+    try testing.expectEqual(@as(f64, 10_000), traffic.rates.value.?.rx_bytes_per_sec);
+
+    // The next real one is measured from the sample at 10 s, not from that one.
+    _ = traffic.sampleAt(.{ .rx_bytes = 1_100_000, .tx_bytes = 0 }, 20_000);
+    try testing.expectEqual(@as(f64, 100_000), traffic.rates.value.?.rx_bytes_per_sec);
+}
+
+test "counters that cannot be read leave the last rates standing, as stale" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/net/dev", net_dev);
+
+    var traffic = TrafficMonitor.init(testing.io, fixture.root());
+    _ = try traffic.getCurrentTraffic();
+    try testing.expectEqual(State.current, traffic.rates.state());
+
+    try fixture.remove("/proc/net/dev");
+    try testing.expectError(error.FileNotFound, traffic.getCurrentTraffic());
+    try testing.expectEqual(State.stale, traffic.rates.state());
+    // The value is still there for the panel to fade; MQTT gets nothing.
+    try testing.expect(traffic.rates.value != null);
+    try testing.expect(traffic.rates.current() == null);
+
+    // Readable again at once, inside the second in which nothing new can be
+    // worked out: the rates held stand, and are current again all the same.
+    try fixture.put("/proc/net/dev", net_dev);
+    const held = traffic.rates.value.?;
+    try testing.expectEqual(held, try traffic.getCurrentTraffic());
+    try testing.expectEqual(State.current, traffic.rates.state());
+
+    // And a cycle on they are measured afresh.
+    _ = traffic.sampleAt(try traffic.readTotals(), traffic.last_time.? + 10_000);
+    try testing.expectEqual(State.current, traffic.rates.state());
+}
+
+test "counters that start over read as no traffic, not as a negative rate" {
+    var traffic = TrafficMonitor.init(undefined, undefined);
+    _ = traffic.sampleAt(.{ .rx_bytes = 5_000_000, .tx_bytes = 5_000_000 }, 0);
+
+    // The interface was torn down and came back counting from zero.
+    const after = traffic.sampleAt(.{ .rx_bytes = 1_000, .tx_bytes = 2_000 }, 10_000);
+    try testing.expectEqual(@as(f64, 0), after.rx_bytes_per_sec);
+    try testing.expectEqual(@as(f64, 0), after.tx_bytes_per_sec);
+
+    // And the interval after that is measured from the new counters.
+    const next = traffic.sampleAt(.{ .rx_bytes = 21_000, .tx_bytes = 2_000 }, 20_000);
+    try testing.expectEqual(@as(f64, 2_000), next.rx_bytes_per_sec);
+}

@@ -1,7 +1,9 @@
 const std = @import("std");
 const config = @import("config.zig");
+const ioctl = @import("ioctl.zig");
 const parse = @import("parse.zig");
 const Reading = @import("reading.zig").Reading;
+const Root = @import("sysroot.zig").Root;
 
 // statfs comes from the target libc headers (src/c.h) rather than a
 // hand-rolled struct: fsblkcnt_t is 64-bit even on 32-bit ARM, so an
@@ -18,6 +20,8 @@ const max_hwmon_devices = 10;
 pub const SystemOps = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// Where procfs and sysfs are read from: `/`, or a tree of fixtures.
+    root: Root,
     /// The daemon's environment, which the APT check derives its own from.
     /// Only ever read, so the background task may do so.
     parent_env: ?*const std.process.Environ.Map,
@@ -79,10 +83,16 @@ pub const SystemOps = struct {
     /// starts rather than on every cycle.
     nvme_failing: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, parent_env: ?*const std.process.Environ.Map) SystemOps {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        root: Root,
+        parent_env: ?*const std.process.Environ.Map,
+    ) SystemOps {
         return .{
             .allocator = allocator,
             .io = io,
+            .root = root,
             .parent_env = parent_env,
             .apt_check_running = std.atomic.Value(bool).init(false),
             .apt_updates_count = std.atomic.Value(u32).init(0),
@@ -97,7 +107,11 @@ pub const SystemOps = struct {
         // task is bounded by its own `timeout` invocations.
         self.reapAptCheck();
 
-        inline for (.{ "cached_cpu_temp_path", "cached_disk_temp_path", "cached_fan_path", "cached_undervoltage_path", "cached_nvme_dev" }) |field| {
+        const owned_paths = .{
+            "cached_cpu_temp_path",     "cached_disk_temp_path", "cached_fan_path",
+            "cached_undervoltage_path", "cached_nvme_dev",
+        };
+        inline for (owned_paths) |field| {
             if (@field(self, field)) |path| {
                 self.allocator.free(path);
                 @field(self, field) = null;
@@ -111,11 +125,7 @@ pub const SystemOps = struct {
 
     /// Read a small sysfs/procfs file into `buf` and return the populated slice.
     fn readFile(self: *SystemOps, path: []const u8, buf: []u8) ![]const u8 {
-        const file = try std.Io.Dir.openFileAbsolute(self.io, path, .{});
-        defer file.close(self.io);
-
-        const bytes_read = try file.readPositionalAll(self.io, buf, 0);
-        return buf[0..bytes_read];
+        return self.root.read(path, buf);
     }
 
     fn readTempFromFile(self: *SystemOps, path: []const u8) !u32 {
@@ -380,8 +390,9 @@ pub const SystemOps = struct {
     }
 
     /// _IOWR('N', 0x41, struct nvme_passthru_cmd), derived rather than literal.
-    const NVME_IOCTL_ADMIN_CMD: u32 =
-        (3 << 30) | (@as(u32, @sizeOf(NvmePassthruCmd)) << 16) | (@as(u32, 'N') << 8) | 0x41;
+    /// Under the name uapi/linux/nvme_ioctl.h gives it, as the other ioctl
+    /// request numbers are under theirs; see `gpio_native.zig`.
+    const NVME_IOCTL_ADMIN_CMD = ioctl.iowr('N', 0x41, NvmePassthruCmd);
 
     const nvme_admin_get_log_page = 0x02;
     const nvme_log_smart = 0x02;
@@ -589,3 +600,314 @@ pub const SystemOps = struct {
         return parse.aptUpgradableCount(result.stdout);
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+//
+// Against a tree of fixtures in place of procfs and sysfs. The parsing has its
+// own tests in `parse.zig`; these are for what happens around it: which file a
+// reading comes from, what is remembered between cycles, and what becomes of
+// a reading whose sensor is missing, goes away, or stops answering. Disk
+// usage, the NVMe admin command and the APT check ask the kernel or run a
+// program, and are left to the device.
+
+const testing = std.testing;
+const Fixture = @import("sysroot.zig").Fixture;
+const State = @import("reading.zig").State;
+
+fn opsOn(fixture: *const Fixture) SystemOps {
+    return SystemOps.init(testing.allocator, testing.io, fixture.root(), null);
+}
+
+test "the CPU temperature comes from the first thermal zone that reads" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/thermal/thermal_zone1/temp", "48312\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(u32, 48), try ops.getCpuTemperature());
+    try testing.expectEqual(@as(?u32, 48), ops.cpu_temp.current());
+
+    // The zone that answered is the one read from then on, even once an
+    // earlier one appears.
+    try fixture.put("/sys/class/thermal/thermal_zone0/temp", "90000\n");
+    try fixture.put("/sys/class/thermal/thermal_zone1/temp", "51999\n");
+    try testing.expectEqual(@as(u32, 51), try ops.getCpuTemperature());
+}
+
+test "no thermal zone is an error, and a reading nobody has: not 0 °C" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectError(error.ThermalZoneNotFound, ops.getCpuTemperature());
+    try testing.expectEqual(State.unavailable, ops.cpu_temp.state());
+    try testing.expectEqual(@as(?u32, null), ops.cpu_temp.value);
+}
+
+test "a thermal zone that stops answering leaves the temperature stale" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/thermal/thermal_zone0/temp", "48000\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    _ = try ops.getCpuTemperature();
+    try testing.expectEqual(State.current, ops.cpu_temp.state());
+
+    try fixture.remove("/sys/class/thermal/thermal_zone0/temp");
+    try testing.expectError(error.FileNotFound, ops.getCpuTemperature());
+    // Kept for the panel to fade, and for nobody to pass off as new.
+    try testing.expectEqual(State.stale, ops.cpu_temp.state());
+    try testing.expectEqual(@as(?u32, 48), ops.cpu_temp.value);
+    try testing.expectEqual(@as(?u32, null), ops.cpu_temp.current());
+
+    try fixture.put("/sys/class/thermal/thermal_zone0/temp", "49000\n");
+    try testing.expectEqual(@as(u32, 49), try ops.getCpuTemperature());
+    try testing.expectEqual(State.current, ops.cpu_temp.state());
+}
+
+test "CPU load is measured between two readings" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(State.unavailable, ops.cpu_load.state());
+
+    // Nothing to measure against yet.
+    try fixture.put("/proc/stat", "cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0 0 0\n");
+    try testing.expectEqual(@as(u8, 0), try ops.getCpuLoad());
+
+    // 200 jiffies on, 100 of them idle.
+    try fixture.put("/proc/stat", "cpu  150 0 150 900 0 0 0 0 0 0\ncpu0 75 0 75 450 0 0 0 0 0 0\n");
+    try testing.expectEqual(@as(u8, 50), try ops.getCpuLoad());
+    try testing.expectEqual(@as(?u8, 50), ops.cpu_load.current());
+
+    // A reading that fails leaves the load stale and the baseline where it was.
+    try fixture.remove("/proc/stat");
+    try testing.expectError(error.FileNotFound, ops.getCpuLoad());
+    try testing.expectEqual(State.stale, ops.cpu_load.state());
+    try testing.expectEqual(@as(?u8, 50), ops.cpu_load.value);
+
+    try fixture.put("/proc/stat", "cpu  250 0 150 1000 0 0 0 0 0 0\n");
+    try testing.expectEqual(@as(u8, 50), try ops.getCpuLoad());
+    try testing.expectEqual(State.current, ops.cpu_load.state());
+}
+
+test "memory in use is read from procfs and remembered" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/meminfo",
+        \\MemTotal:        8000000 kB
+        \\MemFree:          500000 kB
+        \\MemAvailable:    6000000 kB
+        \\
+    );
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+
+    try testing.expectEqual(@as(u8, 25), try ops.getMemory());
+    try testing.expectEqual(@as(?u8, 25), ops.memory.current());
+}
+
+test "an uptime that cannot be read is forgotten, not kept" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/proc/uptime", "350735.47 234388.90\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+
+    try testing.expect(ops.last_uptime == null);
+    const uptime = try ops.getUptime();
+    try testing.expectEqual(parse.Uptime{ .days = 4, .hours = 1, .minutes = 25 }, uptime);
+    try testing.expectEqual(uptime, ops.last_uptime.?);
+
+    // One that has stopped counting is not the last known value of anything.
+    try fixture.remove("/proc/uptime");
+    try testing.expectError(error.FileNotFound, ops.getUptime());
+    try testing.expect(ops.last_uptime == null);
+}
+
+test "the fan is the hwmon device that is turning" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/fan1_input", "0\n");
+    try fixture.put("/sys/class/hwmon/hwmon2/fan1_input", "2150\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, 2150), try ops.getFanSpeed());
+
+    // Latched onto: the other device starting up does not take over.
+    try fixture.put("/sys/class/hwmon/hwmon0/fan1_input", "5000\n");
+    try fixture.put("/sys/class/hwmon/hwmon2/fan1_input", "1800\n");
+    try testing.expectEqual(@as(?u32, 1800), try ops.getFanSpeed());
+    try testing.expectEqual(@as(?u32, 1800), ops.fan_speed.current());
+}
+
+test "a stopped fan reads zero, and no fan reads nothing" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, null), try ops.getFanSpeed());
+    try testing.expectEqual(State.unavailable, ops.fan_speed.state());
+
+    try fixture.put("/sys/class/hwmon/hwmon1/fan1_input", "0\n");
+    try testing.expectEqual(@as(?u32, 0), try ops.getFanSpeed());
+    try testing.expectEqual(@as(?u32, 0), ops.fan_speed.current());
+
+    // Once it turns it is latched onto, and stopping again still reads zero.
+    try fixture.put("/sys/class/hwmon/hwmon1/fan1_input", "900\n");
+    try testing.expectEqual(@as(?u32, 900), try ops.getFanSpeed());
+    try fixture.put("/sys/class/hwmon/hwmon1/fan1_input", "0\n");
+    try testing.expectEqual(@as(?u32, 0), try ops.getFanSpeed());
+}
+
+test "a fan that goes away is looked for again, and gone when it is not found" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/fan1_input", "1200\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, 1200), try ops.getFanSpeed());
+
+    // The index is not stable: after a module reload it comes back elsewhere.
+    try fixture.remove("/sys/class/hwmon/hwmon0");
+    try fixture.put("/sys/class/hwmon/hwmon3/fan1_input", "950\n");
+    try testing.expectEqual(@as(?u32, 950), try ops.getFanSpeed());
+
+    // No fan anywhere is no reading at all, rather than a stale 950.
+    try fixture.remove("/sys/class/hwmon/hwmon3");
+    try testing.expectEqual(@as(?u32, null), try ops.getFanSpeed());
+    try testing.expectEqual(State.unavailable, ops.fan_speed.state());
+}
+
+test "the disk temperature comes from the NVMe hwmon device, wherever it is" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/name", "cpu_thermal\n");
+    try fixture.put("/sys/class/hwmon/hwmon0/temp1_input", "55000\n");
+    try fixture.put("/sys/class/hwmon/hwmon2/name", "nvme\n");
+    try fixture.put("/sys/class/hwmon/hwmon2/temp1_input", "36850\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, 36), try ops.getDiskTemp());
+
+    try fixture.put("/sys/class/hwmon/hwmon2/temp1_input", "41000\n");
+    try testing.expectEqual(@as(?u32, 41), try ops.getDiskTemp());
+    try testing.expectEqual(@as(?u32, 41), ops.disk_temp.current());
+}
+
+test "a disk sensor that stops answering leaves its reading stale, not gone" {
+    // The regression the readings exist for: this value stayed on the panel
+    // and went out over MQTT every cycle, with nothing to say it was old.
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon2/name", "nvme\n");
+    try fixture.put("/sys/class/hwmon/hwmon2/temp1_input", "41000\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, 41), try ops.getDiskTemp());
+
+    try fixture.remove("/sys/class/hwmon/hwmon2/temp1_input");
+    try testing.expectError(error.FileNotFound, ops.getDiskTemp());
+    try testing.expectEqual(State.stale, ops.disk_temp.state());
+    try testing.expectEqual(@as(?u32, 41), ops.disk_temp.value);
+    try testing.expectEqual(@as(?u32, null), ops.disk_temp.current());
+    // And it has an age, counted from when it was last measured.
+    try testing.expect(ops.disk_temp.staleFor(ops.disk_temp.taken_at + 90).? == 90);
+}
+
+test "a machine without an NVMe sensor is scanned for one once" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/name", "cpu_thermal\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?u32, null), try ops.getDiskTemp());
+    try testing.expectEqual(State.unavailable, ops.disk_temp.state());
+
+    // Not looked for again: the answer on this hardware does not change.
+    try fixture.put("/sys/class/hwmon/hwmon1/name", "nvme\n");
+    try fixture.put("/sys/class/hwmon/hwmon1/temp1_input", "36000\n");
+    try testing.expectEqual(@as(?u32, null), try ops.getDiskTemp());
+}
+
+test "under-voltage is the rpi_volt alarm, as it stands now" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/name", "cpu_thermal\n");
+    try fixture.put("/sys/class/hwmon/hwmon1/name", "rpi_volt\n");
+    try fixture.put("/sys/class/hwmon/hwmon1/in0_lcrit_alarm", "0\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?bool, false), ops.getUndervoltage());
+
+    try fixture.put("/sys/class/hwmon/hwmon1/in0_lcrit_alarm", "1\n");
+    try testing.expectEqual(@as(?bool, true), ops.getUndervoltage());
+    try testing.expectEqual(@as(?bool, true), ops.undervoltage.current());
+
+    try fixture.put("/sys/class/hwmon/hwmon1/in0_lcrit_alarm", "0\n");
+    try testing.expectEqual(@as(?bool, false), ops.getUndervoltage());
+}
+
+test "an under-voltage alarm that cannot be read again stays as it was last seen" {
+    // Failing to read a sensor is no evidence that the fault it reported has
+    // cleared: the fault bar goes by this value, stale or not.
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon1/name", "rpi_volt\n");
+    try fixture.put("/sys/class/hwmon/hwmon1/in0_lcrit_alarm", "1\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?bool, true), ops.getUndervoltage());
+
+    try fixture.remove("/sys/class/hwmon/hwmon1/in0_lcrit_alarm");
+    try testing.expectEqual(@as(?bool, null), ops.getUndervoltage());
+    try testing.expectEqual(State.stale, ops.undervoltage.state());
+    try testing.expectEqual(@as(?bool, true), ops.undervoltage.value);
+}
+
+test "hardware without the rpi_volt sensor gives no reading, and is asked once" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    try fixture.put("/sys/class/hwmon/hwmon0/name", "cpu_thermal\n");
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(@as(?bool, null), ops.getUndervoltage());
+    try testing.expectEqual(State.unavailable, ops.undervoltage.state());
+
+    try fixture.put("/sys/class/hwmon/hwmon1/name", "rpi_volt\n");
+    try fixture.put("/sys/class/hwmon/hwmon1/in0_lcrit_alarm", "1\n");
+    try testing.expectEqual(@as(?bool, null), ops.getUndervoltage());
+}
+
+test "the NVMe admin request number is the one the kernel's headers define" {
+    // As `tools/check_ioctl.c` prints it from uapi/linux/nvme_ioctl.h.
+    try testing.expectEqual(@as(u32, 0xc0484e41), SystemOps.NVME_IOCTL_ADMIN_CMD);
+}
+
+test "nothing has been counted before an APT check has run" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+    try testing.expectEqual(State.unavailable, ops.aptUpdates().state());
+    try testing.expectEqual(@as(?u32, null), ops.aptUpdates().value);
+}

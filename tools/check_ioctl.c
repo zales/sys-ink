@@ -2,10 +2,12 @@
  * Prints the ioctl request numbers the daemon uses, as the kernel headers
  * define them, to check against the values derived in the Zig sources.
  *
- * The Zig side computes most of these from struct sizes (see iowr() in
- * src/gpio_native.zig and NVME_IOCTL_ADMIN_CMD in src/system_ops.zig), so a
- * layout mismatch shows up here as a differing number. Build and run on the
- * target, or cross-compile with any Linux toolchain:
+ * The Zig side computes each of these from the size of what the request takes
+ * (src/ioctl.zig, used by src/gpio_native.zig, src/waveshare_epd/epdconfig.zig
+ * and src/system_ops.zig), and its tests hold the results to the numbers
+ * printed here, so a layout mismatch fails the suite.
+ * Run this after a kernel header changes one. Build and run on the target, or
+ * cross-compile with any Linux toolchain:
  *
  *     zig cc -target aarch64-linux-musl -o check_ioctl tools/check_ioctl.c
  */
@@ -21,10 +23,8 @@ int main(void) {
     printf("SPI_IOC_WR_BITS_PER_WORD:      0x%08lx\n", (unsigned long)SPI_IOC_WR_BITS_PER_WORD);
     printf("SPI_IOC_WR_MAX_SPEED_HZ:       0x%08lx\n", (unsigned long)SPI_IOC_WR_MAX_SPEED_HZ);
 
-    /* src/config.zig */
+    /* src/gpio_native.zig: finding the chip, then the v2 ABI */
     printf("GPIO_GET_CHIPINFO_IOCTL:       0x%08lx\n", (unsigned long)GPIO_GET_CHIPINFO_IOCTL);
-
-    /* src/gpio_native.zig, v2 ABI */
     printf("GPIO_V2_GET_LINE_IOCTL:        0x%08lx\n", (unsigned long)GPIO_V2_GET_LINE_IOCTL);
     printf("GPIO_V2_LINE_GET_VALUES_IOCTL: 0x%08lx\n", (unsigned long)GPIO_V2_LINE_GET_VALUES_IOCTL);
     printf("GPIO_V2_LINE_SET_VALUES_IOCTL: 0x%08lx\n", (unsigned long)GPIO_V2_LINE_SET_VALUES_IOCTL);

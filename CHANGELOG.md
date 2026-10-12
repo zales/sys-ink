@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EXPORT_BMP=true` on a machine without the panel, which it has never been
   able to do: it exits when it cannot open GPIO and SPI. It points at the
   simulator instead.
+- The Wi-Fi signal was only ever read from an interface called `wlan0`, so
+  under predictable interface names (`wlp2s0`, `wlx…`) the panel showed "N/A"
+  and Home Assistant got no reading. It is now read from the interface the
+  panel's address is on when that one is wireless, and otherwise from the
+  first one `/proc/net/wireless` lists. Nothing changes where it is `wlan0`.
 
 ### Changed
 - `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`,
@@ -70,6 +75,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holding its last value.
 - The uptime slot shows `-` when the uptime cannot be read, rather than the
   last one it could.
+- A setting that cannot be used is reported instead of silently replaced. At
+  startup the log names each such variable, what it expected and what is used
+  in its place — `INTERVAL_FAST=abc`, a port out of range, an address or log
+  level that is not one. What is used is what always was: the default, or 1
+  for an interval of 0. A boolean that is neither a true nor a false spelling
+  still reads as false, and is now reported too. What is shown of the value
+  is cut to 48 characters, with anything that is not printable ASCII replaced.
+- A variable whose name is not a setting but looks like one is reported at
+  startup, by name only: one a letter or two from a setting, with the setting
+  it was probably meant for (`INTERVL_FAST`, `MQTT_PASSWRD`), and one that
+  begins as a group of settings does without being any of them
+  (`THRESHOLD_CPU_HIGH`, `MQTT_KEEPALIVE`). Until now such a line in
+  `/etc/default/sys-ink` did nothing and said nothing. Other variables are
+  left alone.
+- A variable left blank (`NAME=`) counts as unset for every setting, where it
+  used to depend on the kind: a blank number or address was already the
+  default, but a blank `MQTT_HOST`, `SPI_DEVICE` or path was taken as an empty
+  name to fail on, a blank `MQTT_USERNAME` as a user called nothing, and a
+  blank boolean as false. **The last of these changes behaviour** for the
+  booleans that are on by default — `NOTIFY_ENABLED`, `PANEL_SLEEP` and
+  `MQTT_DISCOVERY`: `NOTIFY_ENABLED=` used to turn notices off and now leaves
+  them on, with a warning at startup saying so. Write `NOTIFY_ENABLED=false`
+  to turn them off.
+- Internal: the configuration is a value read once and handed to the parts
+  that need it, where it was a set of globals read from anywhere. The layout
+  in `src/display_config.zig` is grouped by section of the dashboard, with a
+  slot per reading, and the renderer draws in those terms; what reaches the
+  panel is unchanged, byte for byte. Enum fields and the project's own
+  constants are `snake_case`; ioctl request numbers keep the kernel's names.
+- Internal: the modules that read the machine take the directory procfs and
+  sysfs are read under, so `system_ops` and `network_ops` are tested against
+  a tree of fixtures on any host. The daemon's tasks moved out of `main.zig`
+  into `src/app.zig`, generic over the panel's transport, and what they
+  decide into `src/app_logic.zig`; both are tested without a panel or a
+  clock, and `main.zig` is left with the wiring. The ioctl request numbers
+  are derived from the structs they take, in one place (`src/ioctl.zig`), and
+  checked against the kernel's values.
+- Internal: an MQTT packet is written to the broker's connection as to a
+  stream, the way the preview server writes its responses, where it went
+  through the datagram call with the broker's address attached. The bytes on
+  the wire are the same; a write cut short is now finished rather than left.
+- If waiting for events fails — the kernel out of memory — the main loop
+  says so once and checks once a second until it works again, where it used
+  to go round at full speed without a word.
 - Stopping the daemon no longer waits behind a preview client that has gone
   quiet. The server task is cancelled, which interrupts whatever it is blocked
   in, instead of being woken with a connection of the daemon's own; that

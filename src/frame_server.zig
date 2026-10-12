@@ -473,7 +473,8 @@ test "a response is whole, and says the connection ends with it" {
     var conn = try Connection.open();
     defer conn.close();
 
-    respondWith(conn.server, testing.io, "405 Method Not Allowed", "Allow: GET\r\n", "application/json", "{\"error\":\"method not allowed\"}");
+    const body = "{\"error\":\"method not allowed\"}";
+    respondWith(conn.server, testing.io, "405 Method Not Allowed", "Allow: GET\r\n", "application/json", body);
     conn.finish();
 
     var buf: [512]u8 = undefined;

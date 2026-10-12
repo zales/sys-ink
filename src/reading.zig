@@ -41,6 +41,12 @@ pub fn Reading(comptime T: type) type {
             return .{ .value = value, .fresh = true };
         }
 
+        /// A stale reading of `value`, likewise without a time: one whose
+        /// latest attempt failed, for a test or a simulator to draw.
+        pub fn staleOf(value: T) Self {
+            return .{ .value = value, .fresh = false };
+        }
+
         /// The attempt at `now` measured `value`.
         pub fn set(self: *Self, value: T, now: i64) void {
             self.* = .{ .value = value, .taken_at = now, .fresh = true };
@@ -49,6 +55,13 @@ pub fn Reading(comptime T: type) type {
         /// The attempt failed. Whatever was measured before is kept, as stale.
         pub fn fail(self: *Self) void {
             self.fresh = false;
+        }
+
+        /// The attempt worked and had nothing newer to give, so what is held
+        /// stands: current, with the time it was measured at. For a source
+        /// that is asked more often than it can be measured.
+        pub fn keep(self: *Self) void {
+            if (self.value != null) self.fresh = true;
         }
 
         /// There is nothing to measure: no such sensor, or it has gone.
@@ -132,6 +145,29 @@ test "failing with nothing measured is unavailable, not stale" {
     r.fail();
     try testing.expectEqual(State.unavailable, r.state());
     try testing.expectEqual(@as(?u64, null), r.staleFor(100));
+}
+
+test "a value that stands after a failed attempt is current again, as old as it is" {
+    var r: Reading(u32) = .{};
+    r.set(41, 100);
+    r.fail();
+
+    r.keep();
+    try testing.expectEqual(State.current, r.state());
+    try testing.expectEqual(@as(?u32, 41), r.current());
+    try testing.expectEqual(@as(i64, 100), r.taken_at);
+
+    // Nothing held is still nothing: there is no value to stand.
+    var none: Reading(u32) = .{};
+    none.keep();
+    try testing.expectEqual(State.unavailable, none.state());
+}
+
+test "a stale reading can be made without a clock" {
+    const r: Reading(u32) = .staleOf(33);
+    try testing.expectEqual(State.stale, r.state());
+    try testing.expectEqual(@as(?u32, 33), r.value);
+    try testing.expectEqual(@as(?u32, null), r.current());
 }
 
 test "clearing forgets the value" {

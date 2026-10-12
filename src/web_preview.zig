@@ -34,15 +34,15 @@ const linux = std.os.linux;
 const net = std.Io.net;
 const api = @import("api.zig");
 const bmp = @import("bmp.zig");
-const display_config = @import("display_config.zig");
+const layout = @import("display_config.zig");
 const frame_server = @import("frame_server.zig");
 const http_request = @import("http_request.zig");
 const syscall = @import("syscall.zig");
 
 const log = std.log.scoped(.preview);
 
-const width = display_config.DISPLAY_WIDTH;
-const height = display_config.DISPLAY_HEIGHT;
+const width = layout.display_width;
+const height = layout.display_height;
 const frame_bytes = @divCeil(width, 8) * height;
 
 pub const WebPreview = struct {
@@ -265,7 +265,7 @@ pub const WebPreview = struct {
                         self.deliverNotice(raw);
                         respondJson(stream, self.io, "202 Accepted", "", "{\"status\":\"accepted\"}");
                     },
-                    .disabled => respondJson(stream, self.io, "403 Forbidden", "", "{\"error\":\"notices over HTTP are off; set WEB_API_TOKEN\"}"),
+                    .disabled => respondJson(stream, self.io, "403 Forbidden", "", notices_off),
                     .unauthorized => {
                         log.info("Refused a notice: missing or wrong token", .{});
                         respondJson(stream, self.io, "401 Unauthorized", "WWW-Authenticate: Bearer\r\n", "{\"error\":\"unauthorized\"}");
@@ -282,6 +282,9 @@ pub const WebPreview = struct {
         }
     }
 };
+
+/// What a notice route answers while the API takes none.
+const notices_off = "{\"error\":\"notices over HTTP are off; set WEB_API_TOKEN\"}";
 
 fn respondJson(stream: net.Stream, io: std.Io, status: []const u8, extra_headers: []const u8, body: []const u8) void {
     frame_server.respondWith(stream, io, status, extra_headers, "application/json", body);
@@ -509,7 +512,7 @@ test "without a token the notice routes are shut" {
     try testing.expect(preview.noticeFd() == null);
 
     var buf: [2048]u8 = undefined;
-    const refused = try exchange(&preview, "POST /api/notice HTTP/1.1\r\nAuthorization: Bearer s3cret\r\nContent-Length: 2\r\n\r\nHi", &buf);
+    const refused = try exchange(&preview, post_notice ++ "Content-Length: 2\r\n\r\nHi", &buf);
     try expectStatus("403 Forbidden", refused);
     try expectStatus("403 Forbidden", try exchange(&preview, "DELETE /api/notice HTTP/1.1\r\n\r\n", &buf));
 }

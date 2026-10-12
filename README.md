@@ -74,7 +74,9 @@ pipe. Neither needs a panel, but both make Linux system calls, so other hosts
 leave them out.
 
 The remaining hardware-facing modules only compile for Linux, so they are
-type-checked separately:
+type-checked separately — once for each target a release is built for, the
+32-bit ARMv6 of a Pi Zero included, since what compiles for one of them does
+not have to for another:
 
 ```bash
 zig build check
@@ -128,7 +130,14 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 
 ## Project Structure
 
-- `src/main.zig`: Entry point, signal handling, scheduled tasks, main event loop.
+- `src/main.zig`: Entry point: reads the configuration, puts the parts
+  together, handles signals and runs the main event loop.
+- `src/app.zig`: The daemon's tasks — take the readings, draw them, put the
+  frame on the panel, pass them on. Generic over the panel's transport, so all
+  of it runs under test against a recorder and a tree of fixtures.
+- `src/app_logic.zig`: What those tasks decide, apart from the I/O that
+  carries it out — when a refresh is a full one, which fault just appeared,
+  when a notice comes down, what goes to the broker (unit tested).
 - `src/scheduler.zig`: Monotonic-clock task scheduler for periodic updates.
 - `src/parse.zig`: I/O-free parsers for procfs/sysfs and command output (unit tested).
 - `src/reading.zig`: A reading together with how its latest measurement went:
@@ -137,11 +146,16 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   Produces frames; knows nothing of the hardware.
 - `src/panel.zig`: Puts frames on the glass: partial or full refresh, deep
   sleep between updates, and the reference frame partial updates diff against.
-- `src/display_config.zig`: Layout constants and configuration.
+- `src/display_config.zig`: Where everything goes on the panel, one section of
+  the dashboard at a time: its heading, its fixed icons, and a slot per reading.
 - `src/graphics.zig`: Bitmap drawing primitives and text rendering.
 - `src/font_data.zig`: Generated static glyph tables.
 - `src/system_ops.zig`: System metrics collection (CPU, RAM, disk, SMART, under-voltage).
+- `src/sysroot.zig`: The directory procfs and sysfs are read under — `/` on a
+  machine, a tree of fixtures in the tests of `system_ops` and `network_ops`.
 - `src/gpio_native.zig`: GPIO character device access (v2 ABI).
+- `src/ioctl.zig`: ioctl request numbers, worked out from the struct each one
+  takes as the kernel's `_IOW` and `_IOWR` do, for GPIO, SPI and NVMe alike.
 - `src/bounded_connect.zig`: TCP connect and send-buffer wait with a deadline,
   shared by MQTT and the reachability probe until `std` implements
   `ConnectOptions.timeout`.
@@ -152,7 +166,10 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
   `src/web_preview.zig`.
 - `src/bmp.zig`: BMP export for headless preview.
-- `src/config.zig`, `src/logger.zig`: Configuration and logging.
+- `src/config.zig`, `src/logger.zig`: Configuration and logging. The
+  configuration is read from the environment once, into a value that `main`
+  hands on; nothing else reads it. Every setting goes through one reader, the
+  broker's included, which is also what knows a misspelt name from a stranger.
 - `src/waveshare_epd/`: Low-level driver for the e-Paper display, generic over its
   transport; `fake_transport.zig` is the recorder the tests drive it and
   `src/panel.zig` with.
@@ -309,6 +326,32 @@ the service stops.
 The application is configured via environment variables. The `.deb` package reads
 them from `/etc/default/sys-ink`; otherwise set them in the unit file or export
 them before running.
+
+A variable left blank — `MQTT_USERNAME=` — counts as unset, whichever one it
+is: it reads as if the line were not there.
+
+A variable set to something that cannot be used — `INTERVAL_FAST=abc`, a port
+out of range, a misspelt `true` — is never passed over in silence. The daemon
+starts anyway, and says in its log what it turned down and what it is using
+instead:
+
+```
+[12:00:01] [warn] (main) Ignoring INTERVAL_FAST=abc: expected a whole number from 1 to 4294967295; using 30
+```
+
+Neither is a name that is not a setting but was probably meant to be one: a
+letter or two away from one, or beginning as a group of them does
+(`THRESHOLD_`, `MQTT_`, `LOG_`, …) without being any of them. The log gives the
+name only, never the value, since a misspelt `MQTT_PASSWORD` is exactly what
+turns up here:
+
+```
+[12:00:01] [warn] (main) Ignoring INTERVL_FAST: not a setting; did you mean INTERVAL_FAST?
+[12:00:01] [warn] (main) Ignoring THRESHOLD_CPU_HIGH: not a setting this daemon has
+```
+
+Variables that are none of the daemon's business — `PATH`, another program's
+settings in the same file — are left alone.
 
 ### Hardware
 
@@ -689,7 +732,11 @@ agents that read `SKILL.md` skills can use it too; the helper,
 | `EXPORT_BMP` | `false` | Enable BMP export for web debugging |
 | `BMP_EXPORT_PATH` | `/tmp/sys-ink.bmp` | Path for exported BMP |
 
-Boolean variables accept `1`, `true`, `yes` or `on` (case-insensitive); anything else is false.
+Boolean variables are true for `1`, `true`, `yes` or `on` and false for `0`,
+`false`, `no` or `off`, all case-insensitive. Anything else still reads as
+false, with a warning in the log. Left blank, a boolean is its default, like
+any other variable; where that default is on, the log says so, because
+earlier releases read a blank as off.
 
 ### MQTT / Home Assistant Integration
 

@@ -11,12 +11,13 @@
 
 const std = @import("std");
 const testing = std.testing;
+const update_select = @import("epd2in9.zig").update_select;
 
 pub const FakeTransport = struct {
-    pub const RST_PIN: u32 = 17;
-    pub const DC_PIN: u32 = 25;
-    pub const BUSY_PIN: u32 = 24;
-    pub const PWR_PIN: u32 = 18;
+    pub const rst_pin: u32 = 17;
+    pub const dc_pin: u32 = 25;
+    pub const busy_pin: u32 = 24;
+    pub const pwr_pin: u32 = 18;
 
     pub const Event = union(enum) {
         pin: struct { pin: u32, value: u8 },
@@ -58,12 +59,12 @@ pub const FakeTransport = struct {
     }
 
     pub fn digitalWrite(self: *FakeTransport, pin: u32, value: u8) !void {
-        if (pin == DC_PIN) self.dc = value;
+        if (pin == dc_pin) self.dc = value;
         try self.events.append(.{ .pin = .{ .pin = pin, .value = value } });
     }
 
     pub fn digitalRead(self: *FakeTransport, pin: u32) !u8 {
-        try testing.expectEqual(BUSY_PIN, pin);
+        try testing.expectEqual(busy_pin, pin);
         self.busy_reads_total += 1;
         if (self.busy_reads_remaining == 0) return 0;
         self.busy_reads_remaining -= 1;
@@ -104,6 +105,22 @@ pub const FakeTransport = struct {
     pub fn sentCommand(self: *FakeTransport, cmd: u8) bool {
         var buf: [128]u8 = undefined;
         return std.mem.indexOfScalar(u8, self.commands(&buf), cmd) != null;
+    }
+
+    /// How a refresh was driven.
+    pub const Waveform = enum { full, partial };
+
+    /// The waveform of the last refresh in the log, or null if the log holds
+    /// none. For tests above the driver, which care that the panel was
+    /// refreshed and how, and not which bytes say so.
+    pub fn lastWaveform(self: *FakeTransport) ?Waveform {
+        const args = self.lastArgsAfter(update_select.command) orelse return null;
+        if (args.len != 1) return null;
+        return switch (args[0]) {
+            update_select.full => .full,
+            update_select.partial => .partial,
+            else => null,
+        };
     }
 
     /// Payload following the *last* occurrence of `cmd`.

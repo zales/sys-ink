@@ -44,28 +44,39 @@ pub const PanelSpec = struct {
 /// Length of a waveform table: 153 LUT bytes plus six voltage settings.
 const lut_len = 159;
 
+/// How an update the panel was told to make is recognised on the wire: the
+/// command that selects what the next activation does, and its argument for
+/// each kind of refresh. Named here, outside the driver type, for the recorder
+/// that tests above the driver read their updates from; the driver's own
+/// enums take their values from these.
+pub const update_select = struct {
+    pub const command = 0x22;
+    pub const full = 0xC7;
+    pub const partial = 0x0F;
+};
+
 /// Waveshare 2.9inch e-Paper Module (B/W) V2, the panel this project targets and
 /// the only one verified on hardware.
 pub const waveshare_2in9_v2: PanelSpec = .{
     .width = 128,
     .height = 296,
-    .lut_full = &WS_20_30,
-    .lut_partial = &WF_PARTIAL_2IN9,
+    .lut_full = &ws_20_30,
+    .lut_partial = &wf_partial_2in9,
 };
 
 // Kept for the production instance's users.
-pub const EPD_WIDTH = waveshare_2in9_v2.width;
-pub const EPD_HEIGHT = waveshare_2in9_v2.height;
-pub const EPD_BUFFER_SIZE = waveshare_2in9_v2.bufferSize(); // 4736 bytes
+pub const epd_width = waveshare_2in9_v2.width;
+pub const epd_height = waveshare_2in9_v2.height;
+pub const epd_buffer_size = waveshare_2in9_v2.bufferSize(); // 4736 bytes
 
 /// One full panel frame, 1 bit per pixel. Taking this by pointer rather than as
 /// a slice makes the length a compile-time guarantee: a short buffer used to be
-/// sliced to EPD_BUFFER_SIZE unchecked, which reads past the end in release
+/// sliced to epd_buffer_size unchecked, which reads past the end in release
 /// builds and clocks the result out over SPI.
-pub const Frame = [EPD_BUFFER_SIZE]u8;
+pub const Frame = [epd_buffer_size]u8;
 
 // Partial update LUT for V2 (159 bytes) - from C reference
-const WF_PARTIAL_2IN9 = [_]u8{
+const wf_partial_2in9 = [_]u8{
     0x0,  0x40, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x0, 0x0,  0x0,  0x0,
     0x80, 0x80, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x0, 0x0,  0x0,  0x0,
     0x40, 0x40, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x0, 0x0,  0x0,  0x0,
@@ -83,7 +94,7 @@ const WF_PARTIAL_2IN9 = [_]u8{
 };
 
 // Full update LUT for V2 (159 bytes) - from C reference
-const WS_20_30 = [_]u8{
+const ws_20_30 = [_]u8{
     0x80, 0x66, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x40, 0x0,  0x0,  0x0,
     0x10, 0x66, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x20, 0x0,  0x0,  0x0,
     0x80, 0x66, 0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x40, 0x0,  0x0,  0x0,
@@ -134,10 +145,10 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// as authoritative while being wrong.
         const DisplayUpdate = enum(u8) {
             /// Full waveform: repaints every pixel, which is what makes it flash.
-            full = 0xC7,
+            full = update_select.full,
             /// Weak waveform, applied only where the frame differs from the
             /// reference in the base RAM.
-            partial = 0x0F,
+            partial = update_select.partial,
             /// Clock and analog on, without activating an update — so it cannot
             /// disturb the glass.
             power_on = 0xC0,
@@ -145,28 +156,28 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         // Command sets as strict Enum
         const Command = enum(u8) {
-            DRIVER_OUTPUT_CONTROL = 0x01,
-            DEEP_SLEEP_MODE = 0x10,
-            DATA_ENTRY_MODE = 0x11,
-            SW_RESET = 0x12,
-            MASTER_ACTIVATION = 0x20,
-            DISPLAY_UPDATE_CONTROL_1 = 0x21,
-            DISPLAY_UPDATE_CONTROL_2 = 0x22,
-            WRITE_RAM = 0x24,
-            WRITE_RAM_BASE = 0x26,
-            WRITE_VCOM_REGISTER = 0x2C,
-            WRITE_LUT_REGISTER = 0x32,
-            WRITE_OTP_SELECTION = 0x37,
-            BORDER_WAVEFORM_CONTROL = 0x3C,
-            SET_RAM_X_ADDRESS_START_END_POSITION = 0x44,
-            SET_RAM_Y_ADDRESS_START_END_POSITION = 0x45,
-            SET_RAM_X_ADDRESS_COUNTER = 0x4E,
-            SET_RAM_Y_ADDRESS_COUNTER = 0x4F,
-            GATE_DRIVING_VOLTAGE_CONTROL = 0x03,
-            SOURCE_DRIVING_VOLTAGE_CONTROL = 0x04,
+            driver_output_control = 0x01,
+            deep_sleep_mode = 0x10,
+            data_entry_mode = 0x11,
+            sw_reset = 0x12,
+            master_activation = 0x20,
+            display_update_control_1 = 0x21,
+            display_update_control_2 = update_select.command,
+            write_ram = 0x24,
+            write_ram_base = 0x26,
+            write_vcom_register = 0x2C,
+            write_lut_register = 0x32,
+            write_otp_selection = 0x37,
+            border_waveform_control = 0x3C,
+            set_ram_x_address_start_end_position = 0x44,
+            set_ram_y_address_start_end_position = 0x45,
+            set_ram_x_address_counter = 0x4E,
+            set_ram_y_address_counter = 0x4F,
+            gate_driving_voltage_control = 0x03,
+            source_driving_voltage_control = 0x04,
             // 0x3F is often undocumented or specific LUT/Power setting
-            WRITE_VCOM_REGISTER_OPT = 0x3F,
-            NOP = 0x7F,
+            write_vcom_register_opt = 0x3F,
+            nop = 0x7F,
         };
 
         pub fn init(config: *Transport) Self {
@@ -175,11 +186,11 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Hardware reset - V2 uses 10ms delays
         fn reset(self: *Self) !void {
-            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            try self.config.digitalWrite(Transport.rst_pin, 1);
             self.config.delayMs(10);
-            try self.config.digitalWrite(Transport.RST_PIN, 0);
+            try self.config.digitalWrite(Transport.rst_pin, 0);
             self.config.delayMs(2);
-            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            try self.config.digitalWrite(Transport.rst_pin, 1);
             self.config.delayMs(10);
         }
 
@@ -189,30 +200,30 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Send command byte
         fn sendCommand(self: *Self, command: Command) !void {
-            try self.config.digitalWrite(Transport.DC_PIN, 0);
+            try self.config.digitalWrite(Transport.dc_pin, 0);
             try self.config.spiWrite(&[_]u8{@backingInt(command)});
         }
 
         /// Send a command followed by its arguments, as two framed transfers.
         fn sendCommandArgs(self: *Self, command: Command, args: []const u8) !void {
-            try self.config.digitalWrite(Transport.DC_PIN, 0);
+            try self.config.digitalWrite(Transport.dc_pin, 0);
             try self.config.spiWrite(&[_]u8{@backingInt(command)});
 
             if (args.len > 0) {
-                try self.config.digitalWrite(Transport.DC_PIN, 1);
+                try self.config.digitalWrite(Transport.dc_pin, 1);
                 try self.config.spiWrite(args);
             }
         }
 
         /// Send single data byte
         fn sendData(self: *Self, data: u8) !void {
-            try self.config.digitalWrite(Transport.DC_PIN, 1);
+            try self.config.digitalWrite(Transport.dc_pin, 1);
             try self.config.spiWrite(&[_]u8{data});
         }
 
         /// Send multiple data bytes
         fn sendDataSlice(self: *Self, data: []const u8) !void {
-            try self.config.digitalWrite(Transport.DC_PIN, 1);
+            try self.config.digitalWrite(Transport.dc_pin, 1);
             try self.config.spiWrite(data);
         }
 
@@ -236,7 +247,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
             const start_ms = self.config.monotonicMillis();
 
-            while (try self.config.digitalRead(Transport.BUSY_PIN) == 1) {
+            while (try self.config.digitalRead(Transport.busy_pin) == 1) {
                 // Reported, not logged: the caller decides how loudly to complain,
                 // and the elapsed time is always just over the timeout anyway.
                 if (self.config.monotonicMillis() -| start_ms > busy_timeout_ms) {
@@ -250,7 +261,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Load LUT (first 153 bytes only) - from C reference
         fn loadLut(self: *Self, lut: []const u8) !void {
-            try self.sendCommand(.WRITE_LUT_REGISTER);
+            try self.sendCommand(.write_lut_register);
             try self.sendDataSlice(lut[0..153]);
         }
 
@@ -258,18 +269,18 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         fn loadLutByHost(self: *Self, lut: []const u8) !void {
             try self.loadLut(lut);
 
-            try self.sendCommand(.WRITE_VCOM_REGISTER_OPT); // 0x3f
+            try self.sendCommand(.write_vcom_register_opt); // 0x3f
             try self.sendData(lut[153]);
 
-            try self.sendCommand(.GATE_DRIVING_VOLTAGE_CONTROL); // 0x03
+            try self.sendCommand(.gate_driving_voltage_control); // 0x03
             try self.sendData(lut[154]);
 
-            try self.sendCommand(.SOURCE_DRIVING_VOLTAGE_CONTROL); // 0x04
+            try self.sendCommand(.source_driving_voltage_control); // 0x04
             try self.sendData(lut[155]); // VSH
             try self.sendData(lut[156]); // VSH2
             try self.sendData(lut[157]); // VSL
 
-            try self.sendCommand(.WRITE_VCOM_REGISTER);
+            try self.sendCommand(.write_vcom_register);
             try self.sendData(lut[158]);
         }
 
@@ -279,7 +290,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
                 @intCast((x_start >> 3) & 0xFF),
                 @intCast((x_end >> 3) & 0xFF),
             };
-            try self.sendCommandArgs(.SET_RAM_X_ADDRESS_START_END_POSITION, &data);
+            try self.sendCommandArgs(.set_ram_x_address_start_end_position, &data);
 
             const data_y = [_]u8{
                 @intCast(y_start & 0xFF),
@@ -287,31 +298,31 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
                 @intCast(y_end & 0xFF),
                 @intCast((y_end >> 8) & 0xFF),
             };
-            try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_START_END_POSITION, &data_y);
+            try self.sendCommandArgs(.set_ram_y_address_start_end_position, &data_y);
         }
 
         /// Set Cursor
         fn setCursor(self: *Self, x_start: u16, y_start: u16) !void {
-            try self.sendCommand(.SET_RAM_X_ADDRESS_COUNTER);
+            try self.sendCommand(.set_ram_x_address_counter);
             try self.sendData(@intCast((x_start >> 3) & 0xFF));
 
             const data_y = [_]u8{
                 @intCast(y_start & 0xFF),
                 @intCast((y_start >> 8) & 0xFF),
             };
-            try self.sendCommandArgs(.SET_RAM_Y_ADDRESS_COUNTER, &data_y);
+            try self.sendCommandArgs(.set_ram_y_address_counter, &data_y);
         }
 
         /// Select what the next MASTER_ACTIVATION will do.
         fn setDisplayUpdate(self: *Self, mode: DisplayUpdate) !void {
-            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_2, &[_]u8{@backingInt(mode)});
+            try self.sendCommandArgs(.display_update_control_2, &[_]u8{@backingInt(mode)});
         }
 
         /// Drive a full refresh: every pixel is repainted with the full waveform,
         /// which is what makes it flash.
         fn turnOnDisplay(self: *Self) !void {
             try self.setDisplayUpdate(.full);
-            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.sendCommand(.master_activation);
             try self.readBusy();
         }
 
@@ -319,7 +330,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// are touched, with a waveform weak enough not to flash.
         fn turnOnDisplayPartial(self: *Self) !void {
             try self.setDisplayUpdate(.partial);
-            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.sendCommand(.master_activation);
             try self.readBusy();
         }
 
@@ -330,15 +341,15 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
             try self.readBusy();
 
-            try self.sendCommand(.SW_RESET);
+            try self.sendCommand(.sw_reset);
             try self.readBusy();
 
-            try self.sendCommandArgs(.DRIVER_OUTPUT_CONTROL, &panel.driverOutputControl());
-            try self.sendCommandArgs(.DATA_ENTRY_MODE, &[_]u8{0x03});
+            try self.sendCommandArgs(.driver_output_control, &panel.driverOutputControl());
+            try self.sendCommandArgs(.data_entry_mode, &[_]u8{0x03});
 
             try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
 
-            try self.sendCommandArgs(.DISPLAY_UPDATE_CONTROL_1, &[_]u8{ 0x00, 0x80 });
+            try self.sendCommandArgs(.display_update_control_1, &[_]u8{ 0x00, 0x80 });
 
             try self.setCursor(0, 0);
             try self.readBusy();
@@ -360,10 +371,10 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             var frame: PanelFrame = undefined;
             @memset(&frame, color);
 
-            try self.sendCommand(.WRITE_RAM);
+            try self.sendCommand(.write_ram);
             try self.sendDataSlice(&frame);
 
-            try self.sendCommand(.WRITE_RAM_BASE);
+            try self.sendCommand(.write_ram_base);
             try self.sendDataSlice(&frame);
 
             try self.turnOnDisplay();
@@ -371,17 +382,17 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Display image buffer (full refresh) - from C reference EPD_2IN9_V2_Display
         pub fn display(self: *Self, image: *const PanelFrame) !void {
-            try self.sendCommand(.WRITE_RAM);
+            try self.sendCommand(.write_ram);
             try self.sendDataSlice(image);
             try self.turnOnDisplay();
         }
 
         /// Display Base (for partial update) - from C reference EPD_2IN9_V2_Display_Base
         pub fn displayBase(self: *Self, image: *const PanelFrame) !void {
-            try self.sendCommand(.WRITE_RAM); // Write to black RAM
+            try self.sendCommand(.write_ram); // Write to black RAM
             try self.sendDataSlice(image);
 
-            try self.sendCommand(.WRITE_RAM_BASE); // Write to base RAM
+            try self.sendCommand(.write_ram_base); // Write to base RAM
             try self.sendDataSlice(image);
 
             try self.turnOnDisplay();
@@ -394,25 +405,25 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// which is why partial updates work at all, given this runs before each one.
         fn beginPartial(self: *Self) !void {
             // Reset (from C reference - only 1ms delays)
-            try self.config.digitalWrite(Transport.RST_PIN, 0);
+            try self.config.digitalWrite(Transport.rst_pin, 0);
             self.config.delayMs(1);
-            try self.config.digitalWrite(Transport.RST_PIN, 1);
+            try self.config.digitalWrite(Transport.rst_pin, 1);
             self.config.delayMs(2);
 
             // Load partial LUT
             try self.loadLut(panel.lut_partial);
 
             // WriteOtpSelection (0x37 in C, not 0x2F!)
-            try self.sendCommandArgs(.WRITE_OTP_SELECTION, &[_]u8{
+            try self.sendCommandArgs(.write_otp_selection, &[_]u8{
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
             });
 
             // Border waveform control
-            try self.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
+            try self.sendCommandArgs(.border_waveform_control, &[_]u8{0x80});
 
             // Display update control: clock and analog on, no display activation.
             try self.setDisplayUpdate(.power_on);
-            try self.sendCommand(.MASTER_ACTIVATION);
+            try self.sendCommand(.master_activation);
             try self.readBusy();
         }
 
@@ -431,7 +442,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         pub fn primeBase(self: *Self, image: *const PanelFrame) !void {
             try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
             try self.setCursor(0, 0);
-            try self.sendCommand(.WRITE_RAM_BASE);
+            try self.sendCommand(.write_ram_base);
             try self.sendDataSlice(image);
         }
 
@@ -444,7 +455,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             try self.setCursor(0, 0);
 
             // Write to RAM (only 0x24, NOT 0x26!)
-            try self.sendCommand(.WRITE_RAM);
+            try self.sendCommand(.write_ram);
             try self.sendDataSlice(image);
 
             try self.turnOnDisplayPartial();
@@ -458,7 +469,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// and the partial-update reference must then be restored with
         /// `primeBase` before anything else; see there.
         pub fn sleep(self: *Self) !void {
-            try self.sendCommandArgs(.DEEP_SLEEP_MODE, &[_]u8{deep_sleep_mode_1});
+            try self.sendCommandArgs(.deep_sleep_mode, &[_]u8{deep_sleep_mode_1});
             self.config.delayMs(100);
         }
     };
@@ -473,7 +484,7 @@ const deep_sleep_mode_1 = 0x01;
 /// driver never touches it.
 fn verifyTransport(comptime T: type) void {
     const required = [_][]const u8{
-        "RST_PIN",      "DC_PIN",          "BUSY_PIN",
+        "rst_pin",      "dc_pin",          "busy_pin",
         "delayMs",      "monotonicMillis", "moduleInit",
         "digitalWrite", "digitalRead",     "spiWrite",
     };
@@ -517,8 +528,8 @@ test "a hypothetical other panel derives its own gate count" {
     const other: PanelSpec = .{
         .width = 122,
         .height = 250,
-        .lut_full = &WS_20_30,
-        .lut_partial = &WF_PARTIAL_2IN9,
+        .lut_full = &ws_20_30,
+        .lut_partial = &wf_partial_2in9,
     };
     // 249 = 0x00F9
     try testing.expectEqual([3]u8{ 0xF9, 0x00, 0x00 }, other.driverOutputControl());
@@ -529,7 +540,7 @@ test "sendCommandArgs frames the command and its payload separately" {
     defer fake.deinit();
     var epd = testEpd(&fake);
 
-    try epd.sendCommandArgs(.BORDER_WAVEFORM_CONTROL, &[_]u8{0x80});
+    try epd.sendCommandArgs(.border_waveform_control, &[_]u8{0x80});
 
     // DC low for the command byte, DC high for the argument.
     try testing.expectEqual(@as(usize, 4), fake.events.items.len);
@@ -550,8 +561,8 @@ test "the driver never drives chip select itself" {
     // here would fight it. Only RST and DC may be touched.
     for (fake.events.items) |event| {
         if (event == .pin) {
-            try testing.expect(event.pin.pin == FakeTransport.RST_PIN or
-                event.pin.pin == FakeTransport.DC_PIN);
+            try testing.expect(event.pin.pin == FakeTransport.rst_pin or
+                event.pin.pin == FakeTransport.dc_pin);
         }
     }
 }
@@ -571,7 +582,7 @@ test "reInit resets, configures and loads the full LUT without refreshing" {
     try testing.expect(fake.sentCommand(0x12)); // SW_RESET
     try testing.expectEqualSlices(u8, &.{ 0x27, 0x01, 0x00 }, fake.argsAfter(0x01).?);
     try testing.expectEqualSlices(u8, &.{0x03}, fake.argsAfter(0x11).?); // data entry
-    try testing.expectEqualSlices(u8, WS_20_30[0..153], fake.argsAfter(0x32).?);
+    try testing.expectEqualSlices(u8, ws_20_30[0..153], fake.argsAfter(0x32).?);
 
     // Waking must not disturb the glass: no display activation anywhere.
     try testing.expect(!fake.sentCommand(0x20));
@@ -591,7 +602,7 @@ test "primeBase rewrites the reference frame without activating the display" {
 
     try testing.expect(fake.sentCommand(0x26)); // WRITE_RAM_BASE
     try testing.expect(!fake.sentCommand(0x24)); // and only the reference bank
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), fake.argsAfter(0x26).?.len);
 }
 
 test "displayBase writes both banks and refreshes with the full waveform" {
@@ -602,8 +613,8 @@ test "displayBase writes both banks and refreshes with the full waveform" {
     var frame: Frame = @splat(0x00);
     try epd.displayBase(&frame);
 
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x24).?.len);
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), fake.argsAfter(0x24).?.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), fake.argsAfter(0x26).?.len);
     try testing.expectEqualSlices(u8, &.{0xC7}, fake.argsAfter(0x22).?);
     try testing.expect(fake.sentCommand(0x20));
 }
@@ -629,10 +640,10 @@ test "displayPartial loads the partial LUT and uses the weak waveform" {
     var frame: Frame = @splat(0x0F);
     try epd.displayPartial(&frame);
 
-    try testing.expectEqualSlices(u8, WF_PARTIAL_2IN9[0..153], fake.argsAfter(0x32).?);
+    try testing.expectEqualSlices(u8, wf_partial_2in9[0..153], fake.argsAfter(0x32).?);
     try testing.expectEqualSlices(u8, &.{0x80}, fake.argsAfter(0x3C).?);
     // Only the working bank; the reference must survive to diff against.
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x24).?.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), fake.argsAfter(0x24).?.len);
     try testing.expect(!fake.sentCommand(0x26));
 
     // 0xC0 powers the analog stage up, 0x0F is the partial refresh itself.
@@ -661,9 +672,9 @@ test "clear fills both banks in one transfer each" {
 
     // Used to be chunked into 128-byte pieces, which multiplied the syscalls.
     const ram = fake.argsAfter(0x24).?;
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), ram.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), ram.len);
     try testing.expectEqual(@as(u8, 0xFF), ram[0]);
-    try testing.expectEqual(@as(usize, EPD_BUFFER_SIZE), fake.argsAfter(0x26).?.len);
+    try testing.expectEqual(@as(usize, epd_buffer_size), fake.argsAfter(0x26).?.len);
 }
 
 test "readBusy waits for the line to drop" {
