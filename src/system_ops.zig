@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const ioctl = @import("ioctl.zig");
 const parse = @import("parse.zig");
 const Reading = @import("reading.zig").Reading;
 
@@ -380,8 +381,9 @@ pub const SystemOps = struct {
     }
 
     /// _IOWR('N', 0x41, struct nvme_passthru_cmd), derived rather than literal.
-    const NVME_IOCTL_ADMIN_CMD: u32 =
-        (3 << 30) | (@as(u32, @sizeOf(NvmePassthruCmd)) << 16) | (@as(u32, 'N') << 8) | 0x41;
+    /// Under the name uapi/linux/nvme_ioctl.h gives it, as the other ioctl
+    /// request numbers are under theirs; see `gpio_native.zig`.
+    const NVME_IOCTL_ADMIN_CMD = ioctl.iowr('N', 0x41, NvmePassthruCmd);
 
     const nvme_admin_get_log_page = 0x02;
     const nvme_log_smart = 0x02;

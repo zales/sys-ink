@@ -2,10 +2,12 @@
  * Prints the ioctl request numbers the daemon uses, as the kernel headers
  * define them, to check against the values derived in the Zig sources.
  *
- * The Zig side computes most of these from struct sizes (see iowr() in
- * src/gpio_native.zig and NVME_IOCTL_ADMIN_CMD in src/system_ops.zig), so a
- * layout mismatch shows up here as a differing number. Build and run on the
- * target, or cross-compile with any Linux toolchain:
+ * The Zig side computes each of these from the size of what the request takes
+ * (src/ioctl.zig, used by src/gpio_native.zig, src/waveshare_epd/epdconfig.zig
+ * and src/system_ops.zig), and its tests hold the results to the numbers
+ * printed here, so a layout mismatch fails the suite.
+ * Run this after a kernel header changes one. Build and run on the target, or
+ * cross-compile with any Linux toolchain:
  *
  *     zig cc -target aarch64-linux-musl -o check_ioctl tools/check_ioctl.c
  */

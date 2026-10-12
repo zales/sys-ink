@@ -28,6 +28,9 @@ test {
     _ = @import("bmp.zig");
     _ = @import("mqtt.zig");
     _ = @import("waveshare_epd/epd2in9.zig");
+    _ = @import("waveshare_epd/epdconfig.zig");
+    _ = @import("gpio_native.zig");
+    _ = @import("ioctl.zig");
     _ = @import("panel.zig");
     _ = @import("display_renderer.zig");
     _ = @import("sim_frame.zig");

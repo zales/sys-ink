@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const GpioNative = @import("../gpio_native.zig").GpioNative;
+const ioctl = @import("../ioctl.zig");
 const syscall = @import("../syscall.zig");
 
 const log = std.log.scoped(.epd_config);
@@ -68,9 +69,6 @@ pub const EpdConfig = struct {
         };
 
         log.info("Configuring SPI", .{});
-        const SPI_IOC_WR_MODE: u32 = 0x40016b01;
-        const SPI_IOC_WR_BITS_PER_WORD: u32 = 0x40016b03;
-        const SPI_IOC_WR_MAX_SPEED_HZ: u32 = 0x40046b04;
 
         var mode: u8 = 0; // SPI_MODE_0
         var bits: u8 = 8;
@@ -82,6 +80,13 @@ pub const EpdConfig = struct {
 
         log.info("SPI configured successfully", .{});
     }
+
+    // uapi/linux/spi/spidev.h, under the names it gives them. Derived from
+    // the type each takes, as the GPIO and NVMe requests are from theirs, and
+    // pinned by the test below.
+    const SPI_IOC_WR_MODE = ioctl.iow('k', 1, u8);
+    const SPI_IOC_WR_BITS_PER_WORD = ioctl.iow('k', 3, u8);
+    const SPI_IOC_WR_MAX_SPEED_HZ = ioctl.iow('k', 4, u32);
 
     fn spiIoctl(self: *EpdConfig, request: u32, arg: usize, what: []const u8) !void {
         const rc = std.os.linux.ioctl(self.spi_fd, request, arg);
@@ -202,3 +207,16 @@ pub const EpdConfig = struct {
         }
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "the SPI request numbers are the ones the kernel's headers define" {
+    // As `tools/check_ioctl.c` prints them from uapi/linux/spi/spidev.h.
+    try testing.expectEqual(@as(u32, 0x40016b01), EpdConfig.SPI_IOC_WR_MODE);
+    try testing.expectEqual(@as(u32, 0x40016b03), EpdConfig.SPI_IOC_WR_BITS_PER_WORD);
+    try testing.expectEqual(@as(u32, 0x40046b04), EpdConfig.SPI_IOC_WR_MAX_SPEED_HZ);
+}

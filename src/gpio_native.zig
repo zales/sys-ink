@@ -9,6 +9,7 @@
 //! commit.
 
 const std = @import("std");
+const ioctl = @import("ioctl.zig");
 const syscall = @import("syscall.zig");
 
 pub const GpioNative = struct {
@@ -84,29 +85,34 @@ pub const GpioNative = struct {
         mask: u64,
     };
 
-    /// _IOWR(type, nr, size) as the kernel computes it.
-    ///
-    /// Derived from `@sizeOf` rather than written out as a literal: the size is
-    /// part of the request number, so a struct that does not match the kernel's
-    /// layout produces a wrong ioctl instead of a subtly wrong result. The
-    /// assertions below pin the layouts the kernel actually expects.
-    fn iowr(comptime typ: u8, comptime nr: u8, comptime T: type) u32 {
-        return (3 << 30) | (@as(u32, @sizeOf(T)) << 16) | (@as(u32, typ) << 8) | nr;
-    }
+    /// struct gpiochip_info, which both ABI versions share.
+    const ChipInfo = extern struct {
+        name: [name_size]u8,
+        label: [name_size]u8,
+        lines: u32,
+    };
 
     comptime {
-        // Sizes taken from uapi/linux/gpio.h. If any of these trip, `iowr` would
-        // silently produce a request number the kernel does not recognise.
+        // Sizes taken from uapi/linux/gpio.h. The request numbers below are
+        // derived from them (see `ioctl.zig`), so if any of these trip, one of
+        // those would be a number the kernel does not recognise.
         std.debug.assert(@sizeOf(LineAttribute) == 16);
         std.debug.assert(@sizeOf(LineConfigAttribute) == 24);
         std.debug.assert(@sizeOf(LineConfig) == 272);
         std.debug.assert(@sizeOf(LineRequest) == 592);
         std.debug.assert(@sizeOf(LineValues) == 16);
+        std.debug.assert(@sizeOf(ChipInfo) == 68);
     }
 
-    const GET_LINE_IOCTL = iowr(0xB4, 0x07, LineRequest);
-    const LINE_GET_VALUES_IOCTL = iowr(0xB4, 0x0E, LineValues);
-    const LINE_SET_VALUES_IOCTL = iowr(0xB4, 0x0F, LineValues);
+    // Named as uapi/linux/gpio.h names them, the v2 ones less their GPIO_V2_
+    // prefix. Everything else here is snake_case, as the language's style has
+    // it; a name established elsewhere is the exception that style allows, and
+    // these are looked up in the kernel's headers and in what
+    // `tools/check_ioctl.c` prints.
+    const GPIO_GET_CHIPINFO_IOCTL = ioctl.ior(0xB4, 0x01, ChipInfo);
+    const GET_LINE_IOCTL = ioctl.iowr(0xB4, 0x07, LineRequest);
+    const LINE_GET_VALUES_IOCTL = ioctl.iowr(0xB4, 0x0E, LineValues);
+    const LINE_SET_VALUES_IOCTL = ioctl.iowr(0xB4, 0x0F, LineValues);
 
     pub fn requestLine(chip_path: []const u8, pin: u32, direction: RequestType) !Handle {
         const chip_fd = try std.posix.openat(std.posix.AT.FDCWD, chip_path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
@@ -129,3 +135,19 @@ pub const GpioNative = struct {
         return .{ .fd = req.fd };
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "the request numbers are the ones the kernel's headers define" {
+    // As `tools/check_ioctl.c` prints them from uapi/linux/gpio.h. A struct
+    // that drifted from the kernel's layout would change its size, and with
+    // it the number, into one the kernel answers with ENOTTY.
+    try testing.expectEqual(@as(u32, 0x8044b401), GpioNative.GPIO_GET_CHIPINFO_IOCTL);
+    try testing.expectEqual(@as(u32, 0xc250b407), GpioNative.GET_LINE_IOCTL);
+    try testing.expectEqual(@as(u32, 0xc010b40e), GpioNative.LINE_GET_VALUES_IOCTL);
+    try testing.expectEqual(@as(u32, 0xc010b40f), GpioNative.LINE_SET_VALUES_IOCTL);
+}
