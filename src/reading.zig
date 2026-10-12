@@ -51,6 +51,13 @@ pub fn Reading(comptime T: type) type {
             self.fresh = false;
         }
 
+        /// The attempt worked and had nothing newer to give, so what is held
+        /// stands: current, with the time it was measured at. For a source
+        /// that is asked more often than it can be measured.
+        pub fn keep(self: *Self) void {
+            if (self.value != null) self.fresh = true;
+        }
+
         /// There is nothing to measure: no such sensor, or it has gone.
         pub fn clear(self: *Self) void {
             self.* = .{};
@@ -132,6 +139,22 @@ test "failing with nothing measured is unavailable, not stale" {
     r.fail();
     try testing.expectEqual(State.unavailable, r.state());
     try testing.expectEqual(@as(?u64, null), r.staleFor(100));
+}
+
+test "a value that stands after a failed attempt is current again, as old as it is" {
+    var r: Reading(u32) = .{};
+    r.set(41, 100);
+    r.fail();
+
+    r.keep();
+    try testing.expectEqual(State.current, r.state());
+    try testing.expectEqual(@as(?u32, 41), r.current());
+    try testing.expectEqual(@as(i64, 100), r.taken_at);
+
+    // Nothing held is still nothing: there is no value to stand.
+    var none: Reading(u32) = .{};
+    none.keep();
+    try testing.expectEqual(State.unavailable, none.state());
 }
 
 test "clearing forgets the value" {

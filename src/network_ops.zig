@@ -243,6 +243,11 @@ pub const TrafficMonitor = struct {
         // untouched so the next real interval still measures against a
         // matching timestamp.
         if (interval_ms < min_interval_ms) {
+            // The counters were read, though: the rates held are not stale for
+            // want of a reading, only not yet due to be worked out again. Left
+            // as they were, a failed look followed by a good one inside the
+            // second kept them marked stale for a whole cycle.
+            self.rates.keep();
             return self.rates.value orelse .{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0 };
         }
 
