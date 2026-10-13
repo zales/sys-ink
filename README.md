@@ -20,13 +20,32 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 ## Screenshots
 
-| Main Screen | Loading Screen |
-|:-----------:|:--------------:|
-| ![Main](assets/sys-ink_base.png) | ![Loading](assets/sys-ink_loading.png) |
+Frames from the daemon's own renderer, at the panel's 296×128 pixels.
 
-| Sleep Screen | Threshold Alert |
-|:------------:|:---------------:|
-| ![Sleep](assets/sys-ink_sleeping.png) | ![Threshold](assets/sys-ink_trashold.png) |
+| Main Screen | Threshold Alert |
+|:-----------:|:---------------:|
+| ![Main](assets/sys-ink_base.png) | ![Threshold](assets/sys-ink_trashold.png) |
+| On Wi-Fi, with nothing to upgrade | A reading at or above its threshold is drawn inverted |
+
+| Updates and a Cable | Hardware Fault |
+|:-------------------:|:--------------:|
+| ![Updates](assets/sys-ink_updates.png) | ![Fault](assets/sys-ink_fault.png) |
+| The number of packages APT can upgrade, and `LAN` where the Wi-Fi signal goes | Under-voltage or an NVMe SMART warning inverts the status bar |
+
+| Stale Readings | Missing Sensors |
+|:--------------:|:---------------:|
+| ![Stale](assets/sys-ink_stale.png) | ![Missing](assets/sys-ink_missing.png) |
+| A reading that could not be refreshed keeps its last value, faded | No NVMe sensor, no fan, no count yet, and no way out to the internet |
+
+| Notice | Longer Notice |
+|:------:|:-------------:|
+| ![Notice](assets/sys-ink_notice.png) | ![Longer notice](assets/sys-ink_notice_long.png) |
+| A message sent to the panel takes the whole screen for a while | The font steps down until the text fits |
+
+| Loading Screen | Sleep Screen |
+|:--------------:|:------------:|
+| ![Loading](assets/sys-ink_loading.png) | ![Sleep](assets/sys-ink_sleeping.png) |
+| While the first readings are taken | The last thing the panel shows when the daemon stops |
 
 ## Hardware Requirements
 
@@ -290,7 +309,6 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/sys-ink
 Restart=always
 RestartSec=5
-User=root
 EnvironmentFile=-/etc/default/sys-ink
 NoNewPrivileges=yes
 ProtectHome=yes
@@ -318,6 +336,12 @@ The hardening lines are the ones the `.deb` unit uses. They leave the devices,
 need, and close off home directories and the kernel's tunables. With
 `ProtectHome`, `BMP_EXPORT_PATH` and `LOG_FILE_PATH` cannot point into `/home`
 or `/root`. `systemd-analyze security sys-ink` shows what is left open.
+
+The unit names no `User=`. A system service runs as root without it, and with
+it, `NoNewPrivileges` and a setting enforced by a system-call filter, systemd
+257 starts the service without `CAP_SETUID`: `apt update` then cannot drop to
+the `_apt` user, and the APT count is taken from package lists nothing
+refreshes.
 `RuntimeDirectory` gives the notice pipe its `/run/sys-ink` and removes it when
 the service stops.
 
@@ -835,15 +859,19 @@ how, and what to check if your entity IDs differ.
 - Check if the display is correctly seated in the HAT or if wires are loose.
 - Persistent ghosting means full refreshes are too rare; lower `INTERVAL_FULL_REFRESH`.
 
-### "Memory leak detected on exit!"
-- This is a warning from the Zig allocator in debug/release-safe modes. It usually indicates a clean shutdown didn't happen (e.g., `kill -9`). Use `Ctrl+C`, `SIGTERM` or `systemctl stop` for a graceful shutdown, which also parks the panel in deep sleep.
+### The APT count does not follow the updates
+- Look for `apt update failed` in the log: from 1.11.1 a check that could not refresh the package lists says so, with the status and the first error apt gave, and counts from the lists as they were.
+- `seteuid ... Operation not permitted` in that line means the service was started without `CAP_SETUID`. Remove `User=root` from the unit; see [Systemd Service](#systemd-service-manual-install-only).
+- `sudo apt update` in a shell proves nothing about it: the shell has the capability the service lacks.
+- A daemon that is not root, or has no way out to the internet, does not run `apt update` at all, and counts from the lists that are there.
 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently, in 1.10.1, Zig 0.17.0 for building from source, and in
-1.8.0 the Home Assistant discovery identity following `MQTT_CLIENT_ID`, which
-matters only if you changed it from the default.
+top — most recently, in 1.11.0, readings that `/api/status` can give as `null`
+and that MQTT withholds while they cannot be refreshed, a blank variable
+counting as unset, and notices held to one change of the panel every two
+seconds.
 
 ## License
 

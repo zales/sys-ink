@@ -27,6 +27,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-13
+
+### Fixed
+- **The APT count stopped following the mirrors when the service was sandboxed,
+  in 1.8.0.** The unit named `User=root`, and with that, `NoNewPrivileges` and
+  any setting systemd enforces with a system-call filter, systemd 257 (Debian
+  13) starts the service without `CAP_SETUID`. `apt update` could then not drop
+  to the `_apt` user to fetch, and failed; the count was taken from package
+  lists that nothing refreshed, and read "up to date" until somebody ran
+  `apt update` by hand. The unit no longer names a user: a system service runs
+  as root without one. A unit written from the README needs its `User=root`
+  line removed.
+- A failed `apt update` was passed over in silence, which is how the above went
+  unnoticed. It is logged, with its status and the first error apt gave, and
+  with what the count is then taken from.
+- The screenshots in the README and on the website were from December 2025 and
+  showed a layout the panel no longer has. They are drawn afresh by the
+  daemon's renderer, and there is one of every screen now: a threshold, an APT
+  count on a wired Pi, a hardware fault, stale readings, missing sensors, a
+  notice short and long, and the loading and sleep screens.
+- The README's troubleshooting explained a "Memory leak detected on exit!"
+  message that the daemon has not printed since 1.3.0. In its place is what to
+  look for when the APT count does not follow the updates. The pointer to the
+  breaking changes named 1.10.1 as the latest, and names 1.11.0.
+
 ## [1.11.0] — 2026-10-12
 
 ### Fixed
@@ -574,6 +599,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.11.1]: https://github.com/zales/sys-ink/releases/tag/v1.11.1
 [1.11.0]: https://github.com/zales/sys-ink/releases/tag/v1.11.0
 [1.10.3]: https://github.com/zales/sys-ink/releases/tag/v1.10.3
 [1.10.2]: https://github.com/zales/sys-ink/releases/tag/v1.10.2

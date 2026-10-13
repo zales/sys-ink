@@ -574,8 +574,26 @@ pub const SystemOps = struct {
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
                 .environ_map = &env,
             })) |update_result| {
-                self.allocator.free(update_result.stdout);
-                self.allocator.free(update_result.stderr);
+                defer self.allocator.free(update_result.stdout);
+                defer self.allocator.free(update_result.stderr);
+                // apt list answers from the lists that are there whether or
+                // not they were refreshed, so this is the only place that can
+                // say they were not.
+                if (!update_result.term.success()) {
+                    var reason_buf: [160]u8 = undefined;
+                    const reason = parse.aptUpdateError(&reason_buf, update_result.stderr);
+                    switch (update_result.term) {
+                        // 124 is what timeout exits with when it ends the command.
+                        .exited => |status| if (status == 124)
+                            log.warn("apt update ran into its time limit; counting from the package lists as they were", .{})
+                        else
+                            log.warn("apt update failed with status {d} ({s}); counting from the package lists as they were", .{
+                                status,
+                                if (reason.len > 0) reason else "no reason given",
+                            }),
+                        else => log.warn("apt update did not exit; counting from the package lists as they were", .{}),
+                    }
+                }
             } else |err| {
                 // Stale package lists still give a usable answer below.
                 log.warn("Failed to run apt update: {t}", .{err});

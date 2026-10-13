@@ -271,6 +271,29 @@ pub fn aptUpgradableCount(stdout: []const u8) u32 {
     return count;
 }
 
+/// The reason `apt update` gave for failing, as one line fit for a log: the
+/// first error on its stderr, cut to `out` and with whatever is not printable
+/// ASCII replaced. Empty when it gave none.
+///
+/// apt marks an error `E:` up to 2.x and `Error:` from 3.0 on. Warnings are
+/// passed over: a mirror that did not answer is one, and is not what made the
+/// command fail.
+pub fn aptUpdateError(out: []u8, stderr: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |line| {
+        for ([_][]const u8{ "E: ", "Error: " }) |mark| {
+            if (!std.mem.startsWith(u8, line, mark)) continue;
+            const text = line[mark.len..];
+            const len = @min(text.len, out.len);
+            for (out[0..len], text[0..len]) |*byte, from| {
+                byte.* = if (std.ascii.isPrint(from)) from else '?';
+            }
+            return out[0..len];
+        }
+    }
+    return "";
+}
+
 /// Rate of `bytes` moved over `interval_ms`, which must be positive.
 ///
 /// The interval is in milliseconds because it is never a whole number of
@@ -726,6 +749,42 @@ test "aptUpgradableCount does not depend on the locale" {
     try testing.expectEqual(@as(u32, 0), aptUpgradableCount("Vypisuje se… Hotovo\n"));
     // Nor is a stray warning line a package.
     try testing.expectEqual(@as(u32, 0), aptUpgradableCount("WARNING: apt does not have a stable CLI interface.\n"));
+}
+
+test "the reason apt update gave for failing is its first error, as one line fit for a log" {
+    var buf: [160]u8 = undefined;
+
+    // apt 3.0, in a service that systemd started without CAP_SETUID.
+    const may_not_change_user =
+        \\
+        \\WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+        \\
+        \\Error: seteuid 42 failed - seteuid (1: Operation not permitted)
+        \\Error: Method gave invalid 400 URI Failure message: Failed to set new user ids - setresuid (1: Operation not permitted)
+        \\Error: Method http has died unexpectedly!
+        \\Error: Sub-process http returned an error code (112)
+        \\
+    ;
+    try testing.expectEqualStrings(
+        "seteuid 42 failed - seteuid (1: Operation not permitted)",
+        aptUpdateError(&buf, may_not_change_user),
+    );
+
+    // apt 2.x marks an error differently, and a warning is not one.
+    const locked =
+        \\W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease
+        \\E: Could not get lock /var/lib/apt/lists/lock
+        \\
+    ;
+    try testing.expectEqualStrings("Could not get lock /var/lib/apt/lists/lock", aptUpdateError(&buf, locked));
+    try testing.expectEqualStrings("", aptUpdateError(&buf, "W: Some index files failed to download.\n"));
+    try testing.expectEqualStrings("", aptUpdateError(&buf, ""));
+
+    // What apt printed is not to start a line of its own in the journal, nor
+    // to run on past what was set aside for it.
+    var small: [8]u8 = undefined;
+    try testing.expectEqualStrings("a?[1mb", aptUpdateError(&small, "E: a\x1b[1mb\n"));
+    try testing.expectEqualStrings("12345678", aptUpdateError(&small, "E: 1234567890\n"));
 }
 
 test "scaleBytes picks the right unit" {
