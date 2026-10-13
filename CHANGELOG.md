@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `apt update` by hand. The unit no longer names a user: a system service runs
   as root without one. A unit written from the README needs its `User=root`
   line removed.
+- A failed `apt update` was passed over in silence, which is how the above went
+  unnoticed. It is logged, with its status and the first error apt gave, and
+  with what the count is then taken from.
 
 ## [1.11.0] — 2026-10-12
 
