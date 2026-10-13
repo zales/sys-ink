@@ -446,7 +446,10 @@ in Home Assistant after three `INTERVAL_FAST` periods like any other that
 stops updating.
 
 The APT count is stale when the latest check failed, which makes it at least
-`INTERVAL_SLOW` old. The uptime, the IP address and the Wi-Fi signal are never
+`INTERVAL_SLOW` old. It is stale as well when the check ran `apt update` and
+that failed: the count is then of the package lists as they were, and its age
+runs from the last check that did refresh them, or from the first count if
+none has. The uptime, the IP address and the Wi-Fi signal are never
 stale: one that cannot be read is dropped at once. The fault bar goes by what
 under-voltage and SMART last reported, stale or not — failing to read a sensor
 is no evidence that the fault it reported has cleared.
@@ -860,7 +863,7 @@ how, and what to check if your entity IDs differ.
 - Persistent ghosting means full refreshes are too rare; lower `INTERVAL_FULL_REFRESH`.
 
 ### The APT count does not follow the updates
-- Look for `apt update failed` in the log: from 1.11.1 a check that could not refresh the package lists says so, with the status and the first error apt gave, and counts from the lists as they were.
+- Look for `apt update failed` in the log: from 1.11.1 a check that could not refresh the package lists says so, with the status and the first error apt gave, and counts from the lists as they were. The count is then [stale](#readings-that-cannot-be-taken): faded on the panel, and withheld from MQTT.
 - `seteuid ... Operation not permitted` in that line means the service was started without `CAP_SETUID`. Remove `User=root` from the unit; see [Systemd Service](#systemd-service-manual-install-only).
 - `sudo apt update` in a shell proves nothing about it: the shell has the capability the service lacks.
 - A daemon that is not root, or has no way out to the internet, does not run `apt update` at all, and counts from the lists that are there.
