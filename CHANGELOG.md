@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon's renderer, and there is one of every screen now: a threshold, an APT
   count on a wired Pi, a hardware fault, stale readings, missing sensors, a
   notice short and long, and the loading and sleep screens.
+- The README's troubleshooting explained a "Memory leak detected on exit!"
+  message that the daemon has not printed since 1.3.0. In its place is what to
+  look for when the APT count does not follow the updates. The pointer to the
+  breaking changes named 1.10.1 as the latest, and names 1.11.0.
 
 ## [1.11.0] — 2026-10-12
 

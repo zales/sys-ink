@@ -859,15 +859,19 @@ how, and what to check if your entity IDs differ.
 - Check if the display is correctly seated in the HAT or if wires are loose.
 - Persistent ghosting means full refreshes are too rare; lower `INTERVAL_FULL_REFRESH`.
 
-### "Memory leak detected on exit!"
-- This is a warning from the Zig allocator in debug/release-safe modes. It usually indicates a clean shutdown didn't happen (e.g., `kill -9`). Use `Ctrl+C`, `SIGTERM` or `systemctl stop` for a graceful shutdown, which also parks the panel in deep sleep.
+### The APT count does not follow the updates
+- Look for `apt update failed` in the log: from 1.11.1 a check that could not refresh the package lists says so, with the status and the first error apt gave, and counts from the lists as they were.
+- `seteuid ... Operation not permitted` in that line means the service was started without `CAP_SETUID`. Remove `User=root` from the unit; see [Systemd Service](#systemd-service-manual-install-only).
+- `sudo apt update` in a shell proves nothing about it: the shell has the capability the service lacks.
+- A daemon that is not root, or has no way out to the internet, does not run `apt update` at all, and counts from the lists that are there.
 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently, in 1.10.1, Zig 0.17.0 for building from source, and in
-1.8.0 the Home Assistant discovery identity following `MQTT_CLIENT_ID`, which
-matters only if you changed it from the default.
+top — most recently, in 1.11.0, readings that `/api/status` can give as `null`
+and that MQTT withholds while they cannot be refreshed, a blank variable
+counting as unset, and notices held to one change of the panel every two
+seconds.
 
 ## License
 
