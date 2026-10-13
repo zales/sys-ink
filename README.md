@@ -20,13 +20,32 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
 
 ## Screenshots
 
-| Main Screen | Loading Screen |
-|:-----------:|:--------------:|
-| ![Main](assets/sys-ink_base.png) | ![Loading](assets/sys-ink_loading.png) |
+Frames from the daemon's own renderer, at the panel's 296×128 pixels.
 
-| Sleep Screen | Threshold Alert |
-|:------------:|:---------------:|
-| ![Sleep](assets/sys-ink_sleeping.png) | ![Threshold](assets/sys-ink_trashold.png) |
+| Main Screen | Threshold Alert |
+|:-----------:|:---------------:|
+| ![Main](assets/sys-ink_base.png) | ![Threshold](assets/sys-ink_trashold.png) |
+| On Wi-Fi, with nothing to upgrade | A reading at or above its threshold is drawn inverted |
+
+| Updates and a Cable | Hardware Fault |
+|:-------------------:|:--------------:|
+| ![Updates](assets/sys-ink_updates.png) | ![Fault](assets/sys-ink_fault.png) |
+| The number of packages APT can upgrade, and `LAN` where the Wi-Fi signal goes | Under-voltage or an NVMe SMART warning inverts the status bar |
+
+| Stale Readings | Missing Sensors |
+|:--------------:|:---------------:|
+| ![Stale](assets/sys-ink_stale.png) | ![Missing](assets/sys-ink_missing.png) |
+| A reading that could not be refreshed keeps its last value, faded | No NVMe sensor, no fan, no count yet, and no way out to the internet |
+
+| Notice | Longer Notice |
+|:------:|:-------------:|
+| ![Notice](assets/sys-ink_notice.png) | ![Longer notice](assets/sys-ink_notice_long.png) |
+| A message sent to the panel takes the whole screen for a while | The font steps down until the text fits |
+
+| Loading Screen | Sleep Screen |
+|:--------------:|:------------:|
+| ![Loading](assets/sys-ink_loading.png) | ![Sleep](assets/sys-ink_sleeping.png) |
+| While the first readings are taken | The last thing the panel shows when the daemon stops |
 
 ## Hardware Requirements
 

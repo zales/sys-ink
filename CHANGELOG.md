@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed `apt update` was passed over in silence, which is how the above went
   unnoticed. It is logged, with its status and the first error apt gave, and
   with what the count is then taken from.
+- The screenshots in the README and on the website were from December 2025 and
+  showed a layout the panel no longer has. They are drawn afresh by the
+  daemon's renderer, and there is one of every screen now: a threshold, an APT
+  count on a wired Pi, a hardware fault, stale readings, missing sensors, a
+  notice short and long, and the loading and sleep screens.
 
 ## [1.11.0] — 2026-10-12
 
