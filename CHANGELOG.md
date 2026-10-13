@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
+| 1.12.0 | The APT count is stale after an `apt update` that failed: drawn faded on the panel, listed under `stale` in `/api/status`, and withheld from MQTT, so its Home Assistant entity goes unavailable. Before, it was reported as current. | Nothing where `apt update` works. Where it fails, the log gives the reason on a line starting `apt update failed`; once that is put right the count is current again. |
 | 1.11.0 | `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`, `download_bytes_per_second` and `upload_bytes_per_second` can be `null`, like every other reading, and a reading that could not be refreshed is listed under the new `stale` object. | A client that assumed those six were always numbers needs to allow for `null`. |
 | 1.11.0 | MQTT publishes only the readings whose latest measurement worked. One that fails is no longer published with its last value, so its Home Assistant entity goes unavailable after three `INTERVAL_FAST` periods. | Nothing, unless an automation counted on a sensor never becoming unavailable. |
 | 1.11.0 | A variable left blank (`NAME=`) counts as unset for every setting. `NOTIFY_ENABLED=`, `PANEL_SLEEP=` and `MQTT_DISCOVERY=` used to read as off and now read as their default, on; the log says so at startup. | Write `=false` to turn one of them off. |
@@ -26,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+## [1.12.0] — 2026-10-13
 
 ### Changed
 - **The APT count is stale when `apt update` failed.** It was logged, since
@@ -610,6 +613,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.12.0]: https://github.com/zales/sys-ink/releases/tag/v1.12.0
 [1.11.1]: https://github.com/zales/sys-ink/releases/tag/v1.11.1
 [1.11.0]: https://github.com/zales/sys-ink/releases/tag/v1.11.0
 [1.10.3]: https://github.com/zales/sys-ink/releases/tag/v1.10.3
