@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-13
+
 ### Fixed
 - **The APT count stopped following the mirrors when the service was sandboxed,
   in 1.8.0.** The unit named `User=root`, and with that, `NoNewPrivileges` and
@@ -588,6 +590,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.11.1]: https://github.com/zales/sys-ink/releases/tag/v1.11.1
 [1.11.0]: https://github.com/zales/sys-ink/releases/tag/v1.11.0
 [1.10.3]: https://github.com/zales/sys-ink/releases/tag/v1.10.3
 [1.10.2]: https://github.com/zales/sys-ink/releases/tag/v1.10.2
