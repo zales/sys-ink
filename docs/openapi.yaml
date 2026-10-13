@@ -394,9 +394,12 @@ components:
             seconds since the value reported for it was measured. Empty when
             everything is current. A reading named here is never `null`.
 
-            The APT count is stale when the latest check failed. The uptime,
-            the address, the signal and the reachability probe are never
-            listed: one that cannot be had is `null` at once.
+            The APT count is stale when the latest check failed, and when it
+            ran `apt update` and that failed: the count is then of the package
+            lists as they were, and its age runs from the last check that
+            refreshed them. The uptime, the address, the signal and the
+            reachability probe are never listed: one that cannot be had is
+            `null` at once.
           additionalProperties: false
           properties:
             cpu_load: { $ref: "#/components/schemas/Age" }

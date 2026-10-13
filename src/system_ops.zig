@@ -500,8 +500,9 @@ pub const SystemOps = struct {
 
     /// Number of available updates, as the most recent check to produce one
     /// counted them. Unavailable until one has, and stale once a later check
-    /// fails — the count is then as old as the last one that worked, which at
-    /// the slow interval can be many hours.
+    /// fails, or counts from package lists it could not refresh — the count is
+    /// then as old as the last check that worked, which at the slow interval
+    /// can be many hours.
     pub fn aptUpdates(self: *SystemOps) Reading(u32) {
         if (!self.apt_count_known.load(.acquire)) return .{};
         return .{
@@ -546,29 +547,51 @@ pub const SystemOps = struct {
         }
     }
 
+    /// What a check counted, and from what.
+    const AptCount = struct {
+        count: u32,
+        /// `apt update` was run and did not succeed, so the count is of the
+        /// package lists as they were. Not set by a check that does not run
+        /// it, for want of root or of a way out: that one takes the lists at
+        /// their word, as it always has.
+        refresh_failed: bool,
+    };
+
     fn aptCheck(self: *SystemOps, run_update: bool) void {
         defer self.apt_check_running.store(false, .release);
+        self.recordAptCheck(self.countUpgradable(run_update));
+    }
 
-        const count = self.countUpgradable(run_update) orelse {
+    /// Keep what a check came to. Apart from `aptCheck`, which runs apt, so
+    /// that this much of it can be tested.
+    fn recordAptCheck(self: *SystemOps, outcome: ?AptCount) void {
+        const counted = outcome orelse {
             // The count from an earlier check stands, no longer the latest word.
             self.apt_count_fresh.store(false, .release);
             return;
         };
 
-        self.apt_updates_count.store(count, .monotonic);
-        self.apt_count_at.store(std.math.lossyCast(u32, self.nowSeconds()), .monotonic);
-        self.apt_count_fresh.store(true, .release);
+        self.apt_updates_count.store(counted.count, .monotonic);
+        // A count from lists that could not be refreshed is still worth
+        // showing: it follows what gets installed. But it says nothing new of
+        // the mirrors, so it is stale, and as old as the last check that did
+        // refresh them. Only a first count has no such time to keep.
+        if (!counted.refresh_failed or !self.apt_count_known.load(.acquire)) {
+            self.apt_count_at.store(std.math.lossyCast(u32, self.nowSeconds()), .monotonic);
+        }
+        self.apt_count_fresh.store(!counted.refresh_failed, .release);
         self.apt_count_known.store(true, .release);
     }
 
     /// Ask APT how many packages can be upgraded, or null if it would not say.
-    fn countUpgradable(self: *SystemOps, run_update: bool) ?u32 {
+    fn countUpgradable(self: *SystemOps, run_update: bool) ?AptCount {
         var env = config.childEnvironment(self.allocator, self.parent_env) catch |err| {
             log.warn("Cannot prepare the APT check's environment: {t}", .{err});
             return null;
         };
         defer env.deinit();
 
+        var refresh_failed = false;
         if (run_update) {
             if (std.process.run(self.allocator, self.io, .{
                 .argv = &[_][]const u8{ "/usr/bin/timeout", "30", "/usr/bin/apt", "update" },
@@ -580,6 +603,7 @@ pub const SystemOps = struct {
                 // not they were refreshed, so this is the only place that can
                 // say they were not.
                 if (!update_result.term.success()) {
+                    refresh_failed = true;
                     var reason_buf: [160]u8 = undefined;
                     const reason = parse.aptUpdateError(&reason_buf, update_result.stderr);
                     switch (update_result.term) {
@@ -596,6 +620,7 @@ pub const SystemOps = struct {
                 }
             } else |err| {
                 // Stale package lists still give a usable answer below.
+                refresh_failed = true;
                 log.warn("Failed to run apt update: {t}", .{err});
             }
         }
@@ -615,7 +640,10 @@ pub const SystemOps = struct {
             return null;
         }
 
-        return parse.aptUpgradableCount(result.stdout);
+        return .{
+            .count = parse.aptUpgradableCount(result.stdout),
+            .refresh_failed = refresh_failed,
+        };
     }
 };
 
@@ -928,4 +956,56 @@ test "nothing has been counted before an APT check has run" {
     defer ops.deinit();
     try testing.expectEqual(State.unavailable, ops.aptUpdates().state());
     try testing.expectEqual(@as(?u32, null), ops.aptUpdates().value);
+}
+
+test "a count from package lists that could not be refreshed is reported as stale" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+
+    // The first check of a service that may not fetch: there is a count, and
+    // it is not passed off as what the mirrors have.
+    ops.recordAptCheck(.{ .count = 0, .refresh_failed = true });
+    try testing.expectEqual(State.stale, ops.aptUpdates().state());
+    try testing.expectEqual(@as(?u32, 0), ops.aptUpdates().value);
+
+    // A check that refreshed them makes it current, and the next that could
+    // not makes it stale again, with the count the lists now give.
+    ops.recordAptCheck(.{ .count = 4, .refresh_failed = false });
+    try testing.expectEqual(State.current, ops.aptUpdates().state());
+    try testing.expectEqual(@as(?u32, 4), ops.aptUpdates().value);
+
+    ops.recordAptCheck(.{ .count = 1, .refresh_failed = true });
+    try testing.expectEqual(State.stale, ops.aptUpdates().state());
+    try testing.expectEqual(@as(?u32, 1), ops.aptUpdates().value);
+}
+
+test "a stale APT count is as old as the last check that refreshed the package lists" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+
+    var ops = opsOn(&fixture);
+    defer ops.deinit();
+
+    ops.recordAptCheck(.{ .count = 4, .refresh_failed = false });
+    // A time no clock will give, in place of the one that check was stamped
+    // with, to tell a time that was kept from one that was taken again.
+    const refreshed_at = std.math.maxInt(u32) - 1;
+    ops.apt_count_at.store(refreshed_at, .monotonic);
+
+    // Neither a count from the lists as they were nor a check that could not
+    // count at all moves it.
+    ops.recordAptCheck(.{ .count = 1, .refresh_failed = true });
+    try testing.expectEqual(@as(i64, refreshed_at), ops.aptUpdates().taken_at);
+    ops.recordAptCheck(null);
+    try testing.expectEqual(State.stale, ops.aptUpdates().state());
+    try testing.expectEqual(@as(?u32, 1), ops.aptUpdates().value);
+    try testing.expectEqual(@as(i64, refreshed_at), ops.aptUpdates().taken_at);
+
+    // The next check that refreshes them does.
+    ops.recordAptCheck(.{ .count = 1, .refresh_failed = false });
+    try testing.expectEqual(State.current, ops.aptUpdates().state());
+    try testing.expect(ops.aptUpdates().taken_at != refreshed_at);
 }

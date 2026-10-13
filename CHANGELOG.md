@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The APT count is stale when `apt update` failed.** It was logged, since
+  1.11.1, and the count went on being reported as current, though it was of
+  package lists nothing had refreshed. It is drawn faded on the panel now,
+  listed under `stale` in `/api/status`, and withheld from MQTT, so its Home
+  Assistant entity goes unavailable like any other reading that cannot be
+  refreshed. The count itself is still taken, from the lists as they are, so it
+  follows what gets installed; its age runs from the last check that did
+  refresh the lists. A daemon that does not run `apt update` at all, for want
+  of root or of a way out to the internet, reports as before.
+
 ## [1.11.1] — 2026-10-13
 
 ### Fixed
