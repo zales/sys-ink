@@ -290,7 +290,6 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/sys-ink
 Restart=always
 RestartSec=5
-User=root
 EnvironmentFile=-/etc/default/sys-ink
 NoNewPrivileges=yes
 ProtectHome=yes
@@ -318,6 +317,12 @@ The hardening lines are the ones the `.deb` unit uses. They leave the devices,
 need, and close off home directories and the kernel's tunables. With
 `ProtectHome`, `BMP_EXPORT_PATH` and `LOG_FILE_PATH` cannot point into `/home`
 or `/root`. `systemd-analyze security sys-ink` shows what is left open.
+
+The unit names no `User=`. A system service runs as root without it, and with
+it, `NoNewPrivileges` and a setting enforced by a system-call filter, systemd
+257 starts the service without `CAP_SETUID`: `apt update` then cannot drop to
+the `_apt` user, and the APT count is taken from package lists nothing
+refreshes.
 `RuntimeDirectory` gives the notice pipe its `/run/sys-ink` and removes it when
 the service stops.
 

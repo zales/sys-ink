@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The APT count stopped following the mirrors when the service was sandboxed,
+  in 1.8.0.** The unit named `User=root`, and with that, `NoNewPrivileges` and
+  any setting systemd enforces with a system-call filter, systemd 257 (Debian
+  13) starts the service without `CAP_SETUID`. `apt update` could then not drop
+  to the `_apt` user to fetch, and failed; the count was taken from package
+  lists that nothing refreshed, and read "up to date" until somebody ran
+  `apt update` by hand. The unit no longer names a user: a system service runs
+  as root without one. A unit written from the README needs its `User=root`
+  line removed.
+
 ## [1.11.0] — 2026-10-12
 
 ### Fixed

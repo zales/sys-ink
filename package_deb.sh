@@ -60,8 +60,11 @@ Wants=network-online.target
 ExecStart=/usr/bin/$APP_NAME
 Restart=always
 RestartSec=5
-User=root
-Group=root
+# No User= or Group=. A system service runs as root without them, and naming
+# root is not the same thing: with User= set, NoNewPrivileges and any of the
+# settings below that systemd enforces with a system-call filter, systemd 257
+# starts the service without CAP_SETUID. apt update then cannot drop to the
+# _apt user, and fails.
 EnvironmentFile=-/etc/default/$APP_NAME
 # Hardening. Deliberately short of what systemd offers: the daemon needs
 # /dev/spidev*, /dev/gpiochip* and /dev/nvme* (so no PrivateDevices), and its
