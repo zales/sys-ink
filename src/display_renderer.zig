@@ -1,5 +1,6 @@
 const std = @import("std");
-const Frame = @import("waveshare_epd/epd2in9.zig").Frame;
+const epd2in9 = @import("waveshare_epd/epd2in9.zig");
+const Frame = epd2in9.Frame;
 const layout = @import("display_config.zig");
 const Thresholds = @import("config.zig").Thresholds;
 const parse = @import("parse.zig");
@@ -49,8 +50,12 @@ pub const Renderer = struct {
     music: Bitmap,
     /// Whether the panel shows `music`, when there is no notice to show.
     music_shown: bool = false,
+    /// Whether `music` has a picture in grey on it, for a grey refresh.
+    music_gray: bool = false,
     /// The frame as `panelFrame` hands it over: 128x296 portrait, 4736 bytes.
     panel_buffer: *Frame,
+    /// The frame as `panelGrayPlanes` hands it over: the same, in two banks.
+    gray_buffer: *[2]Frame,
     /// The frame as `packedFrame` hands it over. Both are kept around so
     /// that producing a frame does not allocate.
     bmp_buffer: []u8,
@@ -72,6 +77,8 @@ pub const Renderer = struct {
 
         const panel_buffer = try allocator.create(Frame);
         errdefer allocator.destroy(panel_buffer);
+        const gray_buffer = try allocator.create([2]Frame);
+        errdefer allocator.destroy(gray_buffer);
 
         const bmp_row_bytes = @divCeil(layout.display_width, 8);
         const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * layout.display_height);
@@ -81,6 +88,7 @@ pub const Renderer = struct {
             .notice = notice,
             .music = music,
             .panel_buffer = panel_buffer,
+            .gray_buffer = gray_buffer,
             .bmp_buffer = bmp_buffer,
             .thresholds = options.thresholds,
             .allocator = allocator,
@@ -93,6 +101,7 @@ pub const Renderer = struct {
         self.music.deinit();
         self.allocator.free(self.bmp_buffer);
         self.allocator.destroy(self.panel_buffer);
+        self.allocator.destroy(self.gray_buffer);
     }
 
     // ------------------------------------------------------------------------
@@ -331,6 +340,7 @@ pub const Renderer = struct {
     /// dashboard's status bar, which this screen does not have.
     pub fn showMusic(self: *Self, view: now_playing.View) void {
         self.music.clear(.white);
+        self.music_gray = false;
         switch (view) {
             .pairing => |p| self.drawPairing(p.code),
             .track => |t| self.drawTrack(t),
@@ -348,7 +358,9 @@ pub const Renderer = struct {
         const m = layout.music;
 
         if (t.cover) |cover| {
-            b.drawDithered(m.cover.x, m.cover.y, m.cover.width, m.cover.height, cover);
+            // In the panel's four greys; see `panelGrayPlanes`.
+            b.drawDithered(m.cover.x, m.cover.y, m.cover.width, m.cover.height, cover, .four);
+            self.music_gray = true;
         } else {
             b.drawRect(m.cover.x, m.cover.y, m.cover.width, m.cover.height, .black);
         }
@@ -455,6 +467,51 @@ pub const Renderer = struct {
         return self.panel_buffer;
     }
 
+    /// Whether what is shown has grey in it, and so goes on the panel by a
+    /// grey refresh when it goes up in full: the music screen with a cover.
+    pub fn grayShown(self: *Self) bool {
+        return self.frameBitmap() == &self.music and self.music_gray;
+    }
+
+    /// The current frame in four greys, as a grey refresh takes it: two banks
+    /// of a bit a pixel, each rotated and packed as `panelFrame` is. Black and
+    /// white stay black and white, and the greys `Shades.four` draws are the
+    /// panel's two. Borrowed: valid until the next call.
+    pub fn panelGrayPlanes(self: *Self) *const [2]Frame {
+        const src = self.frameBitmap();
+        const width = src.width;
+
+        for (0..width) |hw_y| {
+            const src_x = (width - 1) - hw_y;
+            const ram_row = self.gray_buffer[0][hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
+            const base_row = self.gray_buffer[1][hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
+
+            for (ram_row, base_row, 0..) |*ram_byte, *base_byte, byte_idx| {
+                var ram: u8 = 0;
+                var base: u8 = 0;
+                for (0..8) |b| {
+                    const level = src.data[(byte_idx * 8 + b) * src.stride + src_x];
+                    const gray = grayOf(level);
+                    ram |= @as(u8, gray.ram()) << @intCast(7 - b);
+                    base |= @as(u8, gray.base()) << @intCast(7 - b);
+                }
+                ram_byte.* = ram;
+                base_byte.* = base;
+            }
+        }
+        return self.gray_buffer;
+    }
+
+    /// The panel's grey nearest `level`.
+    fn grayOf(level: u8) epd2in9.Gray {
+        return switch ((@as(u16, level) + 42) / 85) {
+            0 => .black,
+            1 => .dark,
+            2 => .light,
+            else => .white,
+        };
+    }
+
     /// The same frame the right way up, for whoever shows it rather than
     /// sending it to the panel: the web preview, the BMP export and the
     /// simulators. Borrowed: valid until the next call.
@@ -497,7 +554,7 @@ pub const Renderer = struct {
                 var bits: u8 = 0;
                 for (0..8) |b| {
                     const src_y = byte_idx * 8 + b;
-                    if (src.data[src_y * src.stride + src_x] >= 128) {
+                    if (Graphics.bayer2(src.data[src_y * src.stride + src_x], src_x, src_y)) {
                         bits |= @as(u8, 0x80) >> @intCast(b);
                     }
                 }
@@ -523,7 +580,7 @@ pub const Renderer = struct {
                 var bits: u8 = 0;
                 for (0..8) |b| {
                     const x = byte_idx * 8 + b;
-                    if (x >= width or src_row[x] >= 128) {
+                    if (x >= width or Graphics.bayer2(src_row[x], x, y)) {
                         bits |= @as(u8, 0x80) >> @intCast(b);
                     }
                 }
@@ -1502,4 +1559,60 @@ test "the pairing screen shows the code" {
     defer testing.allocator.free(with_code);
     r.showMusic(.{ .pairing = .{ .code = "XYZ789" } });
     try testing.expect(!std.mem.eql(u8, with_code, r.packedFrame()));
+}
+
+test "the music screen with a cover goes to the panel in grey, and only it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    r.drawReferenceScreen();
+    try testing.expect(!r.grayShown());
+
+    const cover: [now_playing.cover_len]u8 = @splat(85);
+    r.showMusic(.{ .track = .{ .title = "x", .artist = "y", .elapsed_s = 0, .duration_s = 1, .playing = true, .cover = &cover } });
+    try testing.expect(r.grayShown());
+
+    // Not under a notice, nor with a fault to show, nor without a cover.
+    r.showNotice("hello");
+    try testing.expect(!r.grayShown());
+    r.clearNotice();
+    r.setFaultWarning(true);
+    try testing.expect(!r.grayShown());
+    r.setFaultWarning(false);
+    r.showMusic(trackView("x", 0, 1, true));
+    try testing.expect(!r.grayShown());
+}
+
+test "each of the four greys reaches the panel's banks as the bits the driver gives it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    r.showMusic(trackView("x", 0, 1, true));
+
+    // Four pixels down the last column, which is the first hardware row, MSB first.
+    const x = layout.display_width - 1;
+    const levels = [_]u8{ 0, 85, 170, 255 };
+    const expected = [_]epd2in9.Gray{ .black, .dark, .light, .white };
+    for (levels, 0..) |level, y| r.music.data[y * r.music.stride + x] = level;
+
+    const planes = r.panelGrayPlanes();
+    for (expected, 0..) |gray, y| {
+        const bit = @as(u8, 0x80) >> @intCast(y);
+        try testing.expectEqual(gray.ram() == 1, planes[0][0] & bit != 0);
+        try testing.expectEqual(gray.base() == 1, planes[1][0] & bit != 0);
+    }
+}
+
+test "in black and white, a grey cover comes out a quarter or three quarters black" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    const cover: [now_playing.cover_len]u8 = @splat(85);
+    r.showMusic(.{ .track = .{ .title = "x", .artist = "y", .elapsed_s = 0, .duration_s = 1, .playing = true, .cover = &cover } });
+    const frame = r.packedFrame();
+    const row_bytes = @divCeil(layout.display_width, 8);
+    // Two rows of the first 64 pixels of the cover: 128 pixels, 96 black.
+    var black: u32 = 0;
+    for (40..42) |y| {
+        for (frame[y * row_bytes ..][0..8]) |byte| black += 8 - @popCount(byte);
+    }
+    try testing.expectEqual(@as(u32, 96), black);
 }

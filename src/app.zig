@@ -362,7 +362,14 @@ pub fn App(comptime Transport: type) type {
         pub fn updateDisplayAt(self: *Self, now: i64) void {
             const refresh = self.refresh.next(now);
 
-            if (self.panel.show(self.renderer.panelFrame(), refresh)) {
+            // A picture in grey goes up in full by a grey refresh; partial
+            // updates over it leave its grey alone.
+            const shown = if (refresh == .full and self.renderer.grayShown())
+                self.panel.showGray(self.renderer.panelGrayPlanes(), self.renderer.panelFrame())
+            else
+                self.panel.show(self.renderer.panelFrame(), refresh);
+
+            if (shown) {
                 self.exportBmp();
             } else |err| {
                 log.warn("Failed to update display: {t}", .{err});
@@ -1163,6 +1170,33 @@ test "music goes up with a full refresh, moves on its tick by partial ones, and 
 
     bench.transport.resetLog();
     try testing.expect(bench.app.stepMusicAt(1_036_000));
+    try testing.expect(!bench.renderer.music_shown);
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+}
+
+test "a cover goes up in grey, the bar moves on by partial updates, and the dashboard comes back in black and white" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .music = .{ .hold_paused = 0, .tick = 5 } });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    var snapshot = playingSnapshot("spotify:track:a", 0, 1_000_000);
+    snapshot.cover_valid = true;
+    snapshot.cover_serial = 1;
+    snapshot.cover = @splat(128);
+
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&snapshot, 1_000_000);
+    try testing.expectEqual(Waveform.gray, bench.refreshed().?);
+
+    bench.transport.resetLog();
+    try testing.expect(bench.app.stepMusicAt(1_005_000));
+    try testing.expectEqual(Waveform.partial, bench.refreshed().?);
+
+    // With no hold, a pause takes the screen down at once.
+    snapshot.playback.?.playing = false;
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&snapshot, 1_006_000);
     try testing.expect(!bench.renderer.music_shown);
     try testing.expectEqual(Waveform.full, bench.refreshed().?);
 }

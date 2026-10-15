@@ -773,9 +773,8 @@ agents that read `SKILL.md` skills can use it too; the helper,
 ### Spotify
 
 With `SPOTIFY_ENABLED=true` the panel shows what plays on a Spotify account,
-on whatever device it plays: the cover down the left, dithered to black and
-white, and beside it the artist, the title and a bar with the time played and
-the length. A notice still goes over it, and a hardware fault takes it down,
+on whatever device it plays: the cover down the left, in four greys, and
+beside it the artist, the title and a bar with the time played and the length. A notice still goes over it, and a hardware fault takes it down,
 since the fault is shown on the dashboard's status bar.
 
 | Variable | Default | Description |
@@ -811,7 +810,19 @@ when written, and if Spotify changes it, the log says so and the dashboard
 stays up.
 
 The time played is counted on by the panel between changes, so the bar moves
-without asking Spotify anything. The cover is decoded on the device, and only
+without asking Spotify anything.
+
+**The greys.** The panel has two colours, but its controller can drive two
+greys between them with a waveform of its own, which Waveshare publishes for
+this panel. That takes a full refresh, so the cover goes up in grey whenever
+the music screen comes up, its cover changes, or the periodic full refresh
+falls due; the bar moves by partial refreshes as before. Those leave the
+pixels they do not change undriven while a grey picture is up, where they
+would otherwise give them a pulse towards black or white each time and wear
+the grey away. The preview and the BMP export have one bit a pixel, and show
+each grey as a pattern of black and white instead.
+
+The cover is decoded on the device, and only
 covers in baseline JPEG, which is what Spotify serves, are drawn; a cover that
 cannot be fetched or decoded leaves an empty frame in its place. The fonts
 cover ASCII, so titles lose their diacritics as notices do.

@@ -173,14 +173,31 @@ pub const Bitmap = struct {
     /// sizes the rows of error it carries on the stack.
     pub const max_dither_width = 512;
 
-    /// Draw the greyscale picture `gray`, `w` by `h` row by row, in black and
-    /// white with its top left corner at `x`, `y`, as far as it falls inside.
+    /// What `drawDithered` draws with.
+    pub const Shades = enum {
+        /// Black and white.
+        two,
+        /// Black, white and the two greys between, at 85 and 170: what the
+        /// panel shows by a grey refresh. Anything else reads them as black
+        /// and white; see `bayer2`.
+        four,
+
+        fn nearest(self: Shades, value: i16) u8 {
+            return switch (self) {
+                .two => if (value < 128) 0 else 255,
+                .four => @intCast(std.math.clamp(@divFloor(value + 42, 85), 0, 3) * 85),
+            };
+        }
+    };
+
+    /// Draw the greyscale picture `gray`, `w` by `h` row by row, in `shades`
+    /// with its top left corner at `x`, `y`, as far as it falls inside.
     ///
     /// Atkinson's dithering: each pixel's error goes in eighths to six
     /// neighbours ahead of it, and the last quarter is dropped. Dropping it
     /// keeps the lightest and darkest areas solid instead of speckled, which
     /// on a panel this small matters more than holding every mid-tone.
-    pub fn drawDithered(self: *Bitmap, x: i32, y: i32, w: u32, h: u32, gray: []const u8) void {
+    pub fn drawDithered(self: *Bitmap, x: i32, y: i32, w: u32, h: u32, gray: []const u8, shades: Shades) void {
         std.debug.assert(w <= max_dither_width);
         std.debug.assert(gray.len == @as(usize, w) * h);
 
@@ -194,19 +211,27 @@ pub const Bitmap = struct {
             for (0..w) |px| {
                 const i = px + 1;
                 const value = @as(i16, gray[py * w + px]) + here[i];
-                const black = value < 128;
-                const share = @divTrunc(value - @as(i16, if (black) 0 else 255), 8);
+                const level = shades.nearest(value);
+                const share = @divTrunc(value - level, 8);
                 here[i + 1] += share;
                 here[i + 2] += share;
                 below[i - 1] += share;
                 below[i] += share;
                 below[i + 1] += share;
                 further[i] += share;
-                self.setPixel(x + @as(i32, @intCast(px)), y + @as(i32, @intCast(py)), if (black) .black else .white);
+                self.setLevel(x + @as(i32, @intCast(px)), y + @as(i32, @intCast(py)), level);
             }
             // Two rows on, this one comes round again as the furthest ahead.
             @memset(here, 0);
         }
+    }
+
+    fn setLevel(self: *Bitmap, x: i32, y: i32, level: u8) void {
+        if (x < 0 or y < 0) return;
+        const ux: u32 = @intCast(x);
+        const uy: u32 = @intCast(y);
+        if (ux >= self.width or uy >= self.height) return;
+        self.data[uy * self.stride + ux] = level;
     }
 
     /// How far the top of `font_type`'s text is above its baseline. Known at
@@ -373,6 +398,17 @@ pub fn scaleGray(src: []const u8, src_w: u32, src_h: u32, dst: []u8, dst_w: u32,
             dst[dy * dst_w + dx] = @intCast((sum + count / 2) / count);
         }
     }
+}
+
+/// Whether the pixel at `x`, `y` of level `level` is white in black and white.
+///
+/// Black and white stay as they are; the greys `Shades.four` draws come out
+/// as a 2x2 pattern, a quarter or three quarters black, which is as near as
+/// one bit gets to them. Everything that packs a bitmap to one bit goes by
+/// this, so a grey picture reads right in the preview and on the panel alike.
+pub fn bayer2(level: u8, x: usize, y: usize) bool {
+    const thresholds = [2][2]u8{ .{ 32, 159 }, .{ 223, 96 } };
+    return level >= thresholds[y & 1][x & 1];
 }
 
 /// Stretch the levels of `pixels` so the darkest hundredth of them comes out
@@ -807,7 +843,7 @@ test "drawDithered keeps white white and black black, and turns mid-grey about h
     for (0..16) |y| for (0..48) |x| {
         gray[y * 48 + x] = if (x < 16) 255 else if (x < 32) 0 else 128;
     };
-    bmp.drawDithered(0, 0, 48, 16, &gray);
+    bmp.drawDithered(0, 0, 48, 16, &gray, .two);
 
     var black = [_]u32{ 0, 0, 0 };
     for (0..16) |y| for (0..48) |x| {
@@ -825,6 +861,40 @@ test "drawDithered clips at the edges rather than writing past them" {
     var bmp = try testBitmap(8, 8);
     defer bmp.deinit();
     const gray: [16 * 16]u8 = @splat(0);
-    bmp.drawDithered(-4, 4, 16, 16, &gray);
+    bmp.drawDithered(-4, 4, 16, 16, &gray, .two);
     try testing.expectEqual(@as(u32, 8 * 4), countBlack(&bmp));
+}
+
+test "in four shades only the four levels come out, and a grey between two is a mix of them" {
+    var bmp = try testBitmap(32, 32);
+    defer bmp.deinit();
+
+    var gray: [32 * 32]u8 = @splat(85);
+    bmp.drawDithered(0, 0, 32, 32, &gray, .four);
+    for (bmp.data) |px| try testing.expectEqual(@as(u8, 85), px);
+
+    gray = @splat(128);
+    bmp.drawDithered(0, 0, 32, 32, &gray, .four);
+    var counts = [_]u32{ 0, 0, 0, 0 };
+    for (bmp.data) |px| {
+        try testing.expect(px % 85 == 0);
+        counts[px / 85] += 1;
+    }
+    try testing.expectEqual(@as(u32, 0), counts[0] + counts[3]);
+    try testing.expect(counts[1] > 0 and counts[2] > 0);
+}
+
+test "in one bit, black and white stay put and the greys become a quarter and three quarters black" {
+    for (0..4) |i| {
+        try testing.expect(!bayer2(0, i % 2, i / 2));
+        try testing.expect(bayer2(255, i % 2, i / 2));
+    }
+    var dark: u32 = 0;
+    var light: u32 = 0;
+    for (0..4) |i| {
+        dark += @intFromBool(!bayer2(85, i % 2, i / 2));
+        light += @intFromBool(!bayer2(170, i % 2, i / 2));
+    }
+    try testing.expectEqual(@as(u32, 3), dark);
+    try testing.expectEqual(@as(u32, 1), light);
 }

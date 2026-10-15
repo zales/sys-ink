@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **What Spotify plays, on the panel.** With `SPOTIFY_ENABLED=true`, while
   something plays on the linked account, on any device, the panel shows its
   cover, artist, title and a bar with the time played, in place of the
-  dashboard, and goes back `SPOTIFY_PAUSE_HOLD` seconds after it pauses. It is
+  dashboard, and goes back `SPOTIFY_PAUSE_HOLD` seconds after it pauses. The
+  cover is drawn in four greys, by the grey waveform Waveshare publishes for the
+  panel; the preview shows the greys as patterns. It is
   told of every change as it happens, over the WebSocket Spotify's own clients
   use, rather than asking: the way librespot does it, and no published API. The
   panel is linked once, by a code it shows, entered at spotify.com/pair; the
