@@ -16,6 +16,8 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
   on the network.
 - **HTTP API**: Current readings as JSON, and notices with a bearer token,
   served beside the optional panel preview.
+- **Spotify**: While something plays on a Spotify account, the panel shows its
+  cover, artist, title and progress, pushed to it as playback changes.
 - **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
 
 ## Screenshots
@@ -184,6 +186,14 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   folding its text to what the fonts can draw, deciding when one goes up and
   comes down, and receiving it through the named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
   `src/web_preview.zig`.
+- `src/now_playing.zig`: what Spotify plays, and when the music screen goes
+  up, is redrawn and comes down (unit tested).
+- `src/spotify.zig`: what is sent to Spotify and what is made of its replies,
+  free of I/O (unit tested); `src/spotify_client.zig`: the connection itself,
+  on a task of its own.
+- `src/websocket.zig`: the client's half of WebSocket, free of I/O (unit tested).
+- `src/jpeg.zig`: baseline JPEG decoded to its luminance, for covers (unit
+  tested against libjpeg).
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging. The
   configuration is read from the environment once, into a value that `main`
@@ -320,6 +330,8 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 RuntimeDirectory=sys-ink
+StateDirectory=sys-ink
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
@@ -344,6 +356,8 @@ the `_apt` user, and the APT count is taken from package lists nothing
 refreshes.
 `RuntimeDirectory` gives the notice pipe its `/run/sys-ink` and removes it when
 the service stops.
+`StateDirectory` gives the link to a Spotify account its `/var/lib/sys-ink`,
+root's alone, and keeps it across restarts.
 
 ## Configuration
 
@@ -755,6 +769,56 @@ sharing Home Assistant's, and a broker ACL can limit it to the notice topic.
 The skill follows the [agentskills.io](https://agentskills.io) format, so other
 agents that read `SKILL.md` skills can use it too; the helper,
 `scripts/notify.sh`, works on its own as well.
+
+### Spotify
+
+With `SPOTIFY_ENABLED=true` the panel shows what plays on a Spotify account,
+on whatever device it plays: the cover down the left, dithered to black and
+white, and beside it the artist, the title and a bar with the time played and
+the length. A notice still goes over it, and a hardware fault takes it down,
+since the fault is shown on the dashboard's status bar.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPOTIFY_ENABLED` | `false` | Show what plays on the linked Spotify account |
+| `SPOTIFY_STATE_FILE` | `/var/lib/sys-ink/spotify.json` | Where the link to the account is kept. It holds a refresh token, so it is written readable by root alone |
+| `SPOTIFY_PAUSE_HOLD` | `30` | Seconds the music screen stays up once playback pauses. `0` goes back to the dashboard at once |
+| `SPOTIFY_INTERVAL` | `5` | Seconds between redraws while playing, which move the bar. Each is a partial refresh of the panel |
+
+**Linking.** The first time it starts with Spotify on, the panel shows a code
+in place of the dashboard, and the log has it too:
+
+```
+[12:00:03] [info] (spotify) Spotify: to link this panel, enter AB12CD at https://spotify.com/pair
+```
+
+Enter it at [spotify.com/pair](https://spotify.com/pair), signed in to the
+account, and the dashboard comes back. The code lasts about an hour, and is
+asked for once a run: one that runs out unentered leaves Spotify off until the
+service is restarted, so a panel nobody links does not go on hiding its
+dashboard. To unlink it, or to link another account, delete the state file
+and restart the service.
+
+**How it works.** The way [librespot](https://github.com/librespot-org/librespot)
+does it, with a shortcut its layers allow: the link is made with the device
+flow of Spotify's own desktop client, and the token it gives opens the
+WebSocket Spotify pushes playback changes down. The panel registers there as a
+device that plays nothing and asks to be left out of device lists, and is told
+of every change as it happens: nothing is polled. What a track is called,
+and its cover, it then looks up itself, since the device playing it may not
+say. None of this is a published API. It was checked against Spotify itself
+when written, and if Spotify changes it, the log says so and the dashboard
+stays up.
+
+The time played is counted on by the panel between changes, so the bar moves
+without asking Spotify anything. The cover is decoded on the device, and only
+covers in baseline JPEG, which is what Spotify serves, are drawn; a cover that
+cannot be fetched or decoded leaves an empty frame in its place. The fonts
+cover ASCII, so titles lose their diacritics as notices do.
+
+The service unit of the `.deb` gives the state file its directory with
+`StateDirectory=sys-ink`, readable by root alone. Without it, the daemon makes
+the directory itself.
 
 ### Logging and export
 

@@ -1192,8 +1192,8 @@ const Resolver = struct {
 /// stub (127.0.0.53), and *resolved* does the mDNS part server-side. Verified on
 /// the target host rather than assumed. It is still an unbounded call —
 /// getaddrinfo has internal timeouts but none we control — which is why only
-/// `Resolver` calls it, off the main loop.
-fn lookup(_: ?*anyopaque, host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
+/// `Resolver` and the Spotify client call it, both off the main loop.
+pub fn lookup(_: ?*anyopaque, host_z: [*:0]const u8) Resolver.LookupError![4]u8 {
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
     hints.ai_socktype = c.SOCK_STREAM;

@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **What Spotify plays, on the panel.** With `SPOTIFY_ENABLED=true`, while
+  something plays on the linked account, on any device, the panel shows its
+  cover, artist, title and a bar with the time played, in place of the
+  dashboard, and goes back `SPOTIFY_PAUSE_HOLD` seconds after it pauses. It is
+  told of every change as it happens, over the WebSocket Spotify's own clients
+  use, rather than asking: the way librespot does it, and no published API. The
+  panel is linked once, by a code it shows, entered at spotify.com/pair; the
+  link is kept in `SPOTIFY_STATE_FILE`. A notice still goes over the music, and
+  a hardware fault takes it down. See the README's Spotify section.
+- The `.deb`'s unit has `StateDirectory=sys-ink`, for that link.
+
 ## [1.12.0] — 2026-10-13
 
 ### Changed

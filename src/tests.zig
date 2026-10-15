@@ -52,6 +52,10 @@ test {
     _ = @import("sysroot.zig");
     _ = @import("system_ops.zig");
     _ = @import("network_ops.zig");
+    _ = @import("jpeg.zig");
+    _ = @import("websocket.zig");
+    _ = @import("now_playing.zig");
+    _ = @import("spotify.zig");
 
     if (builtin.target.os.tag == .linux) {
         _ = @import("notice_fifo.zig");

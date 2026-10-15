@@ -8,6 +8,7 @@ const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const notice_text = @import("notice.zig");
+const now_playing = @import("now_playing.zig");
 
 /// Bytes per hardware row after the 90° rotation.
 const hw_bytes_per_row = layout.display_height / 8;
@@ -44,6 +45,10 @@ pub const Renderer = struct {
     notice: Bitmap,
     /// Whether the panel shows `notice` rather than `bitmap`.
     notice_shown: bool = false,
+    /// The music screen, kept apart for the same reason as the notice.
+    music: Bitmap,
+    /// Whether the panel shows `music`, when there is no notice to show.
+    music_shown: bool = false,
     /// The frame as `panelFrame` hands it over: 128x296 portrait, 4736 bytes.
     panel_buffer: *Frame,
     /// The frame as `packedFrame` hands it over. Both are kept around so
@@ -62,6 +67,8 @@ pub const Renderer = struct {
         errdefer bitmap.deinit();
         var notice = try Bitmap.init(allocator, layout.display_width, layout.display_height);
         errdefer notice.deinit();
+        var music = try Bitmap.init(allocator, layout.display_width, layout.display_height);
+        errdefer music.deinit();
 
         const panel_buffer = try allocator.create(Frame);
         errdefer allocator.destroy(panel_buffer);
@@ -72,6 +79,7 @@ pub const Renderer = struct {
         return .{
             .bitmap = bitmap,
             .notice = notice,
+            .music = music,
             .panel_buffer = panel_buffer,
             .bmp_buffer = bmp_buffer,
             .thresholds = options.thresholds,
@@ -82,6 +90,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Self) void {
         self.bitmap.deinit();
         self.notice.deinit();
+        self.music.deinit();
         self.allocator.free(self.bmp_buffer);
         self.allocator.destroy(self.panel_buffer);
     }
@@ -176,6 +185,7 @@ pub const Renderer = struct {
         const b = &self.bitmap;
 
         self.notice_shown = false;
+        self.music_shown = false;
         self.warn_fault = false;
 
         b.clear(background);
@@ -250,10 +260,7 @@ pub const Renderer = struct {
         self.notice_shown = false;
     }
 
-    const NoticeLayout = struct {
-        font: FontType,
-        count: usize,
-    };
+    const NoticeLayout = Fitted;
 
     /// Wrap `text` into `lines` in the largest notice font that holds all of
     /// it. Failing that, the smallest font's lines as far as they go, the last
@@ -264,25 +271,43 @@ pub const Renderer = struct {
         lines: *[layout.notice.max_lines][]const u8,
         last_buf: []u8,
     ) NoticeLayout {
-        const b = &self.notice;
         const body = layout.notice.body;
-        const fonts = layout.notice.fonts;
+        return fitText(&self.notice, text, &layout.notice.fonts, body.width, body.height, lines, last_buf);
+    }
 
+    const Fitted = struct {
+        font: FontType,
+        count: usize,
+    };
+
+    /// Wrap `text` into `lines`, `width` wide, in the first of `fonts` that
+    /// holds all of it in `height`. Failing that, the last font's lines as far
+    /// as they go, the last of them rebuilt in `last_buf` to end in an
+    /// ellipsis. `last_buf` is three bytes longer than `text` can be.
+    fn fitText(
+        b: *Bitmap,
+        text: []const u8,
+        fonts: []const FontType,
+        width: u32,
+        height: u32,
+        lines: [][]const u8,
+        last_buf: []u8,
+    ) Fitted {
         var max: usize = 0;
         for (fonts) |font| {
-            max = @min(lines.len, body.height / b.getLineHeight(font));
-            const needed = b.wrapText(text, font, body.width, lines[0..max]);
+            max = @min(lines.len, height / b.getLineHeight(font));
+            const needed = b.wrapText(text, font, width, lines[0..max]);
             if (needed <= max) return .{ .font = font, .count = needed };
         }
 
-        // The loop left the smallest font's lines in place.
+        // The loop left the last font's lines in place.
         const font = fonts[fonts.len - 1];
         const ellipsis = "...";
 
         var last = lines[max - 1];
         while (true) {
             last = std.mem.trimEnd(u8, last, " ");
-            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= body.width) break;
+            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
             // A whole codepoint at a time: the degree sign survives folding
             // and is two bytes, and half of it would eat the ellipsis.
             var cut = last.len - 1;
@@ -297,12 +322,107 @@ pub const Renderer = struct {
     }
 
     // ------------------------------------------------------------------------
+    // The music screen
+    // ------------------------------------------------------------------------
+
+    /// Put the music screen up in place of the dashboard, from the next update
+    /// until `clearMusic`, drawn as `view` says. A notice still goes over it,
+    /// and a hardware fault takes it down: the fault is shown on the
+    /// dashboard's status bar, which this screen does not have.
+    pub fn showMusic(self: *Self, view: now_playing.View) void {
+        self.music.clear(.white);
+        switch (view) {
+            .pairing => |p| self.drawPairing(p.code),
+            .track => |t| self.drawTrack(t),
+        }
+        self.music_shown = true;
+    }
+
+    /// Go back to the dashboard.
+    pub fn clearMusic(self: *Self) void {
+        self.music_shown = false;
+    }
+
+    fn drawTrack(self: *Self, t: now_playing.TrackView) void {
+        const b = &self.music;
+        const m = layout.music;
+
+        if (t.cover) |cover| {
+            b.drawDithered(m.cover.x, m.cover.y, m.cover.width, m.cover.height, cover);
+        } else {
+            b.drawRect(m.cover.x, m.cover.y, m.cover.width, m.cover.height, .black);
+        }
+
+        // Both cut to fit, as the fonts draw them: ASCII.
+        var folded_buf: [now_playing.max_text]u8 = undefined;
+        var last_buf: [now_playing.max_text + 3]u8 = undefined;
+
+        var artist_line: [1][]const u8 = undefined;
+        const artist = notice_text.foldToAscii(&folded_buf, t.artist);
+        const artist_height = b.getLineHeight(m.artist_font);
+        const fitted_artist = fitText(b, artist, &.{m.artist_font}, m.width, artist_height, &artist_line, &last_buf);
+        if (fitted_artist.count > 0) b.drawTextFont(m.artist_at.x, m.artist_at.y, artist_line[0], m.artist_font, .black);
+
+        var title_lines: [m.max_title_lines][]const u8 = undefined;
+        const folded_title = notice_text.foldToAscii(&folded_buf, t.title);
+        // Nothing known of what plays: a dash, as an empty slot has.
+        const title = if (folded_title.len > 0) folded_title else "-";
+        const fitted = fitText(b, title, &m.title_fonts, m.title.width, m.title.height, &title_lines, &last_buf);
+        var baseline = m.title.y + Bitmap.fontAscent(fitted.font);
+        for (title_lines[0..fitted.count]) |line| {
+            b.drawTextFont(m.title.x, baseline, line, fitted.font, .black);
+            baseline += @intCast(b.getLineHeight(fitted.font));
+        }
+
+        const bar = m.bar;
+        b.drawRect(bar.x, bar.y, bar.width, bar.height, .black);
+        const inner = bar.width - 4;
+        const filled: u32 = if (t.duration_s == 0) 0 else @intCast(@min(
+            inner,
+            @as(u64, inner) * t.elapsed_s / t.duration_s,
+        ));
+        b.fillRect(bar.x + 2, bar.y + 2, filled, bar.height - 4, .black);
+
+        var time_buf: [16]u8 = undefined;
+        b.drawTextFont(m.left, m.time_baseline, now_playing.formatTime(&time_buf, t.elapsed_s), m.time_font, .black);
+        const total = now_playing.formatTime(&time_buf, t.duration_s);
+        const total_x = m.right - @as(i32, @intCast(b.measureText(total, m.time_font)));
+        b.drawTextFont(total_x, m.time_baseline, total, m.time_font, .black);
+
+        if (!t.playing) {
+            const mark = m.pause_mark;
+            const stroke = mark.width / 3;
+            b.fillRect(mark.x, mark.y, stroke, mark.height, .black);
+            b.fillRect(mark.x + @as(i32, @intCast(mark.width - stroke)), mark.y, stroke, mark.height, .black);
+        }
+    }
+
+    fn drawPairing(self: *Self, code: []const u8) void {
+        const b = &self.music;
+        const page = layout.pairing;
+
+        b.drawTextFont(page.label_at.x, page.label_at.y, page.label, .ubuntu14, .black);
+        const label_width: i32 = @intCast(b.measureText(page.label, .ubuntu14));
+        const rule_x = page.label_at.x + label_width + layout.notice.rule_gap;
+        b.drawLine(rule_x, layout.notice.rule_y, layout.display_width - 1, layout.notice.rule_y, .black);
+
+        b.drawTextFont(page.prompt_at.x, page.prompt_at.y, page.prompt, page.prompt_font, .black);
+        var folded_buf: [now_playing.max_text]u8 = undefined;
+        b.drawTextFont(page.code_at.x, page.code_at.y, notice_text.foldToAscii(&folded_buf, code), page.code_font, .black);
+        b.drawTextFont(page.hint_at.x, page.hint_at.y, page.hint, .ubuntu14, .black);
+    }
+
+    // ------------------------------------------------------------------------
     // Handing the frame over
     // ------------------------------------------------------------------------
 
-    /// What the panel shows: the notice while there is one, else the dashboard.
+    /// What the panel shows: the notice while there is one, else the music
+    /// screen while it is up and there is no fault to show, else the
+    /// dashboard.
     fn frameBitmap(self: *Self) *Bitmap {
-        return if (self.notice_shown) &self.notice else &self.bitmap;
+        if (self.notice_shown) return &self.notice;
+        if (self.music_shown and !self.warn_fault) return &self.music;
+        return &self.bitmap;
     }
 
     /// On whatever is shown: a notice can stay up for a day, and a hardware
@@ -1258,4 +1378,128 @@ test "no warning means no overlay at all" {
     r.toggleFaultOverlay();
 
     try testing.expectEqualSlices(u8, clean, r.bmp_buffer);
+}
+
+fn trackView(title: []const u8, elapsed_s: u32, duration_s: u32, playing: bool) now_playing.View {
+    return .{ .track = .{
+        .title = title,
+        .artist = "Vladimír Mišík",
+        .elapsed_s = elapsed_s,
+        .duration_s = duration_s,
+        .playing = playing,
+        .cover = null,
+    } };
+}
+
+test "the music screen replaces the dashboard and clearing it brings the dashboard back intact" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    const dashboard = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(dashboard);
+
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expect(!std.mem.eql(u8, dashboard, r.packedFrame()));
+
+    r.clearMusic();
+    try testing.expectEqualSlices(u8, dashboard, r.packedFrame());
+}
+
+test "a notice goes over the music screen, which is back once it is cleared" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    const music = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(music);
+
+    r.showNotice("Backup finished");
+    try testing.expect(!std.mem.eql(u8, music, r.packedFrame()));
+    r.clearNotice();
+    try testing.expectEqualSlices(u8, music, r.packedFrame());
+}
+
+test "a hardware fault takes the music screen down for the dashboard that shows it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    r.setFaultWarning(true);
+    const faulted_dashboard = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(faulted_dashboard);
+
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expectEqualSlices(u8, faulted_dashboard, r.packedFrame());
+}
+
+/// Black pixels on the progress bar's middle row, inside its outline.
+fn barFill(r: *Renderer) u32 {
+    const bar = layout.music.bar;
+    const y: usize = @intCast(bar.y + @as(i32, @intCast(bar.height / 2)));
+    var filled: u32 = 0;
+    for (0..bar.width - 4) |i| {
+        const x: usize = @intCast(bar.x + 2 + @as(i32, @intCast(i)));
+        filled += @intFromBool(r.music.data[y * r.music.stride + x] == 0);
+    }
+    return filled;
+}
+
+test "the progress bar fills as the track plays" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const inner = layout.music.bar.width - 4;
+
+    r.showMusic(trackView("Jednou", 0, 200, true));
+    try testing.expectEqual(@as(u32, 0), barFill(&r));
+    r.showMusic(trackView("Jednou", 100, 200, true));
+    try testing.expectEqual(inner / 2, barFill(&r));
+    r.showMusic(trackView("Jednou", 200, 200, true));
+    try testing.expectEqual(inner, barFill(&r));
+    // A length nobody knows is no progress, not a division by zero.
+    r.showMusic(trackView("Jednou", 10, 0, true));
+    try testing.expectEqual(@as(u32, 0), barFill(&r));
+}
+
+test "a pause is marked, and only while paused" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const mark = layout.music.pause_mark;
+
+    r.showMusic(trackView("Jednou", 60, 232, false));
+    const at = @as(usize, @intCast(mark.y)) * r.music.stride + @as(usize, @intCast(mark.x));
+    try testing.expectEqual(@as(u8, 0), r.music.data[at]);
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expectEqual(@as(u8, 255), r.music.data[at]);
+}
+
+test "a title too long for its box ends in an ellipsis inside it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const m = layout.music;
+
+    const long: *const [40 * 6]u8 = comptime long: {
+        const words: [40][6]u8 = @splat("words ".*);
+        break :long @ptrCast(&words);
+    };
+    var lines: [m.max_title_lines][]const u8 = undefined;
+    var last_buf: [now_playing.max_text + 3]u8 = undefined;
+    const fitted = Renderer.fitText(&r.music, long, &m.title_fonts, m.title.width, m.title.height, &lines, &last_buf);
+
+    try testing.expectEqual(FontType.ubuntu14, fitted.font);
+    try testing.expect(std.mem.endsWith(u8, lines[fitted.count - 1], "..."));
+    for (lines[0..fitted.count]) |line| try testing.expect(r.music.measureText(line, fitted.font) <= m.title.width);
+    try testing.expect(fitted.count * r.music.getLineHeight(fitted.font) <= m.title.height);
+}
+
+test "the pairing screen shows the code" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.showMusic(.{ .pairing = .{ .code = "ABC123" } });
+    const with_code = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(with_code);
+    r.showMusic(.{ .pairing = .{ .code = "XYZ789" } });
+    try testing.expect(!std.mem.eql(u8, with_code, r.packedFrame()));
 }

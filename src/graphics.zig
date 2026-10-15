@@ -169,6 +169,46 @@ pub const Bitmap = struct {
         }
     }
 
+    /// Widest picture `drawDithered` takes: wider than the panel, and what
+    /// sizes the rows of error it carries on the stack.
+    pub const max_dither_width = 512;
+
+    /// Draw the greyscale picture `gray`, `w` by `h` row by row, in black and
+    /// white with its top left corner at `x`, `y`, as far as it falls inside.
+    ///
+    /// Atkinson's dithering: each pixel's error goes in eighths to six
+    /// neighbours ahead of it, and the last quarter is dropped. Dropping it
+    /// keeps the lightest and darkest areas solid instead of speckled, which
+    /// on a panel this small matters more than holding every mid-tone.
+    pub fn drawDithered(self: *Bitmap, x: i32, y: i32, w: u32, h: u32, gray: []const u8) void {
+        std.debug.assert(w <= max_dither_width);
+        std.debug.assert(gray.len == @as(usize, w) * h);
+
+        // The error owed to this row and the next two, each shifted one
+        // place right so the neighbour behind the first pixel has a slot.
+        var rows: [3][max_dither_width + 3]i16 = @splat(@splat(0));
+        for (0..h) |py| {
+            const here = &rows[py % 3];
+            const below = &rows[(py + 1) % 3];
+            const further = &rows[(py + 2) % 3];
+            for (0..w) |px| {
+                const i = px + 1;
+                const value = @as(i16, gray[py * w + px]) + here[i];
+                const black = value < 128;
+                const share = @divTrunc(value - @as(i16, if (black) 0 else 255), 8);
+                here[i + 1] += share;
+                here[i + 2] += share;
+                below[i - 1] += share;
+                below[i] += share;
+                below[i + 1] += share;
+                further[i] += share;
+                self.setPixel(x + @as(i32, @intCast(px)), y + @as(i32, @intCast(py)), if (black) .black else .white);
+            }
+            // Two rows on, this one comes round again as the furthest ahead.
+            @memset(here, 0);
+        }
+    }
+
     /// How far the top of `font_type`'s text is above its baseline. Known at
     /// compile time, which is what lets the layout be derived from it.
     pub fn fontAscent(font_type: FontType) i32 {
@@ -311,6 +351,62 @@ pub const Bitmap = struct {
         }
     }
 };
+
+/// Scale the greyscale picture `src`, `src_w` by `src_h`, to fill `dst`,
+/// `dst_w` by `dst_h`: each pixel the average of the ones it covers, or the
+/// one it falls on where the picture is enlarged.
+pub fn scaleGray(src: []const u8, src_w: u32, src_h: u32, dst: []u8, dst_w: u32, dst_h: u32) void {
+    std.debug.assert(src.len == @as(usize, src_w) * src_h and src_w > 0 and src_h > 0);
+    std.debug.assert(dst.len == @as(usize, dst_w) * dst_h);
+
+    for (0..dst_h) |dy| {
+        const y0 = dy * src_h / dst_h;
+        const y1 = @max(y0 + 1, (dy + 1) * src_h / dst_h);
+        for (0..dst_w) |dx| {
+            const x0 = dx * src_w / dst_w;
+            const x1 = @max(x0 + 1, (dx + 1) * src_w / dst_w);
+            var sum: u32 = 0;
+            for (y0..y1) |sy| {
+                for (src[sy * src_w + x0 .. sy * src_w + x1]) |px| sum += px;
+            }
+            const count: u32 = @intCast((y1 - y0) * (x1 - x0));
+            dst[dy * dst_w + dx] = @intCast((sum + count / 2) / count);
+        }
+    }
+}
+
+/// Stretch the levels of `pixels` so the darkest hundredth of them comes out
+/// black and the lightest hundredth white.
+///
+/// A cover is made to be seen in colour, and many lose everything to grey
+/// once only their brightness is left; dithered, a picture with no black or
+/// white in it is noise. One with little difference in it at all, a plain
+/// cover, is left as it is rather than stretched into a pattern.
+pub fn stretchContrast(pixels: []u8) void {
+    if (pixels.len == 0) return;
+    var histogram: [256]u32 = @splat(0);
+    for (pixels) |px| histogram[px] += 1;
+
+    const cut = pixels.len / 100;
+    const low = levelAt(&histogram, cut);
+    const high = levelAt(&histogram, pixels.len - 1 - cut);
+    if (high - low < 16) return;
+
+    for (pixels) |*px| {
+        const clamped = std.math.clamp(px.*, low, high);
+        px.* = @intCast((@as(u32, clamped - low) * 255 + (high - low) / 2) / (high - low));
+    }
+}
+
+/// The level of the pixel at `rank` when they are put in order.
+fn levelAt(histogram: *const [256]u32, rank: usize) u8 {
+    var seen: usize = 0;
+    for (histogram, 0..) |n, level| {
+        seen += n;
+        if (seen > rank) return @intCast(level);
+    }
+    return 255;
+}
 
 /// Decodes UTF-8, substituting '?' for malformed sequences.
 ///
@@ -668,4 +764,67 @@ test "malformed UTF-8 does not hang the decoder" {
     bmp.drawTextFont(0, 20, "\xC3", .ubuntu14, .black);
     bmp.drawTextFont(0, 20, "\x80\x80", .ubuntu14, .black);
     _ = bmp.measureText("\xF0\x9F", .ubuntu14);
+}
+
+test "scaleGray averages what each pixel covers when shrinking" {
+    const src = [_]u8{
+        0,   100, 200, 200,
+        100, 0,   200, 200,
+    };
+    var dst: [2]u8 = undefined;
+    scaleGray(&src, 4, 2, &dst, 2, 1);
+    try testing.expectEqualSlices(u8, &.{ 50, 200 }, &dst);
+}
+
+test "scaleGray repeats pixels when enlarging" {
+    const src = [_]u8{ 10, 250 };
+    var dst: [4]u8 = undefined;
+    scaleGray(&src, 2, 1, &dst, 4, 1);
+    try testing.expectEqualSlices(u8, &.{ 10, 10, 250, 250 }, &dst);
+}
+
+test "stretchContrast spreads a washed-out picture over every level" {
+    var pixels: [200]u8 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = @intCast(100 + i % 50);
+    stretchContrast(&pixels);
+    try testing.expectEqual(@as(u8, 0), std.mem.min(u8, &pixels));
+    try testing.expectEqual(@as(u8, 255), std.mem.max(u8, &pixels));
+}
+
+test "stretchContrast leaves a nearly plain picture alone" {
+    var pixels: [100]u8 = undefined;
+    for (&pixels, 0..) |*px, i| px.* = @intCast(120 + i % 8);
+    const before = pixels;
+    stretchContrast(&pixels);
+    try testing.expectEqualSlices(u8, &before, &pixels);
+}
+
+test "drawDithered keeps white white and black black, and turns mid-grey about half black" {
+    var bmp = try testBitmap(48, 16);
+    defer bmp.deinit();
+
+    var gray: [48 * 16]u8 = undefined;
+    for (0..16) |y| for (0..48) |x| {
+        gray[y * 48 + x] = if (x < 16) 255 else if (x < 32) 0 else 128;
+    };
+    bmp.drawDithered(0, 0, 48, 16, &gray);
+
+    var black = [_]u32{ 0, 0, 0 };
+    for (0..16) |y| for (0..48) |x| {
+        if (bmp.data[y * bmp.stride + x] == 0) black[x / 16] += 1;
+        try testing.expect(bmp.data[y * bmp.stride + x] == 0 or bmp.data[y * bmp.stride + x] == 255);
+    };
+    try testing.expectEqual(@as(u32, 0), black[0]);
+    try testing.expectEqual(@as(u32, 256), black[1]);
+    // Atkinson drops a quarter of the error, so mid-grey comes out a little
+    // lighter than half; within a fifth of it either way.
+    try testing.expect(black[2] > 128 - 51 and black[2] < 128 + 51);
+}
+
+test "drawDithered clips at the edges rather than writing past them" {
+    var bmp = try testBitmap(8, 8);
+    defer bmp.deinit();
+    const gray: [16 * 16]u8 = @splat(0);
+    bmp.drawDithered(-4, 4, 16, 16, &gray);
+    try testing.expectEqual(@as(u32, 8 * 4), countBlack(&bmp));
 }

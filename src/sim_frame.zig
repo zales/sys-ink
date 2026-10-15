@@ -5,13 +5,15 @@
 //! several orders of magnitude to visit every unit, the signal reading crosses
 //! the width where it drops its `dBm` suffix, the fault overlay flares
 //! periodically so the inverted status bar can be checked too, a few readings
-//! go stale now and then so the faded rendering can, and notices of every
-//! length come and go so each font step of their layout shows up.
+//! go stale now and then so the faded rendering can, notices of every length
+//! come and go so each font step of their layout shows up, and so does the
+//! music screen: playing, paused, and asking for its code.
 
 const std = @import("std");
 const parse = @import("parse.zig");
 const layout = @import("display_config.zig");
 const Reading = @import("reading.zig").Reading;
+const now_playing = @import("now_playing.zig");
 pub const Renderer = @import("display_renderer.zig").Renderer;
 
 pub const width = layout.display_width;
@@ -58,6 +60,57 @@ pub fn noticeAt(t: f64) ?[]const u8 {
     return notice_samples[round % notice_samples.len];
 }
 
+/// Tracks from a title that fits one line of the largest font to one that
+/// fits none, with diacritics to fold. Made up.
+const music_samples = [_]struct { artist: []const u8, title: []const u8 }{
+    .{ .artist = "Kapela bez jména", .title = "Jednou" },
+    .{ .artist = "Žluťoučký kůň, Ďábelské ódy", .title = "Pět hospod, jedna ulice" },
+    .{
+        .artist = "Orchestr, který má tak dlouhé jméno, že se na řádek nevejde",
+        .title = "Píseň, jejíž název je schválně tak dlouhý, že se nevejde ani nejmenším písmem a musí skončit trojtečkou",
+    },
+};
+
+/// A cover to dither: a gradient across, and rings, which between them have
+/// every grey and edges in every direction.
+const synthetic_cover: [now_playing.cover_len]u8 = cover: {
+    @setEvalBranchQuota(200_000);
+    const side = now_playing.cover_side;
+    var pixels: [now_playing.cover_len]u8 = undefined;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const dx = @as(i32, @intCast(x)) - side / 2;
+            const dy = @as(i32, @intCast(y)) - side / 2;
+            const ring = ((dx * dx + dy * dy) / 120) % 2 == 0;
+            const ramp = (x + y) * 255 / (2 * side - 2);
+            pixels[y * side + x] = if (ring) @intCast(ramp) else @intCast(255 - ramp);
+        }
+    }
+    break :cover pixels;
+};
+
+/// The music screen for 12 s out of every 60, clear of the notices, the stale
+/// readings and the fault: playing for nine, then paused. Every third time
+/// round, the code to link with instead. Null for the rest.
+pub fn musicAt(t: f64) ?now_playing.View {
+    const phase = @mod(t, 60.0);
+    if (phase < 26.0 or phase >= 38.0) return null;
+    const round: usize = @intFromFloat(@floor(t / 60.0));
+    if (round % 3 == 2) return .{ .pairing = .{ .code = "AB12CD" } };
+
+    // Counted over the rounds that show a track, so every sample comes round.
+    const sample = music_samples[(round - round / 3) % music_samples.len];
+    const elapsed: u32 = @intFromFloat(@min(phase, 35.0) - 26.0 + 40.0);
+    return .{ .track = .{
+        .title = sample.title,
+        .artist = sample.artist,
+        .elapsed_s = elapsed,
+        .duration_s = 232,
+        .playing = phase < 35.0,
+        .cover = if (round % 2 == 0) &synthetic_cover else null,
+    } };
+}
+
 fn wave(t: f64, period: f64) f64 {
     return @abs(@sin(t * std.math.tau / period));
 }
@@ -96,6 +149,7 @@ pub fn draw(renderer: *Renderer, t: f64, uptime_s: u64) void {
     renderer.setFaultWarning(faultActive(t));
 
     if (noticeAt(t)) |text| renderer.showNotice(text) else renderer.clearNotice();
+    if (musicAt(t)) |view| renderer.showMusic(view) else renderer.clearMusic();
 }
 
 /// Expand the renderer's packed 1-bit frame into 8-bit greyscale, magnified by
@@ -193,6 +247,30 @@ test "every notice sample comes round, and the dashboard in between" {
     }
     try testing.expect(quiet);
     for (seen) |s| try testing.expect(s);
+}
+
+test "every music sample comes round, paused and playing, and the code to link with too" {
+    const testing = std.testing;
+    var titles: [music_samples.len]bool = @splat(false);
+    var paused = false;
+    var pairing = false;
+    for (0..60 * 3 * music_samples.len) |t| {
+        const view = musicAt(@floatFromInt(t)) orelse continue;
+        switch (view) {
+            .pairing => pairing = true,
+            .track => |track| {
+                if (!track.playing) paused = true;
+                for (music_samples, 0..) |sample, i| {
+                    if (sample.title.ptr == track.title.ptr) titles[i] = true;
+                }
+            },
+        }
+        // Never at the same time as a notice or a fault, so each is seen alone.
+        try testing.expect(noticeAt(@floatFromInt(t)) == null);
+        try testing.expect(!faultActive(@floatFromInt(t)));
+    }
+    try testing.expect(paused and pairing);
+    for (titles) |seen| try testing.expect(seen);
 }
 
 test "expand magnifies without smearing neighbouring pixels" {
