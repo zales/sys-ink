@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Progressive JPEGs are decoded, which is how many posters come; a picture
+  wider or taller than 1024 pixels is decoded at an eighth of its size, where
+  it used to be turned down.
+
 ## [1.13.0] — 2026-10-16
 
 ### Added

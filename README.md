@@ -200,8 +200,8 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   free of I/O (unit tested); `src/spotify_client.zig`: the connection itself,
   on a task of its own.
 - `src/websocket.zig`: the client's half of WebSocket, free of I/O (unit tested).
-- `src/jpeg.zig`: baseline JPEG decoded to its luminance, for covers (unit
-  tested against libjpeg).
+- `src/jpeg.zig`: baseline and progressive JPEG decoded to its luminance, for
+  covers (unit tested against libjpeg).
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging. The
   configuration is read from the environment once, into a value that `main`
@@ -834,11 +834,10 @@ the grey away. The preview and the BMP export show the four greys too: they
 are four-bit BMPs, with a palette of black, the two greys and white, about
 19 kB a frame.
 
-The cover is decoded on the device, and only
-covers in baseline JPEG, which is what Spotify serves, are drawn; a cover that
-cannot be fetched or decoded leaves an empty frame in its place. Titles and
-artists are drawn as notices are: Latin with its diacritics as written, other
-scripts as `?`.
+The cover is decoded on the device, and only JPEG is drawn, baseline or
+progressive; a cover that cannot be fetched or decoded leaves an empty frame
+in its place. Titles and artists are drawn as notices are: Latin with its
+diacritics as written, other scripts as `?`.
 
 The service unit of the `.deb` gives the state file its directory with
 `StateDirectory=sys-ink`, readable by root alone. Without it, the daemon makes
