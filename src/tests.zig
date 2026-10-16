@@ -56,6 +56,7 @@ test {
     _ = @import("websocket.zig");
     _ = @import("now_playing.zig");
     _ = @import("spotify.zig");
+    _ = @import("kodi.zig");
 
     if (builtin.target.os.tag == .linux) {
         _ = @import("notice_fifo.zig");

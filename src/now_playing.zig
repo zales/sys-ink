@@ -1,11 +1,13 @@
-//! What Spotify is playing, and when the panel shows it.
+//! What Spotify or Kodi is playing, and when the panel shows it.
 //!
-//! The Spotify client (`spotify_client.zig`) runs on a task of its own and
-//! hands the main loop a `Snapshot`: the newest of everything it knows. From
-//! that, `Screen` decides what the panel shows and when it is redrawn: the
-//! music screen while something plays, for a while after it pauses, the code
-//! to link the panel with while one is waiting to be entered, and the
-//! dashboard otherwise.
+//! Each client (`spotify_client.zig`, `kodi_client.zig`) runs on a task of
+//! its own and hands the main loop a `Snapshot`: the newest of everything it
+//! knows. From those, `Screen` decides what the panel shows and when it is
+//! redrawn: the music screen while something plays, for a while after it
+//! pauses, the code to link the panel with while one is waiting to be
+//! entered, and the dashboard otherwise. What plays on one source is shown
+//! over what is paused on the other, and of two playing at once, the one
+//! that started last.
 //!
 //! Free of I/O, and of the clock: every decision takes the time as an
 //! argument, in milliseconds of the monotonic clock, which the client stamps
@@ -15,9 +17,32 @@ const std = @import("std");
 const layout = @import("display_config.zig");
 
 /// The cover as the client hands it over: greyscale, scaled to the size it
-/// is drawn at.
+/// is drawn at. A poster takes the first `Shape.poster.len()` bytes.
 pub const cover_side = layout.music.cover.width;
 pub const cover_len = cover_side * cover_side;
+
+/// The shape of the picture beside the text, and where it goes.
+pub const Shape = enum {
+    /// An album's cover, or anything else with no shape of its own.
+    square,
+    /// A film's or a series' poster, two by three.
+    poster,
+
+    pub fn rect(self: Shape) layout.Rect {
+        return switch (self) {
+            .square => layout.music.cover,
+            .poster => layout.music.poster,
+        };
+    }
+
+    pub fn len(self: Shape) usize {
+        const r = self.rect();
+        return @as(usize, r.width) * r.height;
+    }
+};
+
+/// Where a snapshot comes from.
+pub const Source = enum { spotify, kodi };
 
 /// Bytes of a title, an artist or an album kept. More than the panel can
 /// show in any font; what is cut is cut at a whole character.
@@ -55,8 +80,8 @@ pub const Text = struct {
 
 /// What a track or an episode is called, by whom, and on what.
 pub const Track = struct {
-    /// `spotify:track:...` or `spotify:episode:...`; what the playback it
-    /// describes is matched by.
+    /// `spotify:track:...`, `spotify:episode:...`, or what Kodi's client
+    /// makes of what it plays; what the playback it describes is matched by.
     uri: Text = .{},
     title: Text = .{},
     /// The artists, or the show an episode is from.
@@ -76,6 +101,9 @@ pub const Playback = struct {
     duration_ms: i64 = 0,
     /// How fast the position moves: 1 normally, 0 while a track loads.
     speed: f64 = 1,
+    /// A live stream, which has no length: the position is how long it has
+    /// been watched, and `duration_ms` is 0.
+    live: bool = false,
 
     /// The position at `now_ms`, carried forward from the last report while
     /// playing, and never past either end of the track.
@@ -83,8 +111,9 @@ pub const Playback = struct {
         var position = self.position_ms;
         if (self.playing and now_ms > self.at_ms) {
             const elapsed: f64 = @floatFromInt(now_ms - self.at_ms);
-            position += @intFromFloat(elapsed * std.math.clamp(self.speed, 0, 4));
+            position += @intFromFloat(@min(elapsed * std.math.clamp(self.speed, 0, 4), 1e12));
         }
+        if (self.live) return @max(position, 0);
         return std.math.clamp(position, 0, @max(self.duration_ms, 0));
     }
 };
@@ -104,9 +133,13 @@ pub const Snapshot = struct {
     playback: ?Playback = null,
     /// What `playback` is playing, once the client has looked it up.
     track: ?Track = null,
-    /// The cover of `track`, while `cover_valid`.
+    /// The cover of `track`, while `cover_valid`, in the shape of
+    /// `cover_shape`.
     cover: [cover_len]u8 = @splat(0xFF),
     cover_valid: bool = false,
+    /// The picture's shape, and so where the text goes, whether or not there
+    /// is a picture.
+    cover_shape: Shape = .square,
     /// Counts the covers handed over, so a new one can be told from the old.
     cover_serial: u32 = 0,
 };
@@ -122,9 +155,13 @@ pub const TrackView = struct {
     title: []const u8,
     artist: []const u8,
     elapsed_s: u32,
+    /// 0 when not known, and for a live stream.
     duration_s: u32,
     playing: bool,
+    /// The first `shape.len()` bytes are the picture.
     cover: ?*const [cover_len]u8,
+    shape: Shape = .square,
+    live: bool = false,
 };
 
 pub const Options = struct {
@@ -156,43 +193,64 @@ pub const Step = union(enum) {
 
 pub const Screen = struct {
     options: Options = .{},
-    latest: Snapshot = .{},
-    /// Monotonic milliseconds at which playback was first seen paused, while
-    /// it is.
-    paused_since: ?i64 = null,
-    /// Whether the music screen is up, as the last step left it.
-    shown: ?Kind = null,
-    shown_cover: u32 = 0,
+    /// What each source last handed over, and what is known of it beyond.
+    sources: std.EnumArray(Source, Held) = .initFill(.{}),
+    /// What the last step put up, while the music screen is up.
+    shown: ?Shown = null,
     /// Something has arrived since the last redraw.
     dirty: bool = false,
     last_drawn: i64 = 0,
 
     const Kind = enum { pairing, track };
 
-    /// Take in what the client has just handed over, at `now_ms`.
-    pub fn update(self: *Screen, snapshot: *const Snapshot, now_ms: i64) void {
-        const previous = self.latest.playback;
+    const Held = struct {
+        latest: Snapshot = .{},
+        /// Monotonic milliseconds at which playback was first seen paused,
+        /// while it is.
+        paused_since: ?i64 = null,
+        /// Monotonic milliseconds at which what plays started, or started
+        /// again after a pause.
+        started: i64 = 0,
+    };
+
+    const Shown = struct {
+        kind: Kind,
+        source: Source,
+        cover_serial: u32,
+    };
+
+    const Wanted = struct {
+        kind: Kind,
+        source: Source,
+    };
+
+    /// Take in what `source`'s client has just handed over, at `now_ms`.
+    pub fn update(self: *Screen, source: Source, snapshot: *const Snapshot, now_ms: i64) void {
+        const held = self.sources.getPtr(source);
+        const previous = held.latest.playback;
         const was_playing = if (previous) |p| p.playing else false;
-        self.latest = snapshot.*;
+        held.latest = snapshot.*;
         self.dirty = true;
 
         const p = snapshot.playback orelse {
             // A device that pauses and then leaves the account's playback, as a
             // phone that locks does, leaves nothing playing: the pause still
             // runs its time, as it would have had the device stayed.
-            if (self.paused_since != null) {
-                self.latest.playback = previous;
+            if (held.paused_since != null) {
+                held.latest.playback = previous;
                 return;
             }
-            self.paused_since = null;
+            held.paused_since = null;
             return;
         };
         if (p.playing) {
-            self.paused_since = null;
-        } else if (was_playing or self.paused_since == null) {
+            held.paused_since = null;
+            const same = if (previous) |before| before.uri.eql(&p.uri) else false;
+            if (!was_playing or !same) held.started = now_ms;
+        } else if (was_playing or held.paused_since == null) {
             // From when the pause was first seen. A client may report the same
             // pause again, and its time must not start over each time.
-            self.paused_since = now_ms;
+            held.paused_since = now_ms;
         }
     }
 
@@ -200,24 +258,26 @@ pub const Screen = struct {
     /// music screen off whatever is playing: the dashboard has a fault to
     /// show.
     pub fn step(self: *Screen, now_ms: i64, blocked: bool) ?Step {
-        const want: ?Kind = if (blocked) null else self.wanted(now_ms);
-        const kind = want orelse {
+        const want = (if (blocked) null else self.wanted(now_ms)) orelse {
             if (self.shown == null) return null;
             self.shown = null;
             self.dirty = false;
             return .hide;
         };
 
-        const full = self.shown != kind or
-            (kind == .track and self.latest.cover_serial != self.shown_cover);
-        const due = full or self.redrawDue(now_ms);
+        const cover_serial = self.sources.get(want.source).latest.cover_serial;
+        const full = if (self.shown) |shown|
+            shown.kind != want.kind or shown.source != want.source or
+                (want.kind == .track and shown.cover_serial != cover_serial)
+        else
+            true;
+        const due = full or self.redrawDue(want.source, now_ms);
         if (!due) return null;
 
-        self.shown = kind;
-        self.shown_cover = self.latest.cover_serial;
+        self.shown = .{ .kind = want.kind, .source = want.source, .cover_serial = cover_serial };
         self.dirty = false;
         self.last_drawn = now_ms;
-        return .{ .show = .{ .view = self.view(kind, now_ms), .full = full } };
+        return .{ .show = .{ .view = self.view(want, now_ms), .full = full } };
     }
 
     /// Milliseconds until `step` has something to do without anything new
@@ -229,14 +289,17 @@ pub const Screen = struct {
 
         // Only what lies ahead: a deadline already passed has been acted on,
         // and counting it would have the loop spin on it.
-        if (self.latest.pairing) |pairing| {
-            if (pairing.expires_ms > now_ms) left = minOpt(left, pairing.expires_ms - now_ms);
-        }
-        if (self.latest.playback) |p| {
-            if (p.playing and self.shown == .track) {
+        for (std.enums.values(Source)) |source| {
+            const held = self.sources.get(source);
+            if (held.latest.pairing) |pairing| {
+                if (pairing.expires_ms > now_ms) left = minOpt(left, pairing.expires_ms - now_ms);
+            }
+            const p = held.latest.playback orelse continue;
+            const shown_here = if (self.shown) |shown| shown.kind == .track and shown.source == source else false;
+            if (p.playing and shown_here) {
                 left = minOpt(left, @max(0, self.last_drawn + self.tickMs() - now_ms));
             }
-            if (self.paused_since) |since| {
+            if (held.paused_since) |since| {
                 const until = since + self.holdMs();
                 if (until > now_ms) left = minOpt(left, until - now_ms);
             }
@@ -244,37 +307,64 @@ pub const Screen = struct {
         return left;
     }
 
-    fn wanted(self: *const Screen, now_ms: i64) ?Kind {
-        if (self.latest.pairing) |pairing| {
-            if (now_ms < pairing.expires_ms) return .pairing;
+    /// What should be up at `now_ms`: a code to enter, ahead of everything;
+    /// else what plays, or failing that what paused within the hold; of two,
+    /// the one that started last.
+    fn wanted(self: *const Screen, now_ms: i64) ?Wanted {
+        for (std.enums.values(Source)) |source| {
+            const pairing = self.sources.get(source).latest.pairing orelse continue;
+            if (now_ms < pairing.expires_ms) return .{ .kind = .pairing, .source = source };
         }
-        const p = self.latest.playback orelse return null;
-        if (p.playing) return .track;
-        const since = self.paused_since orelse return null;
-        return if (now_ms < since + self.holdMs()) .track else null;
+
+        var best: ?Source = null;
+        var best_playing = false;
+        var best_started: i64 = 0;
+        for (std.enums.values(Source)) |source| {
+            const held = self.sources.get(source);
+            const p = held.latest.playback orelse continue;
+            if (!p.playing) {
+                const since = held.paused_since orelse continue;
+                if (now_ms >= since + self.holdMs()) continue;
+            }
+            const better = if (best == null)
+                true
+            else if (p.playing != best_playing)
+                p.playing
+            else
+                held.started > best_started;
+            if (better) {
+                best = source;
+                best_playing = p.playing;
+                best_started = held.started;
+            }
+        }
+        return .{ .kind = .track, .source = best orelse return null };
     }
 
-    fn redrawDue(self: *const Screen, now_ms: i64) bool {
+    fn redrawDue(self: *const Screen, source: Source, now_ms: i64) bool {
         if (now_ms - self.last_drawn < min_redraw_ms) return false;
         if (self.dirty) return true;
-        const p = self.latest.playback orelse return false;
+        const p = self.sources.get(source).latest.playback orelse return false;
         return p.playing and now_ms - self.last_drawn >= self.tickMs();
     }
 
-    fn view(self: *const Screen, kind: Kind, now_ms: i64) View {
-        if (kind == .pairing) return .{ .pairing = .{ .code = self.latest.pairing.?.code.slice() } };
+    fn view(self: *const Screen, want: Wanted, now_ms: i64) View {
+        const latest = &self.sources.getPtrConst(want.source).latest;
+        if (want.kind == .pairing) return .{ .pairing = .{ .code = latest.pairing.?.code.slice() } };
 
-        const p = &self.latest.playback.?;
+        const p = &latest.playback.?;
         // Only the description of what is playing: one of the track before
         // would put the wrong name over the right progress.
-        const track: ?*const Track = if (self.latest.track) |*t| (if (t.uri.eql(&p.uri)) t else null) else null;
+        const track: ?*const Track = if (latest.track) |*t| (if (t.uri.eql(&p.uri)) t else null) else null;
         return .{ .track = .{
             .title = if (track) |t| t.title.slice() else "",
             .artist = if (track) |t| t.artist.slice() else "",
             .elapsed_s = seconds(p.positionAt(now_ms)),
-            .duration_s = seconds(p.duration_ms),
+            .duration_s = if (p.live) 0 else seconds(p.duration_ms),
             .playing = p.playing,
-            .cover = if (track != null and self.latest.cover_valid) &self.latest.cover else null,
+            .cover = if (track != null and latest.cover_valid) &latest.cover else null,
+            .shape = latest.cover_shape,
+            .live = p.live,
         } };
     }
 
@@ -357,7 +447,7 @@ test "the music screen comes up in full when something starts playing, and redra
     var screen: Screen = .{};
     try testing.expectEqual(@as(?Step, null), screen.step(0, false));
 
-    screen.update(&playing("spotify:track:a", 0, 1_000), 1_000);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 1_000), 1_000);
     const first = screen.step(1_000, false).?.show;
     try testing.expect(first.full);
     try testing.expectEqualStrings("Jednou", first.view.track.title);
@@ -374,27 +464,27 @@ test "the music screen comes up in full when something starts playing, and redra
 
 test "a new cover is put up in full, a new position over the old one partially" {
     var screen: Screen = .{};
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
 
     // Seeked: same track, same cover.
-    screen.update(&playing("spotify:track:a", 90_000, 2_000), 2_000);
+    screen.update(.spotify, &playing("spotify:track:a", 90_000, 2_000), 2_000);
     const seek = screen.step(2_000, false).?.show;
     try testing.expect(!seek.full);
     try testing.expectEqual(@as(u32, 90), seek.view.track.elapsed_s);
 
     var next = playing("spotify:track:b", 0, 4_000);
     next.cover_serial = 2;
-    screen.update(&next, 4_000);
+    screen.update(.spotify, &next, 4_000);
     try testing.expect(screen.step(4_000, false).?.show.full);
 }
 
 test "updates that come in a burst are drawn once, a second after the last redraw" {
     var screen: Screen = .{};
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
 
-    screen.update(&playing("spotify:track:a", 300, 300), 300);
+    screen.update(.spotify, &playing("spotify:track:a", 300, 300), 300);
     try testing.expectEqual(@as(?Step, null), screen.step(300, false));
     try testing.expectEqual(@as(?i64, 700), screen.msLeft(300));
     try testing.expect(screen.step(1_000, false) != null);
@@ -402,10 +492,10 @@ test "updates that come in a burst are drawn once, a second after the last redra
 
 test "a pause holds the screen for its time, without ticks, then gives way to the dashboard" {
     var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
 
-    screen.update(&paused("spotify:track:a", 10_000, 10_000), 10_000);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 10_000), 10_000);
     const pause = screen.step(10_000, false).?.show;
     try testing.expect(!pause.view.track.playing);
     try testing.expectEqual(@as(u32, 10), pause.view.track.elapsed_s);
@@ -420,11 +510,11 @@ test "a pause holds the screen for its time, without ticks, then gives way to th
 
 test "the same pause reported again does not start its time over" {
     var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
-    screen.update(&paused("spotify:track:a", 10_000, 10_000), 10_000);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 10_000), 10_000);
     _ = screen.step(10_000, false);
-    screen.update(&paused("spotify:track:a", 10_000, 25_000), 25_000);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 25_000), 25_000);
     _ = screen.step(25_000, false);
 
     try testing.expectEqual(Step.hide, screen.step(40_000, false).?);
@@ -432,24 +522,24 @@ test "the same pause reported again does not start its time over" {
 
 test "music that was paused before the daemon heard of it is not put up" {
     var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
-    screen.update(&paused("spotify:track:a", 10_000, 0), 0);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 0), 0);
     _ = screen.step(0, false);
     // Shown for the hold, as a pause just seen is.
     try testing.expectEqual(Step.hide, screen.step(30_000, false).?);
 
     // Reported again later, paused all along: nothing.
-    screen.update(&paused("spotify:track:a", 10_000, 60_000), 60_000);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 60_000), 60_000);
     try testing.expectEqual(@as(?Step, null), screen.step(60_000, false));
 }
 
 test "a paused device that leaves the account's playback still holds the screen for the pause" {
     var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
-    screen.update(&paused("spotify:track:a", 10_000, 10_000), 10_000);
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 10_000), 10_000);
     _ = screen.step(10_000, false);
 
-    screen.update(&.{}, 12_000);
+    screen.update(.spotify, &.{}, 12_000);
     const still = screen.step(13_000, false).?.show;
     try testing.expect(!still.view.track.playing);
     try testing.expectEqual(Step.hide, screen.step(40_000, false).?);
@@ -457,16 +547,16 @@ test "a paused device that leaves the account's playback still holds the screen 
 
 test "nothing playing anywhere takes the screen down at once" {
     var screen: Screen = .{};
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
 
-    screen.update(&.{}, 5_000);
+    screen.update(.spotify, &.{}, 5_000);
     try testing.expectEqual(Step.hide, screen.step(5_000, false).?);
 }
 
 test "a fault on the dashboard keeps the music screen down, and it comes back once cleared" {
     var screen: Screen = .{};
-    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
     _ = screen.step(0, false);
 
     try testing.expectEqual(Step.hide, screen.step(2_000, true).?);
@@ -478,7 +568,7 @@ test "a description of another track is not put over this one's progress" {
     var screen: Screen = .{};
     var snapshot = playing("spotify:track:b", 0, 0);
     snapshot.track.?.uri = .init("spotify:track:a");
-    screen.update(&snapshot, 0);
+    screen.update(.spotify, &snapshot, 0);
     const view = screen.step(0, false).?.show.view.track;
     try testing.expectEqualStrings("", view.title);
     try testing.expect(view.cover == null);
@@ -488,7 +578,7 @@ test "a code to enter is shown until it expires, ahead of the music" {
     var screen: Screen = .{};
     var snapshot = playing("spotify:track:a", 0, 0);
     snapshot.pairing = .{ .code = .init("ABC123"), .expires_ms = 60_000 };
-    screen.update(&snapshot, 0);
+    screen.update(.spotify, &snapshot, 0);
 
     const shown = screen.step(0, false).?.show;
     try testing.expect(shown.full);
@@ -498,6 +588,77 @@ test "a code to enter is shown until it expires, ahead of the music" {
     const after = screen.step(60_000, false).?.show;
     try testing.expect(after.full);
     try testing.expectEqualStrings("Jednou", after.view.track.title);
+}
+
+test "a live stream's position runs on from when it was first seen, without end" {
+    const p: Playback = .{ .playing = true, .position_ms = 0, .at_ms = 1_000, .duration_ms = 0, .live = true };
+    try testing.expectEqual(@as(i64, 3_600_000), p.positionAt(3_601_000));
+}
+
+test "what plays on one source is shown over what is paused on the other" {
+    var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
+    screen.update(.spotify, &playing("spotify:track:a", 0, 0), 0);
+    _ = screen.step(0, false);
+
+    // Spotify pauses, and a moment later Kodi plays: Kodi, in full.
+    screen.update(.spotify, &paused("spotify:track:a", 5_000, 5_000), 5_000);
+    var film = playing("kodi:film", 0, 6_000);
+    film.track.?.title = .init("Film");
+    film.cover_serial = 1;
+    screen.update(.kodi, &film, 6_000);
+    const kodi = screen.step(6_000, false).?.show;
+    try testing.expect(kodi.full);
+    try testing.expectEqualStrings("Film", kodi.view.track.title);
+
+    // Kodi pauses while Spotify plays again: Spotify, in full.
+    screen.update(.kodi, &paused("kodi:film", 9_000, 9_000), 9_000);
+    screen.update(.spotify, &playing("spotify:track:a", 5_000, 10_000), 10_000);
+    const back = screen.step(10_000, false).?.show;
+    try testing.expect(back.full);
+    try testing.expectEqualStrings("Jednou", back.view.track.title);
+}
+
+test "of two sources playing at once, the one that started last is shown" {
+    var screen: Screen = .{};
+    var film = playing("kodi:film", 0, 0);
+    film.track.?.title = .init("Film");
+    screen.update(.kodi, &film, 0);
+    screen.update(.spotify, &playing("spotify:track:a", 0, 2_000), 2_000);
+    try testing.expectEqualStrings("Jednou", screen.step(2_000, false).?.show.view.track.title);
+
+    // The same film reported on, still playing, is no new start.
+    screen.update(.kodi, &playing("kodi:film", 4_000, 4_000), 4_000);
+    try testing.expectEqualStrings("Jednou", screen.step(4_000, false).?.show.view.track.title);
+
+    // Something new on Kodi is.
+    var next = playing("kodi:next", 0, 6_000);
+    next.track.?.title = .init("Next");
+    screen.update(.kodi, &next, 6_000);
+    try testing.expectEqualStrings("Next", screen.step(6_000, false).?.show.view.track.title);
+}
+
+test "a source paused long ago is not brought back when the other stops" {
+    var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
+    screen.update(.spotify, &paused("spotify:track:a", 10_000, 0), 0);
+    screen.update(.kodi, &playing("kodi:film", 0, 60_000), 60_000);
+    _ = screen.step(60_000, false);
+
+    screen.update(.kodi, &.{}, 100_000);
+    try testing.expectEqual(Step.hide, screen.step(100_000, false).?);
+}
+
+test "a poster and a live stream reach the view as they are" {
+    var screen: Screen = .{};
+    var stream = playing("kodi:stream", 0, 0);
+    stream.cover_shape = .poster;
+    stream.playback.?.live = true;
+    stream.playback.?.duration_ms = 0;
+    screen.update(.kodi, &stream, 0);
+    const view = screen.step(5_000, false).?.show.view.track;
+    try testing.expectEqual(Shape.poster, view.shape);
+    try testing.expect(view.live);
+    try testing.expectEqual(@as(u32, 0), view.duration_s);
+    try testing.expectEqual(@as(u32, 5), view.elapsed_s);
 }
 
 test "text is cut at a whole character" {

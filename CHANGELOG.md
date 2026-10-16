@@ -30,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **What Kodi plays, on the panel.** With `KODI_ENABLED=true` and `KODI_HOST`
+  set, the music screen shows what plays on that Kodi as it shows what
+  Spotify plays: a song beside its cover, an episode by its series, season and
+  number beside the series' poster, a film by its year beside its poster. A
+  live stream has no bar, but the time it has been watched and `LIVE`. Kodi
+  says when playback changes, over its JSON-RPC port, which needs *Allow
+  remote control from applications on other systems* on in Kodi; nothing is
+  polled. Pictures are fetched over HTTPS from where Kodi says they are, so
+  those from add-ons and scrapers show, and those kept on the box do not.
+  With Spotify on too, what plays is shown over what is paused, and of two
+  playing, the one that started last. See the README's Kodi section; it and
+  the website have screenshots of an episode and of a live stream.
 - Progressive JPEGs are decoded, which is how many posters come; a picture
   wider or taller than 1024 pixels is decoded at an eighth of its size, where
   it used to be turned down.

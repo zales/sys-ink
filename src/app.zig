@@ -53,7 +53,7 @@ pub const Options = struct {
     /// Whether the APT check may refresh the package lists first, which takes
     /// root. Without it the count comes from the lists as they stand.
     may_update_package_lists: bool = false,
-    /// When the music screen shows, with Spotify on. Null: never.
+    /// When the music screen shows, with Spotify or Kodi on. Null: never.
     music: ?now_playing.Options = null,
 };
 
@@ -96,7 +96,7 @@ pub fn App(comptime Transport: type) type {
         /// When notices go up and when they come down.
         pacer: notice.Pacer = .{},
         /// When the music screen goes up, comes down and is redrawn. Null
-        /// with Spotify off.
+        /// with Spotify and Kodi off.
         music: ?now_playing.Screen = null,
         /// Which faults have been announced, so each is logged once. What the
         /// faults are is in the readings; see `showFaults`.
@@ -157,8 +157,8 @@ pub fn App(comptime Transport: type) type {
             return std.Io.Timestamp.now(self.io, .awake).toSeconds();
         }
 
-        /// The same clock in milliseconds, which the Spotify client stamps
-        /// what it receives with.
+        /// The same clock in milliseconds, which the clients of Spotify and
+        /// Kodi stamp what they receive with.
         fn nowMs(self: *Self) i64 {
             return std.Io.Timestamp.now(self.io, .awake).toMilliseconds();
         }
@@ -573,16 +573,16 @@ pub fn App(comptime Transport: type) type {
         // Music
         // ------------------------------------------------------------------------
 
-        /// Take in what the Spotify client has just handed over, and put it on
+        /// Take in what `source`'s client has just handed over, and put it on
         /// the panel if it calls for that.
-        pub fn applySpotify(self: *Self, snapshot: *const now_playing.Snapshot) void {
-            self.applySpotifyAt(snapshot, self.nowMs());
+        pub fn applyMusic(self: *Self, source: now_playing.Source, snapshot: *const now_playing.Snapshot) void {
+            self.applyMusicAt(source, snapshot, self.nowMs());
         }
 
-        /// `applySpotify` at an explicit time, in milliseconds.
-        pub fn applySpotifyAt(self: *Self, snapshot: *const now_playing.Snapshot, now_ms: i64) void {
+        /// `applyMusic` at an explicit time, in milliseconds.
+        pub fn applyMusicAt(self: *Self, source: now_playing.Source, snapshot: *const now_playing.Snapshot, now_ms: i64) void {
             const screen = if (self.music) |*m| m else return;
-            screen.update(snapshot, now_ms);
+            screen.update(source, snapshot, now_ms);
             _ = self.stepMusicAt(now_ms);
         }
 
@@ -1155,7 +1155,7 @@ test "music goes up with a full refresh, moves on its tick by partial ones, and 
     try bench.app.showInitialFrameAt(1000);
 
     bench.transport.resetLog();
-    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    bench.app.applyMusicAt(.spotify, &playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
     try testing.expect(bench.renderer.music_shown);
     try testing.expectEqual(Waveform.full, bench.refreshed().?);
     try testing.expectEqual(@as(?i64, 5), @divTrunc(bench.app.music.?.msLeft(1_000_000).?, 1000));
@@ -1166,7 +1166,7 @@ test "music goes up with a full refresh, moves on its tick by partial ones, and 
 
     var paused = playingSnapshot("spotify:track:a", 6_000, 1_006_000);
     paused.playback.?.playing = false;
-    bench.app.applySpotifyAt(&paused, 1_006_000);
+    bench.app.applyMusicAt(.spotify, &paused, 1_006_000);
 
     bench.transport.resetLog();
     try testing.expect(bench.app.stepMusicAt(1_036_000));
@@ -1186,7 +1186,7 @@ test "a cover goes up in grey, the bar moves on by partial updates, and the dash
     snapshot.cover = @splat(128);
 
     bench.transport.resetLog();
-    bench.app.applySpotifyAt(&snapshot, 1_000_000);
+    bench.app.applyMusicAt(.spotify, &snapshot, 1_000_000);
     try testing.expectEqual(Waveform.gray, bench.refreshed().?);
 
     bench.transport.resetLog();
@@ -1196,7 +1196,7 @@ test "a cover goes up in grey, the bar moves on by partial updates, and the dash
     // With no hold, a pause takes the screen down at once.
     snapshot.playback.?.playing = false;
     bench.transport.resetLog();
-    bench.app.applySpotifyAt(&snapshot, 1_006_000);
+    bench.app.applyMusicAt(.spotify, &snapshot, 1_006_000);
     try testing.expect(!bench.renderer.music_shown);
     try testing.expectEqual(Waveform.full, bench.refreshed().?);
 }
@@ -1207,7 +1207,7 @@ test "under a notice the music is drawn without touching the panel, and shows on
     defer bench.deinit();
     try bench.app.showInitialFrameAt(1000);
 
-    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    bench.app.applyMusicAt(.spotify, &playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
     bench.app.applyNoticeAt("Backup finished", 1010);
     try testing.expect(bench.renderer.notice_shown);
 
@@ -1215,7 +1215,7 @@ test "under a notice the music is drawn without touching the panel, and shows on
     var next = playingSnapshot("spotify:track:b", 0, 1_012_000);
     next.cover_serial = 1;
     bench.transport.resetLog();
-    bench.app.applySpotifyAt(&next, 1_012_000);
+    bench.app.applyMusicAt(.spotify, &next, 1_012_000);
     try testing.expect(!bench.panelTouched());
 
     // The notice's time is up: the music, in full, as it was drawn under it.
@@ -1241,7 +1241,7 @@ test "a hardware fault takes the music screen down, and it comes back once clear
     defer bench.deinit();
     try bench.app.showInitialFrameAt(1000);
 
-    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    bench.app.applyMusicAt(.spotify, &playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
     try testing.expect(bench.renderer.music_shown);
 
     bench.renderer.setFaultWarning(true);
@@ -1262,7 +1262,7 @@ test "with Spotify off, nothing it could send changes the panel" {
     try bench.app.showInitialFrameAt(1000);
 
     bench.transport.resetLog();
-    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    bench.app.applyMusicAt(.spotify, &playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
     try testing.expect(!bench.app.stepMusicAt(1_005_000));
     try testing.expect(!bench.panelTouched());
     try testing.expect(bench.app.musicSecondsLeft() == null);

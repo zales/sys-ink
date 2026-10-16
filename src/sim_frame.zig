@@ -7,7 +7,8 @@
 //! periodically so the inverted status bar can be checked too, a few readings
 //! go stale now and then so the faded rendering can, notices of every length
 //! come and go so each font step of their layout shows up, and so does the
-//! music screen: playing, paused, and asking for its code.
+//! music screen: playing, paused, and asking for its code; with a cover, a
+//! poster, or a live stream with no length.
 
 const std = @import("std");
 const parse = @import("parse.zig");
@@ -62,33 +63,45 @@ pub fn noticeAt(t: f64) ?[]const u8 {
 }
 
 /// Tracks from a title that fits one line of the largest font to one that
-/// fits none, with diacritics to draw. Made up.
-const music_samples = [_]struct { artist: []const u8, title: []const u8 }{
+/// fits none, with diacritics to draw, and what Kodi plays: an episode beside
+/// its poster, and a live stream. Made up.
+const music_samples = [_]struct {
+    artist: []const u8,
+    title: []const u8,
+    shape: now_playing.Shape = .square,
+    live: bool = false,
+}{
     .{ .artist = "Kapela bez jména", .title = "Jednou" },
     .{ .artist = "Žluťoučký kůň, Ďábelské ódy", .title = "Pět hospod, jedna ulice" },
     .{
         .artist = "Orchestr, který má tak dlouhé jméno, že se na řádek nevejde",
         .title = "Píseň, jejíž název je schválně tak dlouhý, že se nevejde ani nejmenším písmem a musí skončit trojtečkou",
     },
+    .{ .artist = "Detektiv z Vinohrad S01E06", .title = "Případ skleněné sklenice", .shape = .poster },
+    .{ .artist = "", .title = "Narozeninový stream", .live = true },
 };
 
-/// A cover to dither: a gradient across, and rings, which between them have
-/// every grey and edges in every direction.
-const synthetic_cover: [now_playing.cover_len]u8 = cover: {
+/// A picture to dither, in either shape: a gradient across, and rings,
+/// which between them have every grey and edges in every direction.
+fn syntheticPicture(comptime shape: now_playing.Shape) [now_playing.cover_len]u8 {
     @setEvalBranchQuota(200_000);
-    const side = now_playing.cover_side;
-    var pixels: [now_playing.cover_len]u8 = undefined;
-    for (0..side) |y| {
-        for (0..side) |x| {
-            const dx = @as(i32, @intCast(x)) - side / 2;
-            const dy = @as(i32, @intCast(y)) - side / 2;
+    const w = shape.rect().width;
+    const h = shape.rect().height;
+    var pixels: [now_playing.cover_len]u8 = @splat(0xFF);
+    for (0..h) |y| {
+        for (0..w) |x| {
+            const dx = @as(i32, @intCast(x)) - w / 2;
+            const dy = @as(i32, @intCast(y)) - h / 2;
             const ring = ((dx * dx + dy * dy) / 120) % 2 == 0;
-            const ramp = (x + y) * 255 / (2 * side - 2);
-            pixels[y * side + x] = if (ring) @intCast(ramp) else @intCast(255 - ramp);
+            const ramp = (x + y) * 255 / (w + h - 2);
+            pixels[y * w + x] = if (ring) @intCast(ramp) else @intCast(255 - ramp);
         }
     }
-    break :cover pixels;
-};
+    return pixels;
+}
+
+const synthetic_cover = syntheticPicture(.square);
+const synthetic_poster = syntheticPicture(.poster);
 
 /// The music screen for 12 s out of every 60, clear of the notices, the stale
 /// readings and the fault: playing for nine, then paused. Every third time
@@ -102,13 +115,16 @@ pub fn musicAt(t: f64) ?now_playing.View {
     // Counted over the rounds that show a track, so every sample comes round.
     const sample = music_samples[(round - round / 3) % music_samples.len];
     const elapsed: u32 = @intFromFloat(@min(phase, 35.0) - 26.0 + 40.0);
+    const picture = if (sample.shape == .poster) &synthetic_poster else &synthetic_cover;
     return .{ .track = .{
         .title = sample.title,
         .artist = sample.artist,
         .elapsed_s = elapsed,
-        .duration_s = 232,
+        .duration_s = if (sample.live) 0 else 232,
         .playing = phase < 35.0,
-        .cover = if (round % 2 == 0) &synthetic_cover else null,
+        .cover = if (round % 2 == 0) picture else null,
+        .shape = sample.shape,
+        .live = sample.live,
     } };
 }
 

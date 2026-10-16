@@ -379,17 +379,30 @@ pub const Bitmap = struct {
 
 /// Scale the greyscale picture `src`, `src_w` by `src_h`, to fill `dst`,
 /// `dst_w` by `dst_h`: each pixel the average of the ones it covers, or the
-/// one it falls on where the picture is enlarged.
+/// one it falls on where the picture is enlarged. A picture of another shape
+/// than `dst` is cut evenly from both ends of its longer way first, as a
+/// still from a film is to fill a square.
 pub fn scaleGray(src: []const u8, src_w: u32, src_h: u32, dst: []u8, dst_w: u32, dst_h: u32) void {
     std.debug.assert(src.len == @as(usize, src_w) * src_h and src_w > 0 and src_h > 0);
     std.debug.assert(dst.len == @as(usize, dst_w) * dst_h);
 
+    // The middle of `src` in the shape of `dst`.
+    var crop_w: usize = src_w;
+    var crop_h: usize = src_h;
+    if (@as(u64, src_w) * dst_h > @as(u64, src_h) * dst_w) {
+        crop_w = @intCast(@max(1, @as(u64, src_h) * dst_w / dst_h));
+    } else {
+        crop_h = @intCast(@max(1, @as(u64, src_w) * dst_h / dst_w));
+    }
+    const left = (src_w - crop_w) / 2;
+    const top = (src_h - crop_h) / 2;
+
     for (0..dst_h) |dy| {
-        const y0 = dy * src_h / dst_h;
-        const y1 = @max(y0 + 1, (dy + 1) * src_h / dst_h);
+        const y0 = top + dy * crop_h / dst_h;
+        const y1 = @max(y0 + 1, top + (dy + 1) * crop_h / dst_h);
         for (0..dst_w) |dx| {
-            const x0 = dx * src_w / dst_w;
-            const x1 = @max(x0 + 1, (dx + 1) * src_w / dst_w);
+            const x0 = left + dx * crop_w / dst_w;
+            const x1 = @max(x0 + 1, left + (dx + 1) * crop_w / dst_w);
             var sum: u32 = 0;
             for (y0..y1) |sy| {
                 for (src[sy * src_w + x0 .. sy * src_w + x1]) |px| sum += px;
@@ -831,6 +844,27 @@ test "scaleGray repeats pixels when enlarging" {
     var dst: [4]u8 = undefined;
     scaleGray(&src, 2, 1, &dst, 4, 1);
     try testing.expectEqualSlices(u8, &.{ 10, 10, 250, 250 }, &dst);
+}
+
+test "scaleGray cuts a picture of another shape evenly from its long sides" {
+    // Four across and two down into one pixel: the middle two columns.
+    const wide = [_]u8{
+        0, 100, 200, 255,
+        0, 100, 200, 255,
+    };
+    var one: [1]u8 = undefined;
+    scaleGray(&wide, 4, 2, &one, 1, 1);
+    try testing.expectEqual(@as(u8, 150), one[0]);
+
+    // The same turned: two across and four down, the middle two rows.
+    const tall = [_]u8{
+        0,   0,
+        100, 100,
+        200, 200,
+        255, 255,
+    };
+    scaleGray(&tall, 2, 4, &one, 1, 1);
+    try testing.expectEqual(@as(u8, 150), one[0]);
 }
 
 test "stretchContrast spreads a washed-out picture over every level" {
