@@ -171,11 +171,19 @@ pub const Screen = struct {
 
     /// Take in what the client has just handed over, at `now_ms`.
     pub fn update(self: *Screen, snapshot: *const Snapshot, now_ms: i64) void {
-        const was_playing = if (self.latest.playback) |p| p.playing else false;
+        const previous = self.latest.playback;
+        const was_playing = if (previous) |p| p.playing else false;
         self.latest = snapshot.*;
         self.dirty = true;
 
         const p = snapshot.playback orelse {
+            // A device that pauses and then leaves the account's playback, as a
+            // phone that locks does, leaves nothing playing: the pause still
+            // runs its time, as it would have had the device stayed.
+            if (self.paused_since != null) {
+                self.latest.playback = previous;
+                return;
+            }
             self.paused_since = null;
             return;
         };
@@ -432,6 +440,19 @@ test "music that was paused before the daemon heard of it is not put up" {
     // Reported again later, paused all along: nothing.
     screen.update(&paused("spotify:track:a", 10_000, 60_000), 60_000);
     try testing.expectEqual(@as(?Step, null), screen.step(60_000, false));
+}
+
+test "a paused device that leaves the account's playback still holds the screen for the pause" {
+    var screen: Screen = .{ .options = .{ .hold_paused = 30 } };
+    screen.update(&playing("spotify:track:a", 0, 0), 0);
+    _ = screen.step(0, false);
+    screen.update(&paused("spotify:track:a", 10_000, 10_000), 10_000);
+    _ = screen.step(10_000, false);
+
+    screen.update(&.{}, 12_000);
+    const still = screen.step(13_000, false).?.show;
+    try testing.expect(!still.view.track.playing);
+    try testing.expectEqual(Step.hide, screen.step(40_000, false).?);
 }
 
 test "nothing playing anywhere takes the screen down at once" {

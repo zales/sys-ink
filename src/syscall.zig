@@ -36,6 +36,22 @@ pub fn ok(rc: usize) bool {
     return errno(rc) == .SUCCESS;
 }
 
+pub const EventFdError = error{ ProcessFdQuotaExceeded, SystemFdQuotaExceeded, SystemResources, Unexpected };
+
+/// A non-blocking eventfd, closed on exec: what a task off the main loop
+/// wakes it with. A failure is named after the errno the kernel gave, for the
+/// caller's log.
+pub fn eventFd() EventFdError!std.os.linux.fd_t {
+    const rc = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
+    return switch (errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOMEM, .NODEV => error.SystemResources,
+        else => error.Unexpected,
+    };
+}
+
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------

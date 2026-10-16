@@ -127,7 +127,7 @@ pub const FakeTransport = struct {
 
     fn lastLutWas(self: *FakeTransport, lut: []const u8) bool {
         const loaded = self.lastArgsAfter(0x32) orelse return false;
-        return std.mem.eql(u8, loaded, lut[0..loaded.len]);
+        return loaded.len <= lut.len and std.mem.eql(u8, loaded, lut[0..loaded.len]);
     }
 
     /// Payload following the *last* occurrence of `cmd`.

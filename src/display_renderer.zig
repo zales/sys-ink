@@ -312,6 +312,8 @@ pub const Renderer = struct {
         // The loop left the last font's lines in place.
         const font = fonts[fonts.len - 1];
         const ellipsis = "...";
+        // A box not even one line of it tall holds nothing at all.
+        if (max == 0) return .{ .font = font, .count = 0 };
 
         var last = lines[max - 1];
         while (true) {
@@ -1551,6 +1553,15 @@ test "a title too long for its box ends in an ellipsis inside it" {
     try testing.expect(std.mem.endsWith(u8, lines[fitted.count - 1], "..."));
     for (lines[0..fitted.count]) |line| try testing.expect(r.music.measureText(line, fitted.font) <= m.title.width);
     try testing.expect(fitted.count * r.music.getLineHeight(fitted.font) <= m.title.height);
+}
+
+test "text for a box too short for a single line is not drawn, rather than crash" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    var lines: [4][]const u8 = undefined;
+    var last_buf: [64]u8 = undefined;
+    const fitted = Renderer.fitText(&r.music, "anything at all", &.{.ubuntu14}, 100, 10, &lines, &last_buf);
+    try testing.expectEqual(@as(usize, 0), fitted.count);
 }
 
 test "the pairing screen shows the code" {

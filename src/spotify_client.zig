@@ -97,11 +97,19 @@ pub const Client = struct {
     /// A code is asked for at most once a run: the screen asking for it hides
     /// the dashboard, which must not go on for good on a panel nobody links.
     pairing_tried: bool = false,
+    /// The dealer while a session has it open, for `request` to ping.
+    dealer: ?*Dealer = null,
+    /// Connections kept open after a GET, one a host, so that the next
+    /// lookup there needs no handshake: each track asks the metadata service
+    /// and the image host, and some the embed player.
+    pooled: [pool_size]?*Tls = @splat(null),
+
+    const pool_size = 3;
 
     pub fn init(io: std.Io, gpa: std.mem.Allocator, options: Options) !Client {
-        const ready = try eventFd();
+        const ready = try syscall.eventFd();
         errdefer bounded_connect.closeFd(ready);
-        const stop = try eventFd();
+        const stop = try syscall.eventFd();
         return .{ .io = io, .gpa = gpa, .options = options, .ready_fd = ready, .stop_fd = stop };
     }
 
@@ -139,6 +147,10 @@ pub const Client = struct {
         const one: u64 = 1;
         _ = linux.write(self.stop_fd, std.mem.asBytes(&one), @sizeOf(u64));
         if (self.task) |*task| task.await(self.io);
+        for (&self.pooled) |*slot| {
+            if (slot.*) |conn| self.discard(conn);
+            slot.* = null;
+        }
         self.ca.deinit(self.gpa);
         bounded_connect.closeFd(self.ready_fd);
         bounded_connect.closeFd(self.stop_fd);
@@ -209,6 +221,8 @@ pub const Client = struct {
         defer self.gpa.destroy(dealer);
         try dealer.open(self, hosts.dealer, auth.token);
         defer dealer.close(self);
+        self.dealer = dealer;
+        defer self.dealer = null;
 
         // Each message is parsed into this, and it is emptied after each.
         var message_arena: std.heap.ArenaAllocator = .init(self.gpa);
@@ -220,22 +234,23 @@ pub const Client = struct {
         if (failures.* > 0) log.info("Spotify: connected again", .{});
         failures.* = 0;
 
-        var last_ping = nowMs(self.io);
         while (true) {
             _ = message_arena.reset(.retain_capacity);
             const now = nowMs(self.io);
             if (now >= renew_at) return;
-            if (now - dealer.last_heard > silence_limit_ms) return error.DealerSilent;
 
-            const ping_at = last_ping + spotify.ping_interval_s * 1000;
+            const ping_at = dealer.last_ping + spotify.ping_interval_s * 1000;
             if (now >= ping_at) {
                 try dealer.send(self, .text, spotify.ping_message);
-                last_ping = now;
+                dealer.last_ping = now;
                 continue;
             }
 
             switch (try dealer.next(self, @min(ping_at, renew_at))) {
-                .timeout, .skipped => {},
+                // Judged only after a wait that brought nothing: after a long
+                // lookup, what came meanwhile is still to be read.
+                .timeout => if (nowMs(self.io) - dealer.last_heard > silence_limit_ms) return error.DealerSilent,
+                .skipped => {},
                 .close => return error.DealerClosed,
                 .ping => |payload| try dealer.send(self, .pong, payload),
                 .text => |text| {
@@ -247,7 +262,10 @@ pub const Client = struct {
                     switch (message) {
                         .cluster => |cluster| self.onCluster(&message_arena, hosts.spclient, auth.token, cluster),
                         .pong, .connection_id => {},
-                        .other => |uri| log.debug("Spotify: ignoring {s}", .{uri}),
+                        .other => |uri| {
+                            var buf: [128]u8 = undefined;
+                            log.debug("Spotify: ignoring {s}", .{spotify.loggable(&buf, uri)});
+                        },
                     }
                 },
             }
@@ -342,10 +360,13 @@ pub const Client = struct {
             return;
         };
         self.mine.track = described.track;
+        var artist: [now_playing.max_text]u8 = undefined;
+        var title: [now_playing.max_text]u8 = undefined;
+        var album: [now_playing.max_text]u8 = undefined;
         log.debug("Spotify: playing {s} - {s} ({s})", .{
-            described.track.artist.slice(),
-            described.track.title.slice(),
-            described.track.album.slice(),
+            spotify.loggable(&artist, described.track.artist.slice()),
+            spotify.loggable(&title, described.track.title.slice()),
+            spotify.loggable(&album, described.track.album.slice()),
         });
         self.setCover(arena, described.cover);
     }
@@ -504,7 +525,8 @@ pub const Client = struct {
             },
             .failed => |reason| {
                 if (std.mem.eql(u8, reason, "invalid_grant")) return error.Revoked;
-                log.warn("Spotify: a fresh token was refused: {s}", .{reason});
+                var buf: [128]u8 = undefined;
+                log.warn("Spotify: a fresh token was refused: {s}", .{spotify.loggable(&buf, reason)});
                 return error.UnexpectedReply;
             },
             .pending, .slow_down => return error.UnexpectedReply,
@@ -514,7 +536,10 @@ pub const Client = struct {
     /// Link the panel to an account: put a code on the panel, and wait for
     /// someone to enter it at spotify.com/pair.
     fn pair(self: *Client, arena: std.mem.Allocator) !Authorized {
-        if (self.pairing_tried) return error.NotLinked;
+        if (self.pairing_tried) {
+            log.warn("Spotify: the panel is not linked, and a code has been asked for once already; restart the service to link it", .{});
+            return error.NotLinked;
+        }
         self.pairing_tried = true;
 
         const request_body = try formBody(arena, &.{
@@ -535,7 +560,8 @@ pub const Client = struct {
         };
 
         const expires = nowMs(self.io) + @as(i64, code.expires_in) * 1000;
-        log.info("Spotify: to link this panel, enter {s} at https://{s}", .{ code.user_code, spotify.pair_url });
+        var code_buf: [32]u8 = undefined;
+        log.info("Spotify: to link this panel, enter {s} at https://{s}", .{ spotify.loggable(&code_buf, code.user_code), spotify.pair_url });
         self.mine.pairing = .{ .code = .init(code.user_code), .expires_ms = expires };
         self.publish();
         defer {
@@ -579,7 +605,8 @@ pub const Client = struct {
                 .pending => {},
                 .slow_down => interval_ms += 5000,
                 .failed => |reason| {
-                    log.warn("Spotify: linking the panel failed: {s}", .{reason});
+                    var buf: [128]u8 = undefined;
+                    log.warn("Spotify: linking the panel failed: {s}", .{spotify.loggable(&buf, reason)});
                     return error.NotLinked;
                 },
                 .token => |token| {
@@ -674,16 +701,57 @@ pub const Client = struct {
         body: []u8,
     };
 
-    /// One request on a connection of its own, closed after the reply.
+    /// One request. A GET goes on a connection kept from the last one to the
+    /// same host if there is one, and its connection is kept for the next if
+    /// the server allows; anything else goes on a connection of its own,
+    /// closed after the reply, so that a POST is never sent twice.
     fn request(self: *Client, arena: std.mem.Allocator, req: Request) !Reply {
+        // The dealer is not read while this waits, and lookups come several
+        // to a track: ping it if it is due, or a slow network could cost the
+        // connection.
+        self.pingDealerIfDue();
+
+        const reusable = std.mem.eql(u8, req.method, "GET");
+        if (reusable) {
+            if (self.takePooled(req.host)) |conn| {
+                if (self.exchange(arena, conn, req, true)) |done| {
+                    self.keepOrDiscard(conn, done.keep);
+                    return done.reply;
+                } else |err| {
+                    self.discard(conn);
+                    if (err == error.Stopped) return err;
+                    // The server closed it since, most likely: once more on a
+                    // fresh one, which a GET can safely be.
+                    log.debug("Spotify: a kept connection to {s} failed: {t}; opening another", .{ req.host.host, err });
+                }
+            }
+        }
+
         const conn = try self.gpa.create(Tls);
-        defer self.gpa.destroy(conn);
-        try conn.open(self, req.host, nowMs(self.io) + request_timeout_ms);
-        defer conn.close(self);
+        conn.open(self, req.host, nowMs(self.io) + request_timeout_ms) catch |err| {
+            self.gpa.destroy(conn);
+            return err;
+        };
+        const done = self.exchange(arena, conn, req, reusable) catch |err| {
+            self.discard(conn);
+            return err;
+        };
+        self.keepOrDiscard(conn, reusable and done.keep);
+        return done.reply;
+    }
+
+    const Exchanged = struct {
+        reply: Reply,
+        /// The server will take another request on the connection.
+        keep: bool,
+    };
+
+    fn exchange(self: *Client, arena: std.mem.Allocator, conn: *Tls, req: Request, keep_alive: bool) !Exchanged {
+        conn.input.deadline_ms = nowMs(self.io) + request_timeout_ms;
 
         const w = &conn.client.writer;
-        try w.print("{s} {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: sys-ink\r\nAccept-Encoding: identity\r\nConnection: close\r\n{s}", .{
-            req.method, req.path, req.host.host, req.headers,
+        try w.print("{s} {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: sys-ink\r\nAccept-Encoding: identity\r\nConnection: {s}\r\n{s}", .{
+            req.method, req.path, req.host.host, if (keep_alive) "keep-alive" else "close", req.headers,
         });
         if (req.body) |body| {
             try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ req.content_type, body.len });
@@ -701,13 +769,65 @@ pub const Client = struct {
         };
         const head = std.http.Client.Response.Head.parse(try conn.mapRead(http_reader.receiveHead())) catch return error.UnexpectedReply;
         const status = head.status;
+        // A body that runs to the end of the connection leaves nothing to
+        // reuse.
+        const delimited = head.transfer_encoding == .chunked or head.content_length != null;
+        const keep = keep_alive and head.keep_alive and delimited;
         var transfer: [4096]u8 = undefined;
         const body_reader = http_reader.bodyReader(&transfer, head.transfer_encoding, head.content_length);
         const body = body_reader.allocRemaining(arena, .limited(max_body)) catch |err| switch (err) {
             error.ReadFailed => return conn.readError(),
             else => |e| return e,
         };
-        return .{ .status = status, .body = body };
+        return .{ .reply = .{ .status = status, .body = body }, .keep = keep };
+    }
+
+    /// The connection kept to `at`, if there is one still worth using: one
+    /// the server has said anything on since is closing, and is dropped.
+    fn takePooled(self: *Client, at: spotify.HostPort) ?*Tls {
+        for (&self.pooled) |*slot| {
+            const conn = slot.* orelse continue;
+            if (!conn.isTo(at)) continue;
+            slot.* = null;
+            if (conn.hasBuffered() or conn.readableNow()) {
+                self.discard(conn);
+                return null;
+            }
+            return conn;
+        }
+        return null;
+    }
+
+    fn keepOrDiscard(self: *Client, conn: *Tls, keep: bool) void {
+        if (!keep) return self.discard(conn);
+        for (&self.pooled) |*slot| {
+            if (slot.* == null) {
+                slot.* = conn;
+                return;
+            }
+        }
+        // Full: the oldest makes room.
+        self.discard(self.pooled[0].?);
+        std.mem.copyForwards(?*Tls, self.pooled[0 .. pool_size - 1], self.pooled[1..]);
+        self.pooled[pool_size - 1] = conn;
+    }
+
+    fn discard(self: *Client, conn: *Tls) void {
+        conn.close(self);
+        self.gpa.destroy(conn);
+    }
+
+    /// Ping the dealer if it is due one, for a wait that does not read it.
+    /// A failure is the dealer's loop's to meet, on its next read or send.
+    fn pingDealerIfDue(self: *Client) void {
+        const dealer = self.dealer orelse return;
+        const now = nowMs(self.io);
+        if (now - dealer.last_ping < spotify.ping_interval_s * 1000) return;
+        dealer.send(self, .text, spotify.ping_message) catch |err| {
+            log.debug("Spotify: cannot ping the dealer: {t}", .{err});
+            return;
+        };
+        dealer.last_ping = now;
     }
 
     /// Wait up to `ms` for nothing but `stop_fd`.
@@ -717,12 +837,6 @@ pub const Client = struct {
         if (ready > 0 or self.stopping.load(.acquire)) return error.Stopped;
     }
 };
-
-fn eventFd() !linux.fd_t {
-    const rc = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
-    if (!syscall.ok(rc)) return error.EventFdFailed;
-    return @intCast(rc);
-}
 
 fn nowMs(io: std.Io) i64 {
     return std.Io.Timestamp.now(io, .awake).toMilliseconds();
@@ -744,6 +858,10 @@ const Tls = struct {
     output: std.Io.net.Stream.Writer,
     client: std.crypto.tls.Client,
     buffers: []u8,
+    /// Where it goes, for a kept connection to be found by.
+    host: [256]u8,
+    host_len: usize,
+    port: u16,
 
     const tls_len = std.crypto.tls.Client.min_buffer_len;
     /// The socket's buffer, the TLS record buffer both ways, and room for an
@@ -753,6 +871,9 @@ const Tls = struct {
     fn open(self: *Tls, owner: *Client, at: spotify.HostPort, deadline_ms: i64) !void {
         var name: [256:0]u8 = undefined;
         const host_z = std.mem.printSentinel(&name, "{s}", .{at.host}, 0) catch return error.HostTooLong;
+        @memcpy(self.host[0..at.host.len], at.host);
+        self.host_len = at.host.len;
+        self.port = at.port;
         const address = lookup(null, host_z.ptr) catch return error.DnsResolutionFailed;
         self.stream = try bounded_connect.connectStream(address, at.port, connect_timeout_ms);
         errdefer self.stream.close(owner.io);
@@ -801,6 +922,18 @@ const Tls = struct {
         try self.client.writer.flush();
         try bounded_connect.waitWritable(self.stream.socket.handle, send_timeout_ms);
         self.output.interface.flush() catch return self.output.err orelse error.WriteFailed;
+    }
+
+    fn isTo(self: *const Tls, at: spotify.HostPort) bool {
+        return self.port == at.port and std.mem.eql(u8, self.host[0..self.host_len], at.host);
+    }
+
+    /// Whether the socket has something to read this moment: on a connection
+    /// with no request out, the server closing it.
+    fn readableNow(self: *Tls) bool {
+        var fds = [_]std.posix.pollfd{.{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&fds, 0) catch return true;
+        return ready > 0;
     }
 
     /// Whether a read can go ahead without waiting for the network.
@@ -895,6 +1028,8 @@ const Dealer = struct {
     storage: []u8,
     /// Monotonic milliseconds of the last message in, of any kind.
     last_heard: i64,
+    /// Monotonic milliseconds of the last ping sent.
+    last_ping: i64,
 
     const Event = union(enum) {
         /// Nothing by the deadline.
@@ -939,6 +1074,7 @@ const Dealer = struct {
         self.storage = try owner.gpa.alloc(u8, max_message);
         self.receiver = .init(self.storage);
         self.last_heard = nowMs(owner.io);
+        self.last_ping = self.last_heard;
     }
 
     fn close(self: *Dealer, owner: *Client) void {

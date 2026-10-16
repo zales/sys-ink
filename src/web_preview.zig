@@ -86,12 +86,10 @@ pub const WebPreview = struct {
 
         var notice_fd: linux.fd_t = -1;
         if (options.acceptsNotices()) {
-            const rc = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
-            if (!syscall.ok(rc)) {
-                log.err("Cannot create the API's notice eventfd: {t}", .{syscall.errno(rc)});
+            notice_fd = syscall.eventFd() catch |err| {
+                log.err("Cannot create the API's notice eventfd: {t}", .{err});
                 return error.EventFdFailed;
-            }
-            notice_fd = @intCast(rc);
+            };
         }
 
         return .{

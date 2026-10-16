@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const now_playing = @import("now_playing.zig");
+const notice = @import("notice.zig");
 
 const Value = std.json.Value;
 
@@ -107,12 +108,16 @@ pub const Item = struct {
 
 /// What a playing URI is, when it is one whose metadata can be looked up:
 /// an advert or a local file has none.
+///
+/// The ID goes into request paths, so it is taken only as Spotify writes one,
+/// in base 62; a URI with anything else in it is not looked up at all.
 pub fn itemOf(uri: []const u8) ?Item {
     var parts = std.mem.splitScalar(u8, uri, ':');
     if (!std.mem.eql(u8, parts.next() orelse return null, "spotify")) return null;
     const kind = parts.next() orelse return null;
     const id = parts.next() orelse return null;
     if (parts.next() != null) return null;
+    if (gidHex(id) == null) return null;
     if (std.mem.eql(u8, kind, "track")) return .{ .kind = .track, .id = id };
     if (std.mem.eql(u8, kind, "episode")) return .{ .kind = .episode, .id = id };
     return null;
@@ -138,6 +143,12 @@ pub fn embedPath(buf: []u8, uri: []const u8) ?[]const u8 {
     w.writeAll("/oembed?url=") catch return null;
     writeEscaped(&w, uri) catch return null;
     return w.buffered();
+}
+
+/// `text`, which came from Spotify, fit for a log line: folded as a notice is,
+/// so a line break or an escape in a title cannot start a line of its own.
+pub fn loggable(buf: []u8, text: []const u8) []const u8 {
+    return notice.foldToFont(buf, text);
 }
 
 /// The path of a cover on the image host.
@@ -394,13 +405,10 @@ pub fn describeEmbedPage(uri: []const u8, root: Value) ?Described {
         out.track.artist = .init(w.buffered());
     }
 
-    // The nearest to the size drawn, as `pickCover` chooses; larger rather
-    // than smaller.
     var best_distance: i64 = std.math.maxInt(i64);
     for (array(field(obj.get("visualIdentity"), "image")) orelse &.{}) |image| {
         const id = coverIdOf(string(field(image, "url")) orelse continue) orelse continue;
-        const width = integer(field(image, "maxWidth")) orelse 300;
-        const distance = if (width >= now_playing.cover_side) width - now_playing.cover_side else 4 * (now_playing.cover_side - width);
+        const distance = coverDistance(integer(field(image, "maxWidth")) orelse 300);
         if (distance < best_distance) {
             best_distance = distance;
             out.cover = id;
@@ -424,6 +432,14 @@ fn isFileId(id: []const u8) bool {
     return true;
 }
 
+/// How far a cover `width` wide is from the size drawn, for choosing the
+/// nearest. One smaller than drawn is upscaled and blurs, so it counts four
+/// times over: larger is preferred.
+fn coverDistance(width: i64) i64 {
+    const side: i64 = now_playing.cover_side;
+    return if (width >= side) width - side else 4 * (side - width);
+}
+
 /// The cover nearest in size to the one drawn: 300 pixels is `DEFAULT`, and
 /// the panel's is 128.
 fn pickCover(images: []const Value) ?[40]u8 {
@@ -432,9 +448,7 @@ fn pickCover(images: []const Value) ?[40]u8 {
     images: for (images) |image| {
         const id = string(field(image, "file_id")) orelse continue;
         if (!isFileId(id)) continue :images;
-        const width = integer(field(image, "width")) orelse 300;
-        // Smaller than drawn is upscaled and blurs; prefer larger.
-        const distance = if (width >= now_playing.cover_side) width - now_playing.cover_side else 4 * (now_playing.cover_side - width);
+        const distance = coverDistance(integer(field(image, "width")) orelse 300);
         if (distance < best_distance) {
             best_distance = distance;
             best = id[0..40].*;
@@ -585,6 +599,9 @@ test "only tracks and episodes are looked up" {
     );
     try testing.expect(itemOf("spotify:episode:1tIXasAZVfCgPHoHQTBqkv").?.kind == .episode);
     try testing.expect(itemOf("spotify:ad:123") == null);
+    // Nothing but base 62 goes into a request path.
+    try testing.expect(itemOf("spotify:track:x HTTP/1.1\r\nHost: evil") == null);
+    try testing.expect(itemOf("spotify:episode:../../a") == null);
     try testing.expect(itemOf("spotify:local:Artist:Album:Title:200") == null);
     try testing.expect(itemOf("") == null);
 }
@@ -790,6 +807,13 @@ test "oEmbed gives an episode its title and cover, and nothing that is not an ID
     )).?;
     try testing.expect(odd.cover == null);
     try testing.expect(describeEmbed(uri, try parse(&arena, "{\"type\":\"rich\"}")) == null);
+}
+
+test "what Spotify sends is made fit for a log line" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("Song [12:00:00] [err] forged", loggable(&buf, "Song\n[12:00:00] [err] forged"));
+    // The escape is gone, and with it what the rest would have done to a terminal.
+    try testing.expectEqualStrings("Pračka [2J?", loggable(&buf, "Pračka \u{1B}[2J\u{202E}"));
 }
 
 test "the state file is read back as it was written" {
