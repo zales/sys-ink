@@ -10,8 +10,8 @@
 //! main loop polls `readyFd` and takes the newest `Snapshot`. Even so, every
 //! wait it makes has a deadline, and watches `stop_fd` as well, so the
 //! daemon stops promptly and a server that goes quiet costs a reconnect, not
-//! a task stuck for good. The exceptions are the name lookup, which has
-//! libc's timeouts, and the connect, which has its own.
+//! a task stuck for good; its requests go through `https_client.zig`, which
+//! bounds them the same way.
 //!
 //! Secrets stay here: the refresh token is in the state file, readable by
 //! root alone, and neither it nor an access token is ever logged.
@@ -25,7 +25,9 @@ const jpeg = @import("jpeg.zig");
 const graphics = @import("graphics.zig");
 const bounded_connect = @import("bounded_connect.zig");
 const syscall = @import("syscall.zig");
-const lookup = @import("mqtt.zig").lookup;
+const https = @import("https_client.zig");
+
+const nowMs = https.nowMs;
 
 const Value = std.json.Value;
 
@@ -36,21 +38,13 @@ pub const Options = struct {
     state_path: []const u8,
 };
 
-/// A TCP connect, as the broker's has.
-const connect_timeout_ms = 5000;
-/// A whole HTTPS request, from connecting to the last byte of the reply.
-const request_timeout_ms = 15_000;
 /// Opening the dealer, through the WebSocket handshake.
 const handshake_timeout_ms = 10_000;
 /// The rest of a WebSocket message, once its first byte has arrived.
 const frame_timeout_ms = 10_000;
-/// Waiting for room to send; see `bounded_connect.waitWritable`.
-const send_timeout_ms = 5000;
 /// Longest message taken from the dealer. A cluster lists the queue, and
 /// runs to tens of kilobytes with a long one.
 const max_message = 512 * 1024;
-/// Longest reply body taken: a cover is some 30 kB, JSON less.
-const max_body = 1024 * 1024;
 /// The dealer is reconnected with a fresh token this long before the old one
 /// runs out.
 const renew_margin_s = 300;
@@ -91,26 +85,25 @@ pub const Client = struct {
     // The task's own. Nothing else touches these.
     mine: now_playing.Snapshot = .{},
     cover_id: ?[40]u8 = null,
-    ca: std.crypto.Certificate.Bundle = .empty,
-    ca_lock: std.Io.RwLock = .init,
-    ca_loaded: bool = false,
+    https: https.Client,
     /// A code is asked for at most once a run: the screen asking for it hides
     /// the dashboard, which must not go on for good on a panel nobody links.
     pairing_tried: bool = false,
     /// The dealer while a session has it open, for `request` to ping.
     dealer: ?*Dealer = null,
-    /// Connections kept open after a GET, one a host, so that the next
-    /// lookup there needs no handshake: each track asks the metadata service
-    /// and the image host, and some the embed player.
-    pooled: [pool_size]?*Tls = @splat(null),
-
-    const pool_size = 3;
 
     pub fn init(io: std.Io, gpa: std.mem.Allocator, options: Options) !Client {
         const ready = try syscall.eventFd();
         errdefer bounded_connect.closeFd(ready);
         const stop = try syscall.eventFd();
-        return .{ .io = io, .gpa = gpa, .options = options, .ready_fd = ready, .stop_fd = stop };
+        return .{
+            .io = io,
+            .gpa = gpa,
+            .options = options,
+            .ready_fd = ready,
+            .stop_fd = stop,
+            .https = .init(io, gpa, stop),
+        };
     }
 
     /// Begin on a task of its own. Like `WebPreview.start`, it needs this at
@@ -147,11 +140,7 @@ pub const Client = struct {
         const one: u64 = 1;
         _ = linux.write(self.stop_fd, std.mem.asBytes(&one), @sizeOf(u64));
         if (self.task) |*task| task.await(self.io);
-        for (&self.pooled) |*slot| {
-            if (slot.*) |conn| self.discard(conn);
-            slot.* = null;
-        }
-        self.ca.deinit(self.gpa);
+        self.https.deinit();
         bounded_connect.closeFd(self.ready_fd);
         bounded_connect.closeFd(self.stop_fd);
     }
@@ -207,7 +196,7 @@ pub const Client = struct {
     /// One connection to the dealer, from authorising to the token running
     /// out, which ends it without an error: the next one starts at once.
     fn session(self: *Client, failures: *u32) !void {
-        try self.loadCertificates();
+        try self.https.loadCertificates("Spotify");
 
         var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
         defer arena_state.deinit();
@@ -307,7 +296,8 @@ pub const Client = struct {
         );
         const reply = try self.request(arena, .{
             .method = "PUT",
-            .host = spclient,
+            .host = spclient.host,
+            .port = spclient.port,
             .path = path,
             .headers = headers,
             .body = spotify.register_body,
@@ -377,7 +367,7 @@ pub const Client = struct {
         var path_buf: [128]u8 = undefined;
         const path = item.metadataPath(&path_buf) orelse return null;
         const headers = std.fmt.allocPrint(arena, "Authorization: Bearer {s}\r\nAccept: application/json\r\n", .{token}) catch return null;
-        const reply = self.request(arena, .{ .method = "GET", .host = spclient, .path = path, .headers = headers }) catch |err| {
+        const reply = self.request(arena, .{ .method = "GET", .host = spclient.host, .port = spclient.port, .path = path, .headers = headers }) catch |err| {
             // Cut short by the daemon stopping: nothing went wrong.
             if (err != error.Stopped) log.debug("Spotify: cannot look up {s}: {t}", .{ uri, err });
             return null;
@@ -397,7 +387,7 @@ pub const Client = struct {
         const path = spotify.embedPagePath(&path_buf, item) orelse return null;
         const reply = self.request(arena, .{
             .method = "GET",
-            .host = .{ .host = spotify.embed_host, .port = 443 },
+            .host = spotify.embed_host,
             .path = path,
             .headers = "Accept: text/html\r\n",
         }) catch |err| {
@@ -422,7 +412,7 @@ pub const Client = struct {
         const path = spotify.embedPath(&path_buf, uri) orelse return null;
         const reply = self.request(arena, .{
             .method = "GET",
-            .host = .{ .host = spotify.embed_host, .port = 443 },
+            .host = spotify.embed_host,
             .path = path,
             .headers = "Accept: application/json\r\n",
         }) catch |err| {
@@ -453,7 +443,7 @@ pub const Client = struct {
         const path = spotify.imagePath(&path_buf, &file_id) orelse return;
         const reply = self.request(arena, .{
             .method = "GET",
-            .host = .{ .host = spotify.image_host, .port = 443 },
+            .host = spotify.image_host,
             .path = path,
         }) catch |err| {
             if (err != error.Stopped) log.warn("Spotify: cannot fetch a cover: {t}", .{err});
@@ -507,7 +497,7 @@ pub const Client = struct {
         });
         const reply = try self.request(arena, .{
             .method = "POST",
-            .host = .{ .host = spotify.accounts_host, .port = 443 },
+            .host = spotify.accounts_host,
             .path = "/api/token",
             .body = body,
             .content_type = "application/x-www-form-urlencoded",
@@ -548,7 +538,7 @@ pub const Client = struct {
         });
         const reply = try self.request(arena, .{
             .method = "POST",
-            .host = .{ .host = spotify.accounts_host, .port = 443 },
+            .host = spotify.accounts_host,
             .path = "/oauth2/device/authorize",
             .body = request_body,
             .content_type = "application/x-www-form-urlencoded",
@@ -591,7 +581,7 @@ pub const Client = struct {
             _ = poll_arena.reset(.retain_capacity);
             const polled = self.request(poll_arena.allocator(), .{
                 .method = "POST",
-                .host = .{ .host = spotify.accounts_host, .port = 443 },
+                .host = spotify.accounts_host,
                 .path = "/api/token",
                 .body = poll_body,
                 .content_type = "application/x-www-form-urlencoded",
@@ -666,155 +656,24 @@ pub const Client = struct {
     fn resolveHosts(self: *Client, arena: std.mem.Allocator) !spotify.Hosts {
         const reply = try self.request(arena, .{
             .method = "GET",
-            .host = .{ .host = spotify.apresolve_host, .port = 443 },
+            .host = spotify.apresolve_host,
             .path = "/?type=dealer&type=spclient",
         });
         const root = std.json.parseFromSliceLeaky(Value, arena, reply.body, .{}) catch return error.UnexpectedReply;
         return spotify.parseHosts(root) orelse error.UnexpectedReply;
     }
 
-    fn loadCertificates(self: *Client) !void {
-        if (self.ca_loaded) return;
-        self.ca.rescan(self.gpa, self.io, std.Io.Clock.real.now(self.io)) catch |err| {
-            log.err("Spotify: cannot load the system's CA certificates: {t}", .{err});
-            return err;
-        };
-        self.ca_loaded = true;
-    }
-
     // ------------------------------------------------------------------------
     // HTTPS
     // ------------------------------------------------------------------------
 
-    const Request = struct {
-        method: []const u8,
-        host: spotify.HostPort,
-        path: []const u8,
-        /// Whole header lines, each ending in CRLF.
-        headers: []const u8 = "",
-        body: ?[]const u8 = null,
-        content_type: []const u8 = "",
-    };
-
-    const Reply = struct {
-        status: std.http.Status,
-        body: []u8,
-    };
-
-    /// One request. A GET goes on a connection kept from the last one to the
-    /// same host if there is one, and its connection is kept for the next if
-    /// the server allows; anything else goes on a connection of its own,
-    /// closed after the reply, so that a POST is never sent twice.
-    fn request(self: *Client, arena: std.mem.Allocator, req: Request) !Reply {
+    /// One request; see `https.Client.request`.
+    fn request(self: *Client, arena: std.mem.Allocator, req: https.Request) !https.Reply {
         // The dealer is not read while this waits, and lookups come several
         // to a track: ping it if it is due, or a slow network could cost the
         // connection.
         self.pingDealerIfDue();
-
-        const reusable = std.mem.eql(u8, req.method, "GET");
-        if (reusable) {
-            if (self.takePooled(req.host)) |conn| {
-                if (self.exchange(arena, conn, req, true)) |done| {
-                    self.keepOrDiscard(conn, done.keep);
-                    return done.reply;
-                } else |err| {
-                    self.discard(conn);
-                    if (err == error.Stopped) return err;
-                    // The server closed it since, most likely: once more on a
-                    // fresh one, which a GET can safely be.
-                    log.debug("Spotify: a kept connection to {s} failed: {t}; opening another", .{ req.host.host, err });
-                }
-            }
-        }
-
-        const conn = try self.gpa.create(Tls);
-        conn.open(self, req.host, nowMs(self.io) + request_timeout_ms) catch |err| {
-            self.gpa.destroy(conn);
-            return err;
-        };
-        const done = self.exchange(arena, conn, req, reusable) catch |err| {
-            self.discard(conn);
-            return err;
-        };
-        self.keepOrDiscard(conn, reusable and done.keep);
-        return done.reply;
-    }
-
-    const Exchanged = struct {
-        reply: Reply,
-        /// The server will take another request on the connection.
-        keep: bool,
-    };
-
-    fn exchange(self: *Client, arena: std.mem.Allocator, conn: *Tls, req: Request, keep_alive: bool) !Exchanged {
-        conn.input.deadline_ms = nowMs(self.io) + request_timeout_ms;
-
-        const w = &conn.client.writer;
-        try w.print("{s} {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: sys-ink\r\nAccept-Encoding: identity\r\nConnection: {s}\r\n{s}", .{
-            req.method, req.path, req.host.host, if (keep_alive) "keep-alive" else "close", req.headers,
-        });
-        if (req.body) |body| {
-            try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ req.content_type, body.len });
-            try w.writeAll(body);
-        } else {
-            try w.writeAll("\r\n");
-        }
-        try conn.flush();
-
-        var http_reader: std.http.Reader = .{
-            .in = &conn.client.reader,
-            .interface = undefined,
-            .state = .ready,
-            .max_head_len = 16 * 1024,
-        };
-        const head = std.http.Client.Response.Head.parse(try conn.mapRead(http_reader.receiveHead())) catch return error.UnexpectedReply;
-        const status = head.status;
-        // A body that runs to the end of the connection leaves nothing to
-        // reuse.
-        const delimited = head.transfer_encoding == .chunked or head.content_length != null;
-        const keep = keep_alive and head.keep_alive and delimited;
-        var transfer: [4096]u8 = undefined;
-        const body_reader = http_reader.bodyReader(&transfer, head.transfer_encoding, head.content_length);
-        const body = body_reader.allocRemaining(arena, .limited(max_body)) catch |err| switch (err) {
-            error.ReadFailed => return conn.readError(),
-            else => |e| return e,
-        };
-        return .{ .reply = .{ .status = status, .body = body }, .keep = keep };
-    }
-
-    /// The connection kept to `at`, if there is one still worth using: one
-    /// the server has said anything on since is closing, and is dropped.
-    fn takePooled(self: *Client, at: spotify.HostPort) ?*Tls {
-        for (&self.pooled) |*slot| {
-            const conn = slot.* orelse continue;
-            if (!conn.isTo(at)) continue;
-            slot.* = null;
-            if (conn.hasBuffered() or conn.readableNow()) {
-                self.discard(conn);
-                return null;
-            }
-            return conn;
-        }
-        return null;
-    }
-
-    fn keepOrDiscard(self: *Client, conn: *Tls, keep: bool) void {
-        if (!keep) return self.discard(conn);
-        for (&self.pooled) |*slot| {
-            if (slot.* == null) {
-                slot.* = conn;
-                return;
-            }
-        }
-        // Full: the oldest makes room.
-        self.discard(self.pooled[0].?);
-        std.mem.copyForwards(?*Tls, self.pooled[0 .. pool_size - 1], self.pooled[1..]);
-        self.pooled[pool_size - 1] = conn;
-    }
-
-    fn discard(self: *Client, conn: *Tls) void {
-        conn.close(self);
-        self.gpa.destroy(conn);
+        return self.https.request(arena, req);
     }
 
     /// Ping the dealer if it is due one, for a wait that does not read it.
@@ -838,192 +697,15 @@ pub const Client = struct {
     }
 };
 
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Timestamp.now(io, .awake).toMilliseconds();
-}
-
 fn formBody(arena: std.mem.Allocator, pairs: []const [2][]const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     try spotify.writeForm(&out.writer, pairs);
     return out.written();
 }
 
-/// A TLS connection whose every read has a deadline.
-///
-/// Its buffers, and the pointers the TLS client keeps into it, pin it in
-/// place: it is opened where it is to stay.
-const Tls = struct {
-    stream: std.Io.net.Stream,
-    input: SocketReader,
-    output: std.Io.net.Stream.Writer,
-    client: std.crypto.tls.Client,
-    buffers: []u8,
-    /// Where it goes, for a kept connection to be found by.
-    host: [256]u8,
-    host_len: usize,
-    port: u16,
-
-    const tls_len = std.crypto.tls.Client.min_buffer_len;
-    /// The socket's buffer, the TLS record buffer both ways, and room for an
-    /// HTTP head in the plaintext one.
-    const buffers_len = 3 * tls_len + (tls_len + 16 * 1024);
-
-    fn open(self: *Tls, owner: *Client, at: spotify.HostPort, deadline_ms: i64) !void {
-        var name: [256:0]u8 = undefined;
-        const host_z = std.mem.printSentinel(&name, "{s}", .{at.host}, 0) catch return error.HostTooLong;
-        @memcpy(self.host[0..at.host.len], at.host);
-        self.host_len = at.host.len;
-        self.port = at.port;
-        const address = lookup(null, host_z.ptr) catch return error.DnsResolutionFailed;
-        self.stream = try bounded_connect.connectStream(address, at.port, connect_timeout_ms);
-        errdefer self.stream.close(owner.io);
-
-        self.buffers = try owner.gpa.alloc(u8, buffers_len);
-        errdefer owner.gpa.free(self.buffers);
-        const socket_in = self.buffers[0..tls_len];
-        const socket_out = self.buffers[tls_len..][0..tls_len];
-        const plain_out = self.buffers[2 * tls_len ..][0..tls_len];
-        const plain_in = self.buffers[3 * tls_len ..];
-
-        self.input = .init(self.stream.socket.handle, owner.stop_fd, owner.io, socket_in, deadline_ms);
-        self.output = self.stream.writer(owner.io, socket_out);
-
-        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
-        owner.io.random(&entropy);
-        self.client = std.crypto.tls.Client.init(&self.input.interface, &self.output.interface, .{
-            .host = .{ .explicit = at.host },
-            .ca = .{ .bundle = .{
-                .gpa = owner.gpa,
-                .io = owner.io,
-                .lock = &owner.ca_lock,
-                .bundle = &owner.ca,
-            } },
-            .read_buffer = plain_in,
-            .write_buffer = plain_out,
-            .entropy = &entropy,
-            .realtime_now = std.Io.Clock.real.now(owner.io),
-            // HTTP says how long its body is, and WebSocket how long its
-            // frames are, so a cut-off reply is caught above this.
-            .allow_truncation_attacks = true,
-        }) catch |err| switch (err) {
-            error.ReadFailed => return self.input.failure(),
-            error.WriteFailed => return self.output.err orelse error.WriteFailed,
-            else => |e| return e,
-        };
-    }
-
-    fn close(self: *Tls, owner: *Client) void {
-        self.stream.close(owner.io);
-        owner.gpa.free(self.buffers);
-    }
-
-    /// Send what has been written, waiting a bounded time for room.
-    fn flush(self: *Tls) !void {
-        try self.client.writer.flush();
-        try bounded_connect.waitWritable(self.stream.socket.handle, send_timeout_ms);
-        self.output.interface.flush() catch return self.output.err orelse error.WriteFailed;
-    }
-
-    fn isTo(self: *const Tls, at: spotify.HostPort) bool {
-        return self.port == at.port and std.mem.eql(u8, self.host[0..self.host_len], at.host);
-    }
-
-    /// Whether the socket has something to read this moment: on a connection
-    /// with no request out, the server closing it.
-    fn readableNow(self: *Tls) bool {
-        var fds = [_]std.posix.pollfd{.{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        const ready = std.posix.poll(&fds, 0) catch return true;
-        return ready > 0;
-    }
-
-    /// Whether a read can go ahead without waiting for the network.
-    fn hasBuffered(self: *Tls) bool {
-        return self.client.reader.bufferedLen() > 0 or self.input.interface.bufferedLen() > 0;
-    }
-
-    /// Why a read failed: the socket's reason if it had one, else TLS's.
-    fn readError(self: *Tls) anyerror {
-        if (self.input.err != null) return self.input.failure();
-        return self.client.read_err orelse error.ReadFailed;
-    }
-
-    fn mapRead(self: *Tls, result: anytype) !@typeInfo(@TypeOf(result)).error_union.payload {
-        return result catch |err| switch (err) {
-            error.ReadFailed => self.readError(),
-            else => |e| e,
-        };
-    }
-};
-
-/// Reads a socket the way `std.Io.net.Stream.Reader` does, but waits for each
-/// read no later than `deadline_ms`, and gives up at once when `stop_fd`
-/// becomes readable.
-const SocketReader = struct {
-    interface: std.Io.Reader,
-    fd: linux.fd_t,
-    stop_fd: linux.fd_t,
-    io: std.Io,
-    deadline_ms: i64,
-    err: ?anyerror = null,
-
-    fn init(fd: linux.fd_t, stop_fd: linux.fd_t, io: std.Io, buffer: []u8, deadline_ms: i64) SocketReader {
-        return .{
-            .interface = .{
-                .vtable = &.{ .stream = stream },
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-            },
-            .fd = fd,
-            .stop_fd = stop_fd,
-            .io = io,
-            .deadline_ms = deadline_ms,
-        };
-    }
-
-    fn failure(self: *const SocketReader) anyerror {
-        return self.err orelse error.ReadFailed;
-    }
-
-    /// Wait until the socket has something to read: true when it has, false
-    /// at `deadline_ms`.
-    fn waitUntil(self: *SocketReader, deadline_ms: i64) Error!bool {
-        const left = deadline_ms - nowMs(self.io);
-        if (left <= 0) return false;
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        };
-        const ready = std.posix.poll(&fds, @intCast(@min(left, std.math.maxInt(i32)))) catch return error.Timeout;
-        if (fds[1].revents != 0) return error.Stopped;
-        // A hangup or an error is readable too: the read says which.
-        return ready > 0;
-    }
-
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *SocketReader = @alignCast(@fieldParentPtr("interface", r));
-        const dest = limit.slice(try w.writableSliceGreedy(1));
-        const readable = self.waitUntil(self.deadline_ms) catch |err| {
-            self.err = err;
-            return error.ReadFailed;
-        };
-        if (!readable) {
-            self.err = error.Timeout;
-            return error.ReadFailed;
-        }
-        const n = std.posix.read(self.fd, dest) catch |err| {
-            self.err = err;
-            return error.ReadFailed;
-        };
-        if (n == 0) return error.EndOfStream;
-        w.advance(n);
-        return n;
-    }
-};
-
 /// The dealer's WebSocket.
 const Dealer = struct {
-    conn: Tls,
+    conn: https.Tls,
     receiver: websocket.Receiver,
     storage: []u8,
     /// Monotonic milliseconds of the last message in, of any kind.
@@ -1043,8 +725,8 @@ const Dealer = struct {
     };
 
     fn open(self: *Dealer, owner: *Client, at: spotify.HostPort, token: []const u8) !void {
-        try self.conn.open(owner, at, nowMs(owner.io) + handshake_timeout_ms);
-        errdefer self.conn.close(owner);
+        try self.conn.open(&owner.https, at.host, at.port, nowMs(owner.io) + handshake_timeout_ms);
+        errdefer self.conn.close(&owner.https);
 
         var random: [16]u8 = undefined;
         owner.io.random(&random);
@@ -1079,7 +761,7 @@ const Dealer = struct {
 
     fn close(self: *Dealer, owner: *Client) void {
         owner.gpa.free(self.storage);
-        self.conn.close(owner);
+        self.conn.close(&owner.https);
     }
 
     fn send(self: *Dealer, owner: *Client, opcode: websocket.Opcode, payload: []const u8) !void {

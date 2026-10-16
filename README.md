@@ -18,6 +18,8 @@ A lightweight system monitor for Raspberry Pi with Waveshare e-Paper display, wr
   served beside the optional panel preview.
 - **Spotify**: While something plays on a Spotify account, the panel shows its
   cover, artist, title and progress, pushed to it as playback changes.
+- **Kodi**: The same for what Kodi plays: a film's or a series' poster, a
+  song's cover, and progress, as Kodi says playback changes.
 - **Standalone**: Statically linked binary (using musl), easy to deploy on any distro.
 
 ## Screenshots
@@ -48,6 +50,11 @@ Frames from the daemon's own renderer, at the panel's 296×128 pixels.
 |:-------:|:---------------:|
 | ![Spotify](assets/sys-ink_music.png) | ![Linking Spotify](assets/sys-ink_pairing.png) |
 | While something plays: its cover in four greys, the artist, the title and the time played | Once, to link the panel to an account |
+
+| Kodi | Live Stream |
+|:----:|:-----------:|
+| ![Kodi](assets/sys-ink_kodi.png) | ![Live stream](assets/sys-ink_live.png) |
+| An episode beside its series' poster, by season and number | No length, so no bar: the time watched, and `LIVE` |
 
 | Loading Screen | Sleep Screen |
 |:--------------:|:------------:|
@@ -194,14 +201,19 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
   folding its text to what the fonts can draw, deciding when one goes up and
   comes down, and receiving it through the named pipe. MQTT notices arrive through `src/mqtt.zig`, HTTP ones through
   `src/web_preview.zig`.
-- `src/now_playing.zig`: what Spotify plays, and when the music screen goes
-  up, is redrawn and comes down (unit tested).
+- `src/now_playing.zig`: what Spotify or Kodi plays, and when the music
+  screen goes up, is redrawn and comes down (unit tested).
 - `src/spotify.zig`: what is sent to Spotify and what is made of its replies,
   free of I/O (unit tested); `src/spotify_client.zig`: the connection itself,
   on a task of its own.
+- `src/kodi.zig`: what is asked of Kodi and what is made of its replies, free
+  of I/O (unit tested); `src/kodi_client.zig`: the connection itself, on a
+  task of its own.
+- `src/https_client.zig`: HTTPS requests with every wait bounded, for both
+  clients.
 - `src/websocket.zig`: the client's half of WebSocket, free of I/O (unit tested).
-- `src/jpeg.zig`: baseline JPEG decoded to its luminance, for covers (unit
-  tested against libjpeg).
+- `src/jpeg.zig`: baseline and progressive JPEG decoded to its luminance, for
+  covers and posters (unit tested against libjpeg).
 - `src/bmp.zig`: BMP export for headless preview.
 - `src/config.zig`, `src/logger.zig`: Configuration and logging. The
   configuration is read from the environment once, into a value that `main`
@@ -834,15 +846,50 @@ the grey away. The preview and the BMP export show the four greys too: they
 are four-bit BMPs, with a palette of black, the two greys and white, about
 19 kB a frame.
 
-The cover is decoded on the device, and only
-covers in baseline JPEG, which is what Spotify serves, are drawn; a cover that
-cannot be fetched or decoded leaves an empty frame in its place. Titles and
-artists are drawn as notices are: Latin with its diacritics as written, other
-scripts as `?`.
+The cover is decoded on the device, and only JPEG is drawn, baseline or
+progressive; a cover that cannot be fetched or decoded leaves an empty frame
+in its place. Titles and artists are drawn as notices are: Latin with its
+diacritics as written, other scripts as `?`.
 
 The service unit of the `.deb` gives the state file its directory with
 `StateDirectory=sys-ink`, readable by root alone. Without it, the daemon makes
 the directory itself.
+
+### Kodi
+
+With `KODI_ENABLED=true` and `KODI_HOST` set, the panel shows what plays on
+that Kodi as it shows what Spotify plays: a song with its cover, artist and
+title; an episode with its series' poster, the series with its season and
+number (`Young Sherlock S01E06`) and the episode's title; a film with its
+poster and its year. A live stream, which has no length, has no bar: the time
+it has been watched, and `LIVE` where the length goes.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KODI_ENABLED` | `false` | Show what plays on the Kodi at `KODI_HOST`. Without `KODI_HOST` it stays off, and the log says so |
+| `KODI_HOST` | | Where Kodi runs: a name or an address |
+| `KODI_PORT` | `9090` | Kodi's JSON-RPC port |
+
+`SPOTIFY_PAUSE_HOLD` and `SPOTIFY_INTERVAL` hold for what Kodi plays too.
+
+**Kodi's side.** In Kodi, under *Settings → Services → Control*, turn on
+*Allow remote control from applications on other systems*. That opens the
+JSON-RPC port, 9090, which asks for no password; sys-ink asks nothing else of
+Kodi. Kodi listens only while it runs: on a TV that is off, or with Kodi
+closed, there is nothing to connect to, which the log says once, and sys-ink
+looks for it again every half a minute or sooner.
+
+**How it works.** Kodi says the moment playback starts, pauses, seeks or
+stops, and sys-ink then asks it what plays, by the labels its skin shows, and
+how far in. Nothing is polled, and the time played is counted on by the panel
+between changes. The picture is fetched from where Kodi says it is, over
+HTTPS: posters and covers that add-ons and scrapers take from the web. Those
+Kodi keeps on the box or a share are behind its web server's password, and
+are left out, as are pictures in other formats than JPEG, such as WebP.
+
+**Spotify and Kodi both.** What plays is shown over what is paused, and of
+the two playing at once, the one that started last. Each pause holds the
+screen for `SPOTIFY_PAUSE_HOLD` seconds, as one on Spotify alone does.
 
 ### Logging and export
 
@@ -955,6 +1002,11 @@ how, and what to check if your entity IDs differ.
 - `seteuid ... Operation not permitted` in that line means the service was started without `CAP_SETUID`. Remove `User=root` from the unit; see [Systemd Service](#systemd-service-manual-install-only).
 - `sudo apt update` in a shell proves nothing about it: the shell has the capability the service lacks.
 - A daemon that is not root, or has no way out to the internet, does not run `apt update` at all, and counts from the lists that are there.
+
+### The panel does not show what Kodi plays
+- `Ignoring KODI_ENABLED=true: expected false while KODI_HOST is not set` at startup: set `KODI_HOST`.
+- `Kodi at <host>:9090: ConnectFailed` means nothing takes the connection there: Kodi is not running, or *Allow remote control from applications on other systems* is off in its *Settings → Services → Control*. `Timeout` means nothing answers at all: the TV is off, or its address has changed; give it a fixed one in the router. The line comes once; sys-ink goes on looking, and says `Kodi: connected` when it finds it.
+- A title with an empty frame where the picture goes: `cannot decode the picture from <host>: NotJpeg` means the picture is in another format than JPEG, as a live stream's thumbnail often is (WebP). With `LOG_LEVEL=DEBUG`, `a picture not on the web over HTTPS is left out` means Kodi keeps it on the box or a share, behind its web server's password.
 
 ## Changelog
 

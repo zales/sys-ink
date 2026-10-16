@@ -358,13 +358,15 @@ pub const Renderer = struct {
     fn drawTrack(self: *Self, t: now_playing.TrackView) void {
         const b = &self.music;
         const m = layout.music;
+        const picture = t.shape.rect();
+        const c = m.column(picture);
 
         if (t.cover) |cover| {
             // In the panel's four greys; see `panelGrayPlanes`.
-            b.drawDithered(m.cover.x, m.cover.y, m.cover.width, m.cover.height, cover, .four);
+            b.drawDithered(picture.x, picture.y, picture.width, picture.height, cover[0..t.shape.len()], .four);
             self.music_gray = true;
         } else {
-            b.drawRect(m.cover.x, m.cover.y, m.cover.width, m.cover.height, .black);
+            b.drawRect(picture.x, picture.y, picture.width, picture.height, .black);
         }
 
         // Both cut to fit, as the font draws them.
@@ -374,37 +376,41 @@ pub const Renderer = struct {
         var artist_line: [1][]const u8 = undefined;
         const artist = notice_text.foldToFont(&folded_buf, t.artist);
         const artist_height = b.getLineHeight(m.artist_font);
-        const fitted_artist = fitText(b, artist, &.{m.artist_font}, m.width, artist_height, &artist_line, &last_buf);
-        if (fitted_artist.count > 0) b.drawTextFont(m.artist_at.x, m.artist_at.y, artist_line[0], m.artist_font, .black);
+        const fitted_artist = fitText(b, artist, &.{m.artist_font}, c.width, artist_height, &artist_line, &last_buf);
+        if (fitted_artist.count > 0) b.drawTextFont(c.artist_at.x, c.artist_at.y, artist_line[0], m.artist_font, .black);
 
         var title_lines: [m.max_title_lines][]const u8 = undefined;
         const folded_title = notice_text.foldToFont(&folded_buf, t.title);
         // Nothing known of what plays: a dash, as an empty slot has.
         const title = if (folded_title.len > 0) folded_title else "-";
-        const fitted = fitText(b, title, &m.title_fonts, m.title.width, m.title.height, &title_lines, &last_buf);
-        var baseline = m.title.y + Bitmap.fontAscent(fitted.font);
+        const fitted = fitText(b, title, &m.title_fonts, c.title.width, c.title.height, &title_lines, &last_buf);
+        var baseline = c.title.y + Bitmap.fontAscent(fitted.font);
         for (title_lines[0..fitted.count]) |line| {
-            b.drawTextFont(m.title.x, baseline, line, fitted.font, .black);
+            b.drawTextFont(c.title.x, baseline, line, fitted.font, .black);
             baseline += @intCast(b.getLineHeight(fitted.font));
         }
 
-        const bar = m.bar;
-        b.drawRect(bar.x, bar.y, bar.width, bar.height, .black);
-        const inner = bar.width - 4;
-        const filled: u32 = if (t.duration_s == 0) 0 else @intCast(@min(
-            inner,
-            @as(u64, inner) * t.elapsed_s / t.duration_s,
-        ));
-        b.fillRect(bar.x + 2, bar.y + 2, filled, bar.height - 4, .black);
+        // A live stream has no length to measure progress against: how long
+        // it has been watched, and the live mark where the length goes.
+        if (!t.live) {
+            const bar = c.bar;
+            b.drawRect(bar.x, bar.y, bar.width, bar.height, .black);
+            const inner = bar.width - 4;
+            const filled: u32 = if (t.duration_s == 0) 0 else @intCast(@min(
+                inner,
+                @as(u64, inner) * t.elapsed_s / t.duration_s,
+            ));
+            b.fillRect(bar.x + 2, bar.y + 2, filled, bar.height - 4, .black);
+        }
 
         var time_buf: [16]u8 = undefined;
-        b.drawTextFont(m.left, m.time_baseline, now_playing.formatTime(&time_buf, t.elapsed_s), m.time_font, .black);
-        const total = now_playing.formatTime(&time_buf, t.duration_s);
+        b.drawTextFont(c.left, m.time_baseline, now_playing.formatTime(&time_buf, t.elapsed_s), m.time_font, .black);
+        const total = if (t.live) m.live_label else now_playing.formatTime(&time_buf, t.duration_s);
         const total_x = m.right - @as(i32, @intCast(b.measureText(total, m.time_font)));
         b.drawTextFont(total_x, m.time_baseline, total, m.time_font, .black);
 
         if (!t.playing) {
-            const mark = m.pause_mark;
+            const mark = c.pause_mark;
             const stroke = mark.width / 3;
             b.fillRect(mark.x, mark.y, stroke, mark.height, .black);
             b.fillRect(mark.x + @as(i32, @intCast(mark.width - stroke)), mark.y, stroke, mark.height, .black);
@@ -1496,9 +1502,12 @@ test "a hardware fault takes the music screen down for the dashboard that shows 
     try testing.expectEqualSlices(u8, faulted_dashboard, r.packedFrame());
 }
 
+/// The text beside a cover, which is what most of these draw.
+const beside_cover = layout.music.column(layout.music.cover);
+
 /// Black pixels on the progress bar's middle row, inside its outline.
 fn barFill(r: *Renderer) u32 {
-    const bar = layout.music.bar;
+    const bar = beside_cover.bar;
     const y: usize = @intCast(bar.y + @as(i32, @intCast(bar.height / 2)));
     var filled: u32 = 0;
     for (0..bar.width - 4) |i| {
@@ -1511,7 +1520,7 @@ fn barFill(r: *Renderer) u32 {
 test "the progress bar fills as the track plays" {
     var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
-    const inner = layout.music.bar.width - 4;
+    const inner = beside_cover.bar.width - 4;
 
     r.showMusic(trackView("Jednou", 0, 200, true));
     try testing.expectEqual(@as(u32, 0), barFill(&r));
@@ -1527,7 +1536,7 @@ test "the progress bar fills as the track plays" {
 test "a pause is marked, and only while paused" {
     var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
-    const mark = layout.music.pause_mark;
+    const mark = beside_cover.pause_mark;
 
     r.showMusic(trackView("Jednou", 60, 232, false));
     const at = @as(usize, @intCast(mark.y)) * r.music.stride + @as(usize, @intCast(mark.x));
@@ -1547,12 +1556,13 @@ test "a title too long for its box ends in an ellipsis inside it" {
     };
     var lines: [m.max_title_lines][]const u8 = undefined;
     var last_buf: [now_playing.max_text + 3]u8 = undefined;
-    const fitted = Renderer.fitText(&r.music, long, &m.title_fonts, m.title.width, m.title.height, &lines, &last_buf);
+    const title = beside_cover.title;
+    const fitted = Renderer.fitText(&r.music, long, &m.title_fonts, title.width, title.height, &lines, &last_buf);
 
     try testing.expectEqual(FontType.ubuntu14, fitted.font);
     try testing.expect(std.mem.endsWith(u8, lines[fitted.count - 1], "..."));
-    for (lines[0..fitted.count]) |line| try testing.expect(r.music.measureText(line, fitted.font) <= m.title.width);
-    try testing.expect(fitted.count * r.music.getLineHeight(fitted.font) <= m.title.height);
+    for (lines[0..fitted.count]) |line| try testing.expect(r.music.measureText(line, fitted.font) <= title.width);
+    try testing.expect(fitted.count * r.music.getLineHeight(fitted.font) <= title.height);
 }
 
 test "text for a box too short for a single line is not drawn, rather than crash" {
@@ -1562,6 +1572,47 @@ test "text for a box too short for a single line is not drawn, rather than crash
     var last_buf: [64]u8 = undefined;
     const fitted = Renderer.fitText(&r.music, "anything at all", &.{.ubuntu14}, 100, 10, &lines, &last_buf);
     try testing.expectEqual(@as(usize, 0), fitted.count);
+}
+
+test "a live stream has no progress bar, and says so where the length goes" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    var live = trackView("Stream", 600, 0, true);
+    live.track.live = true;
+    r.showMusic(live);
+    // Nothing where the bar's outline would be.
+    const bar = beside_cover.bar;
+    const top = @as(usize, @intCast(bar.y)) * r.music.stride;
+    for (0..bar.width) |i| {
+        try testing.expectEqual(@as(u8, 255), r.music.data[top + @as(usize, @intCast(bar.x)) + i]);
+    }
+
+    var expected = try Renderer.init(testing.allocator, .{});
+    defer expected.deinit();
+    expected.showMusic(trackView("Stream", 600, 0, true));
+    try testing.expect(!std.mem.eql(u8, expected.music.data, r.music.data));
+}
+
+test "a poster narrows the picture and widens the text beside it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    const poster: [now_playing.cover_len]u8 = @splat(0);
+    var view = trackView("Film", 60, 6000, true);
+    view.track.cover = &poster;
+    view.track.shape = .poster;
+    r.showMusic(view);
+
+    const p = layout.music.poster;
+    const row = 64 * r.music.stride;
+    // Black to the poster's last column, white past it, and the bar starts
+    // where a poster's column does.
+    try testing.expectEqual(@as(u8, 0), r.music.data[row + p.width - 1]);
+    try testing.expectEqual(@as(u8, 255), r.music.data[row + p.width + 1]);
+    const bar = layout.music.column(p).bar;
+    try testing.expect(bar.x < beside_cover.bar.x);
+    try testing.expectEqual(@as(u8, 0), r.music.data[@as(usize, @intCast(bar.y)) * r.music.stride + @as(usize, @intCast(bar.x))]);
 }
 
 test "the pairing screen shows the code" {

@@ -377,28 +377,51 @@ pub const notice = struct {
 /// The music screen: the cover down the left, and beside it who, what, and
 /// how far into it.
 pub const music = struct {
-    /// Square, the height of the panel.
+    /// An album's cover: square, the height of the panel.
     pub const cover: Rect = .{ .x = 0, .y = 0, .width = display_height, .height = display_height };
-    /// The text runs from here to `right`.
-    pub const left = cover.right() + 8;
+    /// A film's or a series' poster: two by three, the height of the panel.
+    pub const poster: Rect = .{ .x = 0, .y = 0, .width = display_height * 2 / 3, .height = display_height };
+    /// The text runs from beside the picture to here.
     pub const right = display_width - 3;
-    pub const width: u32 = right - left;
 
-    pub const artist_at: Point = .{ .x = left, .y = 14 };
     pub const artist_font: FontType = .ubuntu14;
-    /// The title, top-aligned in the largest of `title_fonts` that holds it.
-    pub const title: Rect = .{ .x = left, .y = 20, .width = width, .height = 74 };
     pub const title_fonts = [_]FontType{ .ubuntu24, .ubuntu20, .ubuntu14 };
-    /// Four lines of the smallest is as many as `title` holds.
+    /// Four lines of the smallest is as many as a column's `title` holds.
     pub const max_title_lines = 4;
-
-    /// The progress bar: an outline, filled from the left as the track plays.
-    pub const bar: Rect = .{ .x = left, .y = 99, .width = width, .height = 9 };
-    /// Time played at the left end, the length at the right.
+    /// Time played at the left end of a column, the length at the right.
     pub const time_baseline = 126;
     pub const time_font: FontType = .ubuntu14;
-    /// Two upright bars between the times while paused.
-    pub const pause_mark: Rect = .{ .x = left + @as(i32, width / 2) - 4, .y = 114, .width = 9, .height = 11 };
+    /// In place of the length, for what has none: a live stream.
+    pub const live_label = "LIVE";
+
+    /// Where the text goes beside a picture.
+    pub const Column = struct {
+        left: i32,
+        width: u32,
+        artist_at: Point,
+        /// The title, top-aligned in the largest of `title_fonts` that
+        /// holds it.
+        title: Rect,
+        /// The progress bar: an outline, filled from the left as the track
+        /// plays.
+        bar: Rect,
+        /// Two upright bars between the times while paused.
+        pause_mark: Rect,
+    };
+
+    /// The column beside `picture`, which sits at the panel's left edge.
+    pub fn column(picture: Rect) Column {
+        const left = picture.right() + 8;
+        const width: u32 = @intCast(right - left);
+        return .{
+            .left = left,
+            .width = width,
+            .artist_at = .{ .x = left, .y = 14 },
+            .title = .{ .x = left, .y = 20, .width = width, .height = 74 },
+            .bar = .{ .x = left, .y = 99, .width = width, .height = 9 },
+            .pause_mark = .{ .x = left + @as(i32, @intCast(width / 2)) - 4, .y = 114, .width = 9, .height = 11 },
+        };
+    }
 };
 
 /// The screen that asks for the code linking the panel to Spotify: where to
@@ -696,25 +719,40 @@ test "the music screen's title box holds as many lines of the smallest font as i
     defer bmp.deinit();
 
     const smallest = music.title_fonts[music.title_fonts.len - 1];
-    try testing.expectEqual(@as(u32, music.max_title_lines), music.title.height / bmp.getLineHeight(smallest));
+    for ([_]Rect{ music.cover, music.poster }) |picture| {
+        const title = music.column(picture).title;
+        try testing.expectEqual(@as(u32, music.max_title_lines), title.height / bmp.getLineHeight(smallest));
+    }
 }
 
-test "everything on the music screen stays on the panel, right of the cover, one part above the next" {
+test "everything on the music screen stays on the panel, right of the picture, one part above the next" {
     var bmp = try Bitmap.init(testing.allocator, 4, 4);
     defer bmp.deinit();
 
     const m = music;
-    try testing.expect(m.cover.right() <= m.left);
     try testing.expect(m.right <= display_width);
-    // The artist's line ends above the title, the title above the bar, and
-    // the bar above the times and the pause mark.
-    const below_baseline = @as(i32, @intCast(bmp.getLineHeight(m.artist_font))) - Bitmap.fontAscent(m.artist_font);
-    try testing.expect(m.artist_at.y + below_baseline <= m.title.y);
-    try testing.expect(m.title.bottom() <= m.bar.y);
-    try testing.expect(m.bar.bottom() < m.time_baseline - Bitmap.fontAscent(m.time_font) + 3);
-    try testing.expect(m.bar.bottom() <= m.pause_mark.y);
-    try testing.expect(m.pause_mark.bottom() <= display_height);
-    try testing.expect(m.time_baseline <= display_height);
+    // A poster has the panel's height, and the shape of one: two by three
+    // to within a pixel.
+    try testing.expectEqual(display_height, m.poster.height);
+    try testing.expect(@abs(@as(i32, @intCast(m.poster.width * 3)) - @as(i32, @intCast(m.poster.height * 2))) < 3);
+
+    for ([_]Rect{ m.cover, m.poster }) |picture| {
+        const c = m.column(picture);
+        try testing.expect(picture.right() <= c.left);
+        // The artist's line ends above the title, the title above the bar,
+        // and the bar above the times and the pause mark.
+        const below_baseline = @as(i32, @intCast(bmp.getLineHeight(m.artist_font))) - Bitmap.fontAscent(m.artist_font);
+        try testing.expect(c.artist_at.y + below_baseline <= c.title.y);
+        try testing.expect(c.title.bottom() <= c.bar.y);
+        try testing.expect(c.bar.bottom() < m.time_baseline - Bitmap.fontAscent(m.time_font) + 3);
+        try testing.expect(c.bar.bottom() <= c.pause_mark.y);
+        try testing.expect(c.pause_mark.bottom() <= display_height);
+        try testing.expect(m.time_baseline <= display_height);
+        // A time as long as a film's on the left and the live mark on the
+        // right each fit their side of the pause mark.
+        try testing.expect(c.left + @as(i32, @intCast(bmp.measureText("2:59:59", m.time_font))) < c.pause_mark.x);
+        try testing.expect(c.pause_mark.right() + @as(i32, @intCast(bmp.measureText(m.live_label, m.time_font))) < m.right);
+    }
 }
 
 test "the pairing screen's lines fit across the panel" {

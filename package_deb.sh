@@ -158,6 +158,14 @@ BMP_EXPORT_PATH=/tmp/sys-ink.bmp
 #SPOTIFY_PAUSE_HOLD=30
 #SPOTIFY_INTERVAL=5
 
+# --- Kodi ---------------------------------------------------------------
+# Show what plays on a Kodi, which needs "Allow remote control from
+# applications on other systems" on in its Settings > Services > Control.
+# The two settings above hold for it too.
+#KODI_ENABLED=false
+#KODI_HOST=
+#KODI_PORT=9090
+
 # --- MQTT / Home Assistant ----------------------------------------------
 #MQTT_ENABLED=true
 #MQTT_HOST=192.168.1.100

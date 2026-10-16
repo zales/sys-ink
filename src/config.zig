@@ -426,11 +426,20 @@ pub const Config = struct {
     /// Where the link to the Spotify account is kept between runs. It holds
     /// a refresh token, so it is written readable by its owner alone.
     spotify_state_file: []const u8 = "/var/lib/sys-ink/spotify.json",
-    /// How long the music screen stays up once playback pauses, in seconds.
+    /// How long the music screen stays up once playback pauses, in seconds,
+    /// whoever plays: Spotify or Kodi.
     spotify_pause_hold: u32 = 30,
     /// Seconds between redraws of the music screen while it plays, which move
     /// its progress bar. Each is a partial refresh of the panel.
     spotify_interval: u32 = 5,
+
+    /// Show what Kodi plays. See `kodi_client.zig`. Taken as off while
+    /// `kodi_host` is empty: there is nowhere to look for it.
+    kodi_enabled: bool = false,
+    /// Where Kodi runs: a name or an address.
+    kodi_host: []const u8 = "",
+    /// Kodi's JSON-RPC port, which asks for no password.
+    kodi_port: u16 = 9090,
 
     /// The settings `map` gives, over the defaults above. Strings are borrowed
     /// from `map`, which must outlive the result.
@@ -478,7 +487,21 @@ pub const Config = struct {
             .spotify_state_file = env.string("SPOTIFY_STATE_FILE", defaults.spotify_state_file),
             .spotify_pause_hold = env.int(u32, "SPOTIFY_PAUSE_HOLD", defaults.spotify_pause_hold, 0),
             .spotify_interval = env.int(u32, "SPOTIFY_INTERVAL", defaults.spotify_interval, 1),
+
+            .kodi_enabled = kodiEnabled(env, defaults.kodi_enabled),
+            .kodi_host = env.string("KODI_HOST", defaults.kodi_host),
+            .kodi_port = env.int(u16, "KODI_PORT", defaults.kodi_port, 1),
         };
+    }
+
+    fn kodiEnabled(env: Env, default: bool) bool {
+        const enabled = env.boolean("KODI_ENABLED", default);
+        if (enabled and env.get("KODI_HOST") == null) {
+            const shown: []const u8 = env.get("KODI_ENABLED") orelse "";
+            env.report.reject("KODI_ENABLED", shown, "false while KODI_HOST is not set", "{s}", .{"false"});
+            return false;
+        }
+        return enabled;
     }
 
     fn logLevel(env: Env, default: LogLevel) LogLevel {
@@ -653,6 +676,34 @@ test "Spotify stays off unless asked for, and its settings are read when given" 
     try testing.expectEqual(@as(u32, 1), cfg.spotify_interval);
     try testing.expectEqual(@as(usize, 1), report.rejected().len);
     try testing.expect(rejectionOf(&report, "SPOTIFY_INTERVAL") != null);
+}
+
+test "Kodi stays off unless asked for and told where it is" {
+    var off = try envOf(&.{});
+    defer off.deinit();
+    var report: Report = .{};
+    const defaults = Config.fromEnv(&off, &report);
+    try testing.expect(!defaults.kodi_enabled);
+    try testing.expectEqual(@as(u16, 9090), defaults.kodi_port);
+
+    var nowhere = try envOf(&.{.{ "KODI_ENABLED", "true" }});
+    defer nowhere.deinit();
+    report = .{};
+    try testing.expect(!Config.fromEnv(&nowhere, &report).kodi_enabled);
+    try testing.expect(rejectionOf(&report, "KODI_ENABLED") != null);
+
+    var map = try envOf(&.{
+        .{ "KODI_ENABLED", "yes" },
+        .{ "KODI_HOST", "192.168.1.113" },
+        .{ "KODI_PORT", "9091" },
+    });
+    defer map.deinit();
+    report = .{};
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expect(cfg.kodi_enabled);
+    try testing.expectEqualStrings("192.168.1.113", cfg.kodi_host);
+    try testing.expectEqual(@as(u16, 9091), cfg.kodi_port);
+    try testing.expectEqual(@as(usize, 0), report.rejected().len);
 }
 
 test "a number that is not one keeps the default, and says so" {

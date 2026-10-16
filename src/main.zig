@@ -20,6 +20,7 @@ const MqttClient = @import("mqtt.zig").MqttClient;
 const MqttConfig = @import("mqtt.zig").MqttConfig;
 const NoticeFifo = @import("notice_fifo.zig").Fifo;
 const SpotifyClient = @import("spotify_client.zig").Client;
+const KodiClient = @import("kodi_client.zig").Client;
 const now_playing = @import("now_playing.zig");
 
 const log = std.log.scoped(.main);
@@ -145,7 +146,7 @@ pub fn main(init: std.process.Init) !u8 {
         .notify_duration = cfg.notify_duration,
         .bmp_export_path = if (cfg.export_bmp) cfg.bmp_export_path else null,
         .may_update_package_lists = isRoot(),
-        .music = if (cfg.spotify_enabled) .{
+        .music = if (cfg.spotify_enabled or cfg.kodi_enabled) .{
             .hold_paused = cfg.spotify_pause_hold,
             .tick = cfg.spotify_interval,
         } else null,
@@ -235,9 +236,21 @@ pub fn main(init: std.process.Init) !u8 {
         client.start();
         log.info("Showing what Spotify plays", .{});
     }
-    // Where what the client hands over is put: too large for the loop's stack
+    var kodi_client: ?KodiClient = null;
+    if (cfg.kodi_enabled) {
+        kodi_client = KodiClient.init(io, allocator, .{ .host = cfg.kodi_host, .port = cfg.kodi_port }) catch |err| blk: {
+            log.err("Kodi disabled: {t}", .{err});
+            break :blk null;
+        };
+    }
+    defer if (kodi_client) |*client| client.deinit();
+    if (kodi_client) |*client| {
+        client.start();
+        log.info("Showing what Kodi at {s}:{d} plays", .{ cfg.kodi_host, cfg.kodi_port });
+    }
+    // Where what a client hands over is put: too large for the loop's stack
     // frame to want a copy of its own.
-    var spotify_snapshot: now_playing.Snapshot = .{};
+    var music_snapshot: now_playing.Snapshot = .{};
 
     // Only now that the first frame is up; see `scheduleDisplay`.
     try daemon.scheduleDisplay(&scheduler, fast);
@@ -246,7 +259,11 @@ pub fn main(init: std.process.Init) !u8 {
     runLoop(io, &scheduler, &daemon, .{
         .pipe = if (notice_fifo) |*f| f else null,
         .preview = if (preview) |*p| p else null,
-    }, if (spotify_client) |*client| .{ .client = client, .snapshot = &spotify_snapshot } else null);
+    }, .{
+        .spotify = if (spotify_client) |*client| client else null,
+        .kodi = if (kodi_client) |*client| client else null,
+        .snapshot = &music_snapshot,
+    });
 
     log.info("Shutting down gracefully", .{});
     daemon.showSleepScreen();
@@ -293,9 +310,10 @@ const NoticeSources = struct {
     preview: ?*WebPreview,
 };
 
-/// The Spotify client, and where what it hands over is put.
-const MusicSource = struct {
-    client: *SpotifyClient,
+/// The clients of what plays, and where what they hand over is put.
+const MusicSources = struct {
+    spotify: ?*SpotifyClient,
+    kodi: ?*KodiClient,
     snapshot: *now_playing.Snapshot,
 };
 
@@ -309,9 +327,9 @@ const failed_wait_pause_ms = 1000;
 /// once per second, while a signal still stops it immediately. It watches the
 /// notice pipe, the MQTT connection and the API's mailbox as well, so a notice
 /// goes up the moment it arrives, and wakes for the one on show to come down on
-/// time, or for one that had to wait its turn to go up. The Spotify client's
-/// mailbox likewise, and the music screen's next redraw.
-fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSources, music: ?MusicSource) void {
+/// time, or for one that had to wait its turn to go up. The mailboxes of the
+/// clients of Spotify and Kodi likewise, and the music screen's next redraw.
+fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSources, music: MusicSources) void {
     const max_sleep_seconds = 3600;
     const have_pipe = wake_pipe[0] >= 0;
     // So that a wait which keeps failing is reported when it starts and when
@@ -334,7 +352,7 @@ fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSourc
         if (!have_pipe) seconds = @min(seconds, 1);
 
         // With nothing to watch, poll on zero descriptors degrades to a plain sleep.
-        var fds: [5]std.posix.pollfd = undefined;
+        var fds: [6]std.posix.pollfd = undefined;
         var watched: usize = 0;
         if (have_pipe) {
             fds[watched] = .{ .fd = wake_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
@@ -360,9 +378,14 @@ fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSourc
             watched += 1;
         }
 
-        const music_slot = watched;
-        if (music) |m| {
-            fds[watched] = .{ .fd = m.client.readyFd(), .events = std.posix.POLL.IN, .revents = 0 };
+        const spotify_slot = watched;
+        if (music.spotify) |client| {
+            fds[watched] = .{ .fd = client.readyFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            watched += 1;
+        }
+        const kodi_slot = watched;
+        if (music.kodi) |client| {
+            fds[watched] = .{ .fd = client.readyFd(), .events = std.posix.POLL.IN, .revents = 0 };
             watched += 1;
         }
 
@@ -396,9 +419,14 @@ fn runLoop(io: std.Io, scheduler: *Scheduler, daemon: *App, sources: NoticeSourc
             var buf: [api.max_notice_body]u8 = undefined;
             if (sources.preview.?.takeNotice(&buf)) |raw| daemon.applyNotice(raw);
         }
-        if (music) |m| {
-            if (fds[music_slot].revents & std.posix.POLL.IN != 0 and m.client.take(m.snapshot)) {
-                daemon.applySpotify(m.snapshot);
+        if (music.spotify) |client| {
+            if (fds[spotify_slot].revents & std.posix.POLL.IN != 0 and client.take(music.snapshot)) {
+                daemon.applyMusic(.spotify, music.snapshot);
+            }
+        }
+        if (music.kodi) |client| {
+            if (fds[kodi_slot].revents & std.posix.POLL.IN != 0 and client.take(music.snapshot)) {
+                daemon.applyMusic(.kodi, music.snapshot);
             }
         }
     }
