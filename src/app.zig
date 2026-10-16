@@ -1294,7 +1294,7 @@ test "every display update hands the frame on, with the readings it was drawn fr
     bench.app.updateDisplayAt(10);
 
     try testing.expectEqual(@as(u32, 1), collector.frames);
-    try testing.expectEqual(@as(usize, @divCeil(layout.display_width, 8) * layout.display_height), collector.last_len);
+    try testing.expectEqual(@import("bmp.zig").packedLen(layout.display_width, layout.display_height), collector.last_len);
     try testing.expectEqual(@as(?u8, 50), collector.last_cpu_load);
 
     // On request too, which is how a preview that has just started gets its

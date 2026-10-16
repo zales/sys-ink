@@ -6,7 +6,19 @@ const log = std.log.scoped(.bmp);
 /// wide, well beyond any panel this drives.
 const max_stride = 512;
 
-pub const header_len = 62;
+/// File header, BITMAPINFOHEADER, and a palette of the four greys.
+pub const header_len = 14 + 40 + 4 * 4;
+
+/// What every BMP here is made from: the frame the right way up, row by row,
+/// four pixels a byte, the first in the top two bits, each a grey from 0 for
+/// black to 3 for white. The panel's four, as `Shades.four` draws them.
+pub fn packedRowBytes(width: u32) u32 {
+    return @divCeil(width, 4);
+}
+
+pub fn packedLen(width: u32, height: u32) usize {
+    return @as(usize, packedRowBytes(width)) * height;
+}
 
 pub const BmpExporter = struct {
     last_hash: ?u64 = null,
@@ -15,9 +27,8 @@ pub const BmpExporter = struct {
         return .{};
     }
 
-    /// Export a 1-bit buffer to a BMP file.
+    /// Export a packed frame (see `packedRowBytes`) to a BMP file.
     ///
-    /// `buffer` is row-major, 8 pixels per byte, MSB first, 1 = white.
     /// Writes are skipped when the buffer is byte-identical to the last export.
     pub fn save(self: *BmpExporter, io: std.Io, buffer: []const u8, width: u32, height: u32, path: []const u8) !void {
         const hash = std.hash.Wyhash.hash(0, buffer);
@@ -75,7 +86,9 @@ fn replaceFile(io: std.Io, path: []const u8, buffer: []const u8, width: u32, hei
     try atomic.replace(io);
 }
 
-/// Build the 62-byte BITMAPINFOHEADER BMP header for a 1-bit image.
+/// The BMP header for a four-bit image whose palette is the four greys, in
+/// the packed frame's order: index 0 black, 3 white. Four bits rather than
+/// two, which BMP has no place for; a nibble a pixel.
 pub fn buildHeader(width: u32, height: u32) [header_len]u8 {
     const stride = rowStride(width);
     const image_size = stride * height;
@@ -94,54 +107,57 @@ pub fn buildHeader(width: u32, height: u32) [header_len]u8 {
     std.mem.writeInt(i32, h[18..22], @intCast(width), .little);
     std.mem.writeInt(i32, h[22..26], -@as(i32, @intCast(height)), .little); // negative = top-down
     std.mem.writeInt(u16, h[26..28], 1, .little); // planes
-    std.mem.writeInt(u16, h[28..30], 1, .little); // bits per pixel
+    std.mem.writeInt(u16, h[28..30], 4, .little); // bits per pixel
     std.mem.writeInt(u32, h[30..34], 0, .little); // BI_RGB, no compression
     std.mem.writeInt(u32, h[34..38], image_size, .little);
     std.mem.writeInt(i32, h[38..42], 2835, .little); // ~72 DPI
     std.mem.writeInt(i32, h[42..46], 2835, .little);
-    std.mem.writeInt(u32, h[46..50], 2, .little); // palette entries used
-    std.mem.writeInt(u32, h[50..54], 2, .little); // palette entries required
+    std.mem.writeInt(u32, h[46..50], 4, .little); // palette entries used
+    std.mem.writeInt(u32, h[50..54], 4, .little); // palette entries required
 
-    // Palette: index 0 = white, index 1 = black (BGRA)
-    h[54] = 255;
-    h[55] = 255;
-    h[56] = 255;
-    // h[57..62] stay zero: alpha of entry 0, then black entry 1
+    // Palette, BGR and a reserved byte: black, the two greys, white.
+    for (0..4) |i| {
+        const level: u8 = @intCast(i * 85);
+        h[54 + 4 * i ..][0..4].* = .{ level, level, level, 0 };
+    }
 
     return h;
 }
 
 /// BMP rows are padded to a 4-byte boundary.
 pub fn rowStride(width: u32) u32 {
-    return @divCeil(width, 32) * 4;
+    return @divCeil(width * 4, 32) * 4;
 }
 
-/// Bytes a serialised 1-bit BMP of these dimensions occupies.
+/// Bytes a serialised BMP of these dimensions occupies.
 pub fn byteSize(width: u32, height: u32) usize {
-    return header_len + rowStride(width) * height;
+    return header_len + @as(usize, rowStride(width)) * height;
 }
 
-/// One BMP row: `buffer` row `y`, inverted, padded out to the full stride.
+/// One BMP row: row `y` of the packed frame `buffer`, a nibble a pixel,
+/// padded out to the full stride.
 ///
-/// The single place that knows the polarity and the padding; the streaming and
+/// The single place that knows the layout and the padding; the streaming and
 /// in-memory writers below differ only in where the row goes.
-fn packRow(row: []u8, buffer: []const u8, y: usize, src_row_bytes: usize) void {
+fn packRow(row: []u8, buffer: []const u8, y: usize, width: u32) void {
     @memset(row, 0);
 
+    const src_row_bytes = packedRowBytes(width);
     const src_offset = y * src_row_bytes;
-    if (src_offset + src_row_bytes <= buffer.len) {
-        // Our buffers use 1 = white; BMP palette index 0 is white, so invert.
-        for (row[0..src_row_bytes], buffer[src_offset..][0..src_row_bytes]) |*dst, src| {
-            dst.* = ~src;
-        }
+    if (src_offset + src_row_bytes > buffer.len) return;
+    const src = buffer[src_offset..][0..src_row_bytes];
+
+    for (0..width) |x| {
+        const gray = (src[x / 4] >> @intCast(6 - 2 * (x % 4))) & 0b11;
+        row[x / 2] |= if (x % 2 == 0) gray << 4 else gray;
     }
 }
 
-/// Serialise a 1-bit buffer as a BMP into `dest`, returning the part written.
+/// Serialise a packed frame (see `packedRowBytes`) as a BMP into `dest`,
+/// returning the part written.
 ///
-/// `buffer` is row-major, 8 pixels per byte, MSB first, 1 = white. Exists so a
-/// caller that wants the bytes — a preview handing them straight to a client —
-/// does not have to write a file and read it back.
+/// Exists so a caller that wants the bytes — a preview handing them straight
+/// to a client — does not have to write a file and read it back.
 pub fn serialize(dest: []u8, buffer: []const u8, width: u32, height: u32) error{ ImageTooWide, NoSpaceLeft }![]u8 {
     const stride = rowStride(width);
     if (stride > max_stride) return error.ImageTooWide;
@@ -151,9 +167,8 @@ pub fn serialize(dest: []u8, buffer: []const u8, width: u32, height: u32) error{
 
     dest[0..header_len].* = buildHeader(width, height);
 
-    const src_row_bytes = @divCeil(width, 8);
     for (0..height) |y| {
-        packRow(dest[header_len + y * stride ..][0..stride], buffer, y, src_row_bytes);
+        packRow(dest[header_len + y * stride ..][0..stride], buffer, y, width);
     }
 
     return dest[0..total];
@@ -162,8 +177,6 @@ pub fn serialize(dest: []u8, buffer: []const u8, width: u32, height: u32) error{
 fn writeBmp(io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, height: u32) !void {
     const stride = rowStride(width);
     if (stride > max_stride) return error.ImageTooWide;
-
-    const src_row_bytes = @divCeil(width, 8);
 
     var write_buf: [4096]u8 = undefined;
     var writer = file.writer(io, &write_buf);
@@ -174,7 +187,7 @@ fn writeBmp(io: std.Io, file: std.Io.File, buffer: []const u8, width: u32, heigh
     // Streamed a row at a time, so the file path needs no image-sized buffer.
     var row: [max_stride]u8 = undefined;
     for (0..height) |y| {
-        packRow(row[0..stride], buffer, y, src_row_bytes);
+        packRow(row[0..stride], buffer, y, width);
         try out.writeAll(row[0..stride]);
     }
 
@@ -189,13 +202,13 @@ const testing = std.testing;
 
 test "rowStride pads rows to 4 bytes" {
     try testing.expectEqual(@as(u32, 4), rowStride(1));
-    try testing.expectEqual(@as(u32, 4), rowStride(32));
-    try testing.expectEqual(@as(u32, 8), rowStride(33));
-    // The 296px panel needs 37 bytes, padded up to 40.
-    try testing.expectEqual(@as(u32, 40), rowStride(296));
+    try testing.expectEqual(@as(u32, 4), rowStride(8));
+    try testing.expectEqual(@as(u32, 8), rowStride(9));
+    // The 296px panel needs 148 bytes at a nibble a pixel: no padding.
+    try testing.expectEqual(@as(u32, 148), rowStride(296));
 }
 
-test "buildHeader emits a valid 1-bit BMP header" {
+test "buildHeader emits a valid four-bit BMP header" {
     const width = 296;
     const height = 128;
     const h = buildHeader(width, height);
@@ -208,8 +221,9 @@ test "buildHeader emits a valid 1-bit BMP header" {
     try testing.expectEqual(@as(u32, header_len), std.mem.readInt(u32, h[10..14], .little));
     try testing.expectEqual(@as(u32, 40), std.mem.readInt(u32, h[14..18], .little));
     try testing.expectEqual(@as(i32, width), std.mem.readInt(i32, h[18..22], .little));
-    try testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, h[28..30], .little));
+    try testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, h[28..30], .little));
     try testing.expectEqual(image_size, std.mem.readInt(u32, h[34..38], .little));
+    try testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, h[46..50], .little));
 }
 
 test "buildHeader stores height negative for top-down rows" {
@@ -217,20 +231,29 @@ test "buildHeader stores height negative for top-down rows" {
     try testing.expectEqual(@as(i32, -16), std.mem.readInt(i32, h[22..26], .little));
 }
 
-test "buildHeader palette maps index 0 to white and 1 to black" {
+test "the palette runs from black through the two greys to white" {
     const h = buildHeader(8, 8);
-    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 0 }, h[54..58]);
-    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, h[58..62]);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, h[54..58]);
+    try testing.expectEqualSlices(u8, &.{ 85, 85, 85, 0 }, h[58..62]);
+    try testing.expectEqualSlices(u8, &.{ 170, 170, 170, 0 }, h[62..66]);
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 0 }, h[66..70]);
+}
+
+test "each pixel's grey becomes its nibble, left pixel high" {
+    // One row of eight: black, dark, light, white, then white, light, dark, black.
+    const frame = [_]u8{ 0b00_01_10_11, 0b11_10_01_00 };
+    var buf: [byteSize(8, 1)]u8 = undefined;
+    const bytes = try serialize(&buf, &frame, 8, 1);
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0x23, 0x32, 0x10 }, bytes[header_len..][0..4]);
 }
 
 test "serialize matches what the file writer produces" {
     // Both go through packRow, and this is what pins them together: if either
-    // path grows its own idea of polarity or padding, the bytes diverge.
+    // path grows its own idea of layout or padding, the bytes diverge.
     const width = 296;
     const height = 128;
-    const src_row_bytes = @divCeil(width, 8);
 
-    var frame: [src_row_bytes * height]u8 = undefined;
+    var frame: [packedLen(width, height)]u8 = undefined;
     for (&frame, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
 
     var buf: [byteSize(width, height)]u8 = undefined;
@@ -242,7 +265,7 @@ test "serialize matches what the file writer produces" {
     const stride = rowStride(width);
     var row: [max_stride]u8 = undefined;
     for (0..height) |y| {
-        packRow(row[0..stride], &frame, y, src_row_bytes);
+        packRow(row[0..stride], &frame, y, width);
         try testing.expectEqualSlices(u8, row[0..stride], bytes[header_len + y * stride ..][0..stride]);
     }
 }
@@ -258,8 +281,8 @@ test "an export replaces the file instead of rewriting it" {
 
     const width = 16;
     const height = 2;
-    const first: [4]u8 = @splat(0xFF);
-    const second: [4]u8 = @splat(0x00);
+    const first: [packedLen(width, height)]u8 = @splat(0xFF);
+    const second: [packedLen(width, height)]u8 = @splat(0x00);
 
     var exporter = BmpExporter.init();
     try exporter.save(testing.io, &first, width, height, path);
@@ -290,22 +313,23 @@ test "an export replaces the file instead of rewriting it" {
 }
 
 test "serialize rejects a destination that is too small" {
-    var frame: [37 * 128]u8 = @splat(0xFF);
+    var frame: [packedLen(296, 128)]u8 = @splat(0xFF);
     var small: [100]u8 = undefined;
     try testing.expectError(error.NoSpaceLeft, serialize(&small, &frame, 296, 128));
 }
 
 test "the padding bytes of each row are zero" {
-    // 296 pixels need 37 bytes, padded to 40; the last three must not carry
+    // 300 pixels need 150 bytes, padded to 152; the last two must not carry
     // image data, or viewers show noise down the right edge.
-    const width = 296;
-    var frame: [37 * 4]u8 = @splat(0xAA);
+    const width = 300;
+    var frame: [packedLen(width, 4)]u8 = @splat(0xAA);
     var buf: [byteSize(width, 4)]u8 = undefined;
     const bytes = try serialize(&buf, &frame, width, 4);
 
     const stride = rowStride(width);
+    try testing.expectEqual(@as(u32, 152), stride);
     for (0..4) |y| {
         const row = bytes[header_len + y * stride ..][0..stride];
-        try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0 }, row[37..40]);
+        try testing.expectEqualSlices(u8, &[_]u8{ 0, 0 }, row[150..152]);
     }
 }

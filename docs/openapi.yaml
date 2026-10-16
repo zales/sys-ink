@@ -195,9 +195,10 @@ paths:
       operationId: getFrame
       summary: The frame on the panel
       description: |
-        The 1-bit frame the daemon last sent to the panel, as a BMP, 296×128.
-        It is the frame itself, not a re-render, so it agrees with the glass,
-        fault overlay and notices included.
+        The frame the daemon last sent to the panel, as a BMP, 296×128, in
+        the panel's four greys: four bits a pixel, with a palette of black,
+        two greys and white. It is the frame itself, not a re-render, so it
+        agrees with the glass, fault overlay and notices included.
       responses:
         "200":
           description: The current frame.

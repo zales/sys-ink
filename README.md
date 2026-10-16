@@ -505,9 +505,9 @@ the glass including the fault overlay.
 Reading the request carries a two-second deadline, so a client that connects and
 then says nothing costs one pause rather than taking the preview down — which is
 what used to happen. Writes have no deadline of their own and need none: a
-response is a few kilobytes and fits the socket's send buffer whole, so it never
-waits on a client that has stopped reading. Failed accepts back off instead of
-spinning.
+response fits the socket's send buffer whole, which for a frame, some 19 kB in
+four greys, is made large enough to hold it, so it never waits on a client that
+has stopped reading. Failed accepts back off instead of spinning.
 
 One connection is served at a time, which is ample for a page fetching one image
 a second but does mean many simultaneous stalled connections slow it down, each
@@ -823,8 +823,9 @@ the music screen comes up, its cover changes, or the periodic full refresh
 falls due; the bar moves by partial refreshes as before. Those leave the
 pixels they do not change undriven while a grey picture is up, where they
 would otherwise give them a pulse towards black or white each time and wear
-the grey away. The preview and the BMP export have one bit a pixel, and show
-each grey as a pattern of black and white instead.
+the grey away. The preview and the BMP export show the four greys too: they
+are four-bit BMPs, with a palette of black, the two greys and white, about
+19 kB a frame.
 
 The cover is decoded on the device, and only
 covers in baseline JPEG, which is what Spotify serves, are drawn; a cover that

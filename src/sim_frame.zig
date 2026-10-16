@@ -15,11 +15,12 @@ const layout = @import("display_config.zig");
 const Reading = @import("reading.zig").Reading;
 const now_playing = @import("now_playing.zig");
 pub const Renderer = @import("display_renderer.zig").Renderer;
+const bmp = @import("bmp.zig");
 
 pub const width = layout.display_width;
 pub const height = layout.display_height;
-/// Row stride of the renderer's 1-bit frame, matching `packBmpBuffer`.
-pub const row_bytes = @divCeil(width, 8);
+/// Row stride of the renderer's packed frame, four greys a byte.
+pub const row_bytes = bmp.packedRowBytes(width);
 
 /// Fault overlay on for 6 s out of every 30.
 pub fn faultActive(t: f64) bool {
@@ -152,8 +153,8 @@ pub fn draw(renderer: *Renderer, t: f64, uptime_s: u64) void {
     if (musicAt(t)) |view| renderer.showMusic(view) else renderer.clearMusic();
 }
 
-/// Expand the renderer's packed 1-bit frame into 8-bit greyscale, magnified by
-/// an integer factor with no interpolation.
+/// Expand the renderer's packed frame into 8-bit greyscale, magnified by an
+/// integer factor with no interpolation.
 ///
 /// `dest` must hold `width * scale * height * scale` bytes. Scaling here rather
 /// than in the window keeps pixel edges hard, which is the point of previewing
@@ -169,9 +170,9 @@ pub fn expand(packed_frame: []const u8, dest: []u8, comptime scale: u32) void {
         const first = (y * scale) * dest_width;
         const row_out = dest[first..][0..dest_width];
         for (0..width) |x| {
-            // 1 = white, MSB first.
-            const on = (src_row[x >> 3] >> @intCast(7 - (x & 7))) & 1 == 1;
-            @memset(row_out[x * scale ..][0..scale], if (on) 255 else 0);
+            // A grey from 0, black, to 3, white; the first pixel highest.
+            const shade = (src_row[x / 4] >> @intCast(6 - 2 * (x % 4))) & 0b11;
+            @memset(row_out[x * scale ..][0..scale], shade * 85);
         }
 
         for (1..scale) |dup| {
@@ -277,9 +278,10 @@ test "expand magnifies without smearing neighbouring pixels" {
     const testing = std.testing;
     const scale = 3;
 
-    // A frame with a single black pixel at (1,0), everything else white.
+    // A frame with a single black pixel at (1,0) and a dark grey one at
+    // (3,0), everything else white.
     var frame: [row_bytes * height]u8 = @splat(0xFF);
-    frame[0] = 0b1011_1111;
+    frame[0] = 0b11_00_11_01;
 
     var out: [width * scale * height * scale]u8 = undefined;
     expand(&frame, &out, scale);
@@ -291,6 +293,8 @@ test "expand magnifies without smearing neighbouring pixels" {
             try testing.expectEqual(@as(u8, 0), out[dy * dest_width + scale + dx]);
         }
     }
+    // The grey one is grey.
+    try testing.expectEqual(@as(u8, 85), out[3 * scale]);
     // Its neighbours stay white.
     try testing.expectEqual(@as(u8, 255), out[0]);
     try testing.expectEqual(@as(u8, 255), out[scale * 2]);

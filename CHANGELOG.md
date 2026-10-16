@@ -34,12 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cover, artist, title and a bar with the time played, in place of the
   dashboard, and goes back `SPOTIFY_PAUSE_HOLD` seconds after it pauses. The
   cover is drawn in four greys, by the grey waveform Waveshare publishes for the
-  panel; the preview shows the greys as patterns. It is
-  told of every change as it happens, over the WebSocket Spotify's own clients
-  use, rather than asking: the way librespot does it, and no published API. The
-  panel is linked once, by a code it shows, entered at spotify.com/pair; the
-  link is kept in `SPOTIFY_STATE_FILE`. A notice still goes over the music, and
-  a hardware fault takes it down. See the README's Spotify section.
+  panel. It is told of every change as it happens, over the WebSocket Spotify's
+  own clients use, rather than asking: the way librespot does it, and no
+  published API. The panel is linked once, by a code it shows, entered at
+  spotify.com/pair; the link is kept in `SPOTIFY_STATE_FILE`. A notice still
+  goes over the music, and a hardware fault takes it down. See the README's
+  Spotify section.
 - The `.deb`'s unit has `StateDirectory=sys-ink`, for that link.
 - **Diacritics.** The fonts have the Latin letters with diacritics now, U+00C0
   to U+017F, so notices and titles show `Příliš žluťoučký kůň` as written,
@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the glyphs that were there are left as they were, so the dashboard is
   unchanged to the pixel. Other scripts and emoji still show as `?`, and
   typographic punctuation as its ASCII lookalike.
+
+### Changed
+- **The preview and the BMP export are in four greys.** `/frame.bmp` and the
+  file `EXPORT_BMP` writes are four-bit BMPs with a palette of black, the
+  panel's two greys and white, so a cover shows as it does on the glass; they
+  were one bit a pixel. A frame is about 19 kB where it was 5.
 
 ## [1.12.0] — 2026-10-13
 

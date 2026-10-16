@@ -43,7 +43,7 @@ const log = std.log.scoped(.preview);
 
 const width = layout.display_width;
 const height = layout.display_height;
-const frame_bytes = @divCeil(width, 8) * height;
+const frame_bytes = bmp.packedLen(width, height);
 
 pub const WebPreview = struct {
     io: std.Io,
@@ -385,7 +385,8 @@ test "the frame and the readings are served as published, and not before" {
     try serve(&preview, .{});
     defer preview.deinit();
 
-    var buf: [8192]u8 = undefined;
+    // Room for a frame: some 19 kB in four greys.
+    var buf: [32 * 1024]u8 = undefined;
 
     try expectStatus("503 Service Unavailable", try exchange(&preview, "GET /frame.bmp HTTP/1.1\r\n\r\n", &buf));
     const early = try exchange(&preview, "GET /api/status HTTP/1.1\r\n\r\n", &buf);
@@ -408,8 +409,9 @@ test "the frame and the readings are served as published, and not before" {
     const pixels = bodyOf(image);
     try testing.expectEqual(bmp.byteSize(width, height), pixels.len);
     try testing.expectEqualStrings("BM", pixels[0..2]);
-    // The first byte of the frame, inverted as a BMP has it.
-    try testing.expectEqual(@as(u8, 0xF0), pixels[bmp.header_len]);
+    // The first byte of the frame, two black pixels and two white ones, a
+    // nibble each as a BMP has them.
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x33 }, pixels[bmp.header_len..][0..2]);
 
     const status = try exchange(&preview, "GET /api/status HTTP/1.1\r\n\r\n", &buf);
     try expectStatus("200 OK", status);

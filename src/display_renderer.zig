@@ -9,6 +9,7 @@ const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const notice_text = @import("notice.zig");
+const bmp = @import("bmp.zig");
 const now_playing = @import("now_playing.zig");
 
 /// Bytes per hardware row after the 90° rotation.
@@ -80,8 +81,7 @@ pub const Renderer = struct {
         const gray_buffer = try allocator.create([2]Frame);
         errdefer allocator.destroy(gray_buffer);
 
-        const bmp_row_bytes = @divCeil(layout.display_width, 8);
-        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * layout.display_height);
+        const bmp_buffer = try allocator.alloc(u8, bmp.packedLen(layout.display_width, layout.display_height));
 
         return .{
             .bitmap = bitmap,
@@ -502,9 +502,14 @@ pub const Renderer = struct {
         return self.gray_buffer;
     }
 
-    /// The panel's grey nearest `level`.
+    /// Of the panel's four greys, the nearest `level`: 0 black, 3 white.
+    fn shadeOf(level: u8) u8 {
+        return @intCast((@as(u16, level) + 42) / 85);
+    }
+
+    /// The panel's grey nearest `level`, as its banks encode it.
     fn grayOf(level: u8) epd2in9.Gray {
-        return switch ((@as(u16, level) + 42) / 85) {
+        return switch (shadeOf(level)) {
             0 => .black,
             1 => .dark,
             2 => .light,
@@ -514,7 +519,8 @@ pub const Renderer = struct {
 
     /// The same frame the right way up, for whoever shows it rather than
     /// sending it to the panel: the web preview, the BMP export and the
-    /// simulators. Borrowed: valid until the next call.
+    /// simulators. In the panel's four greys, packed as `bmp.packedRowBytes`
+    /// says. Borrowed: valid until the next call.
     pub fn packedFrame(self: *Self) []const u8 {
         if (layout.debug_text_areas) self.drawTextAreaFrames();
 
@@ -563,28 +569,25 @@ pub const Renderer = struct {
         }
     }
 
-    /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
+    /// Pack the bitmap into `bmp_buffer`, unrotated, a grey from 0 to 3 a pixel.
     fn packBmpBuffer(self: *Self) void {
         const src = self.frameBitmap();
         const width = src.width;
-        const height = src.height;
-        const row_bytes = @divCeil(width, 8);
+        const row_bytes = bmp.packedRowBytes(width);
 
-        // Pack to 1-bit without rotation, into the preallocated scratch buffer.
-        var y: u32 = 0;
-        while (y < height) : (y += 1) {
+        for (0..src.height) |y| {
             const src_row = src.data[y * src.stride ..][0..width];
             const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
 
             for (dst_row, 0..) |*out_byte, byte_idx| {
-                var bits: u8 = 0;
-                for (0..8) |b| {
-                    const x = byte_idx * 8 + b;
-                    if (x >= width or Graphics.bayer2(src_row[x], x, y)) {
-                        bits |= @as(u8, 0x80) >> @intCast(b);
-                    }
+                var grays: u8 = 0;
+                for (0..4) |p| {
+                    const x = byte_idx * 4 + p;
+                    // Past the right edge, white.
+                    const shade: u8 = if (x < width) shadeOf(src_row[x]) else 3;
+                    grays |= shade << @intCast(6 - 2 * p);
                 }
-                out_byte.* = bits;
+                out_byte.* = grays;
             }
         }
     }
@@ -1135,8 +1138,8 @@ test "the thresholds the renderer is given are the ones it inverts at" {
 
 /// Rows of the unrotated BMP buffer covering the status bar.
 fn statusBarRows(r: *Renderer) []const u8 {
-    const row_bytes = @divCeil(layout.display_width, 8);
-    return r.bmp_buffer[layout.status_bar.y * row_bytes ..];
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    return r.bmp_buffer[@as(usize, @intCast(layout.status_bar.y)) * row_bytes ..];
 }
 
 test "the warning inverts the status bar in the frame sent to the panel" {
@@ -1212,8 +1215,8 @@ test "the warning leaves everything above the status bar alone" {
 
     r.drawReferenceScreen();
     r.packBmpBuffer();
-    const row_bytes = @divCeil(layout.display_width, 8);
-    const above_len = layout.status_bar.y * row_bytes;
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    const above_len = @as(usize, @intCast(layout.status_bar.y)) * row_bytes;
     const clean_above = try testing.allocator.dupe(u8, r.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
 
@@ -1290,8 +1293,8 @@ test "a hardware fault shows over a notice too" {
     const faulted = r.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
-    const row_bytes = @divCeil(layout.display_width, 8);
-    const bar_start = layout.status_bar.y * row_bytes;
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    const bar_start = @as(usize, @intCast(layout.status_bar.y)) * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
 
@@ -1601,18 +1604,16 @@ test "each of the four greys reaches the panel's banks as the bits the driver gi
     }
 }
 
-test "in black and white, a grey cover comes out a quarter or three quarters black" {
+test "in the preview, a grey cover keeps its grey" {
     var r = try Renderer.init(testing.allocator, .{});
     defer r.deinit();
 
     const cover: [now_playing.cover_len]u8 = @splat(85);
     r.showMusic(.{ .track = .{ .title = "x", .artist = "y", .elapsed_s = 0, .duration_s = 1, .playing = true, .cover = &cover } });
     const frame = r.packedFrame();
-    const row_bytes = @divCeil(layout.display_width, 8);
-    // Two rows of the first 64 pixels of the cover: 128 pixels, 96 black.
-    var black: u32 = 0;
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    // Two rows across the cover, 128 pixels each: all dark grey, 1 of 0 to 3.
     for (40..42) |y| {
-        for (frame[y * row_bytes ..][0..8]) |byte| black += 8 - @popCount(byte);
+        for (frame[y * row_bytes ..][0..32]) |byte| try testing.expectEqual(@as(u8, 0b01_01_01_01), byte);
     }
-    try testing.expectEqual(@as(u32, 96), black);
 }

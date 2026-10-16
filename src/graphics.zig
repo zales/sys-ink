@@ -404,8 +404,9 @@ pub fn scaleGray(src: []const u8, src_w: u32, src_h: u32, dst: []u8, dst_w: u32,
 ///
 /// Black and white stay as they are; the greys `Shades.four` draws come out
 /// as a 2x2 pattern, a quarter or three quarters black, which is as near as
-/// one bit gets to them. Everything that packs a bitmap to one bit goes by
-/// this, so a grey picture reads right in the preview and on the panel alike.
+/// one bit gets to them. That is the panel's own frame, which a black-and-white
+/// refresh puts up as it is, and which partial updates diff against; the
+/// preview and the BMP export have the four greys themselves.
 pub fn bayer2(level: u8, x: usize, y: usize) bool {
     const thresholds = [2][2]u8{ .{ 32, 159 }, .{ 223, 96 } };
     return level >= thresholds[y & 1][x & 1];
