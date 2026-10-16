@@ -881,8 +881,10 @@ looks for it again every half a minute or sooner.
 
 **How it works.** Kodi says the moment playback starts, pauses, seeks or
 stops, and sys-ink then asks it what plays, by the labels its skin shows, and
-how far in. Nothing is polled, and the time played is counted on by the panel
-between changes. The picture is fetched from where Kodi says it is, over
+how far in; a seek says where it went. The time played is counted on by the
+panel between changes, and every half a minute, in place of a ping, sys-ink
+asks how far playback is, which puts right a stream that stalled to buffer or
+a film resumed where it was left. The picture is fetched from where Kodi says it is, over
 HTTPS: posters and covers that add-ons and scrapers take from the web. Those
 Kodi keeps on the box or a share are behind its web server's password, and
 are left out, as are pictures in other formats than JPEG, such as WebP.

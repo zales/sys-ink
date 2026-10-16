@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Kodi: the time played and the bar follow a seek.** They went on from where
+  playback was before it: Kodi, asked how far playback is right after it
+  announces a seek, still gives the time from before. The time now comes from
+  the announcement itself. And while something plays, sys-ink asks how far it
+  is every half a minute, in place of the ping it sent, which also puts right
+  a stream that stalled to buffer and a film resumed where it was left.
+
 ## [1.14.0] — 2026-10-16
 
 ### Added
