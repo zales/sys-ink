@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.1] — 2026-10-16
+
 ### Fixed
 - **Kodi: the time played and the bar follow a seek.** They went on from where
   playback was before it: Kodi, asked how far playback is right after it
@@ -673,6 +675,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.14.1]: https://github.com/zales/sys-ink/releases/tag/v1.14.1
 [1.14.0]: https://github.com/zales/sys-ink/releases/tag/v1.14.0
 [1.13.0]: https://github.com/zales/sys-ink/releases/tag/v1.13.0
 [1.12.0]: https://github.com/zales/sys-ink/releases/tag/v1.12.0
