@@ -954,10 +954,12 @@ how, and what to check if your entity IDs differ.
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently, in 1.12.0, an APT count that goes stale when `apt update`
-fails, and in 1.11.0 readings that `/api/status` can give as `null` and that
-MQTT withholds while they cannot be refreshed, a blank variable counting as
-unset, and notices held to one change of the panel every two seconds.
+top — most recently, in 1.13.0, a preview and a BMP export in four greys, four
+bits a pixel where they were one, in 1.12.0 an APT count that goes stale when
+`apt update` fails, and in 1.11.0 readings that `/api/status` can give as
+`null` and that MQTT withholds while they cannot be refreshed, a blank variable
+counting as unset, and notices held to one change of the panel every two
+seconds.
 
 ## License
 
