@@ -44,6 +44,11 @@ Frames from the daemon's own renderer, at the panel's 296×128 pixels.
 | ![Notice](assets/sys-ink_notice.png) | ![Longer notice](assets/sys-ink_notice_long.png) |
 | A message sent to the panel takes the whole screen for a while | The font steps down until the text fits |
 
+| Spotify | Linking Spotify |
+|:-------:|:---------------:|
+| ![Spotify](assets/sys-ink_music.png) | ![Linking Spotify](assets/sys-ink_pairing.png) |
+| While something plays: its cover in four greys, the artist, the title and the time played | Once, to link the panel to an account |
+
 | Loading Screen | Sleep Screen |
 |:--------------:|:------------:|
 | ![Loading](assets/sys-ink_loading.png) | ![Sleep](assets/sys-ink_sleeping.png) |
@@ -954,10 +959,12 @@ how, and what to check if your entity IDs differ.
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md). Breaking changes are listed in a table at the
-top — most recently, in 1.12.0, an APT count that goes stale when `apt update`
-fails, and in 1.11.0 readings that `/api/status` can give as `null` and that
-MQTT withholds while they cannot be refreshed, a blank variable counting as
-unset, and notices held to one change of the panel every two seconds.
+top — most recently, in 1.13.0, a preview and a BMP export in four greys, four
+bits a pixel where they were one, in 1.12.0 an APT count that goes stale when
+`apt update` fails, and in 1.11.0 readings that `/api/status` can give as
+`null` and that MQTT withholds while they cannot be refreshed, a blank variable
+counting as unset, and notices held to one change of the panel every two
+seconds.
 
 ## License
 
