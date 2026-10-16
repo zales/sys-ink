@@ -44,6 +44,11 @@ Frames from the daemon's own renderer, at the panel's 296×128 pixels.
 | ![Notice](assets/sys-ink_notice.png) | ![Longer notice](assets/sys-ink_notice_long.png) |
 | A message sent to the panel takes the whole screen for a while | The font steps down until the text fits |
 
+| Spotify | Linking Spotify |
+|:-------:|:---------------:|
+| ![Spotify](assets/sys-ink_music.png) | ![Linking Spotify](assets/sys-ink_pairing.png) |
+| While something plays: its cover in four greys, the artist, the title and the time played | Once, to link the panel to an account |
+
 | Loading Screen | Sleep Screen |
 |:--------------:|:------------:|
 | ![Loading](assets/sys-ink_loading.png) | ![Sleep](assets/sys-ink_sleeping.png) |

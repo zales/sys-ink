@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file `EXPORT_BMP` writes are four-bit BMPs with a palette of black, the
   panel's two greys and white, so a cover shows as it does on the glass; they
   were one bit a pixel. A frame is about 19 kB where it was 5.
+- The README and the website have screenshots of the music screen and of the
+  one asking for the code, and the website names Spotify and the diacritics
+  among what the daemon does.
 
 ## [1.12.0] — 2026-10-13
 
