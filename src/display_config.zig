@@ -374,6 +374,47 @@ pub const notice = struct {
     pub const max_lines = 6;
 };
 
+/// The music screen: the cover down the left, and beside it who, what, and
+/// how far into it.
+pub const music = struct {
+    /// Square, the height of the panel.
+    pub const cover: Rect = .{ .x = 0, .y = 0, .width = display_height, .height = display_height };
+    /// The text runs from here to `right`.
+    pub const left = cover.right() + 8;
+    pub const right = display_width - 3;
+    pub const width: u32 = right - left;
+
+    pub const artist_at: Point = .{ .x = left, .y = 14 };
+    pub const artist_font: FontType = .ubuntu14;
+    /// The title, top-aligned in the largest of `title_fonts` that holds it.
+    pub const title: Rect = .{ .x = left, .y = 20, .width = width, .height = 74 };
+    pub const title_fonts = [_]FontType{ .ubuntu24, .ubuntu20, .ubuntu14 };
+    /// Four lines of the smallest is as many as `title` holds.
+    pub const max_title_lines = 4;
+
+    /// The progress bar: an outline, filled from the left as the track plays.
+    pub const bar: Rect = .{ .x = left, .y = 99, .width = width, .height = 9 };
+    /// Time played at the left end, the length at the right.
+    pub const time_baseline = 126;
+    pub const time_font: FontType = .ubuntu14;
+    /// Two upright bars between the times while paused.
+    pub const pause_mark: Rect = .{ .x = left + @as(i32, width / 2) - 4, .y = 114, .width = 9, .height = 11 };
+};
+
+/// The screen that asks for the code linking the panel to Spotify: where to
+/// go, and the code, large.
+pub const pairing = struct {
+    pub const label = "spotify";
+    pub const label_at: Point = notice.label_at;
+    pub const prompt = "Link at spotify.com/pair";
+    pub const prompt_at: Point = .{ .x = 4, .y = 42 };
+    pub const prompt_font: FontType = .ubuntu20;
+    pub const code_at: Point = .{ .x = 4, .y = 88 };
+    pub const code_font: FontType = .ubuntu34;
+    pub const hint = "Enter this code there";
+    pub const hint_at: Point = .{ .x = 4, .y = 120 };
+};
+
 // ----------------------------------------------------------------------------
 // Text that has to be fitted to a slot
 // ----------------------------------------------------------------------------
@@ -648,4 +689,41 @@ test "the notice body holds as many lines of the smallest font as it promises" {
     const smallest = notice.fonts[notice.fonts.len - 1];
     try testing.expectEqual(@as(u32, notice.max_lines), notice.body.height / bmp.getLineHeight(smallest));
     try testing.expect(notice.body.right() <= display_width and notice.body.bottom() <= display_height);
+}
+
+test "the music screen's title box holds as many lines of the smallest font as it promises" {
+    var bmp = try Bitmap.init(testing.allocator, 4, 4);
+    defer bmp.deinit();
+
+    const smallest = music.title_fonts[music.title_fonts.len - 1];
+    try testing.expectEqual(@as(u32, music.max_title_lines), music.title.height / bmp.getLineHeight(smallest));
+}
+
+test "everything on the music screen stays on the panel, right of the cover, one part above the next" {
+    var bmp = try Bitmap.init(testing.allocator, 4, 4);
+    defer bmp.deinit();
+
+    const m = music;
+    try testing.expect(m.cover.right() <= m.left);
+    try testing.expect(m.right <= display_width);
+    // The artist's line ends above the title, the title above the bar, and
+    // the bar above the times and the pause mark.
+    const below_baseline = @as(i32, @intCast(bmp.getLineHeight(m.artist_font))) - Bitmap.fontAscent(m.artist_font);
+    try testing.expect(m.artist_at.y + below_baseline <= m.title.y);
+    try testing.expect(m.title.bottom() <= m.bar.y);
+    try testing.expect(m.bar.bottom() < m.time_baseline - Bitmap.fontAscent(m.time_font) + 3);
+    try testing.expect(m.bar.bottom() <= m.pause_mark.y);
+    try testing.expect(m.pause_mark.bottom() <= display_height);
+    try testing.expect(m.time_baseline <= display_height);
+}
+
+test "the pairing screen's lines fit across the panel" {
+    var bmp = try Bitmap.init(testing.allocator, 4, 4);
+    defer bmp.deinit();
+
+    const p = pairing;
+    try testing.expect(p.prompt_at.x + @as(i32, @intCast(bmp.measureText(p.prompt, p.prompt_font))) <= display_width);
+    try testing.expect(p.hint_at.x + @as(i32, @intCast(bmp.measureText(p.hint, .ubuntu14))) <= display_width);
+    // A code as Spotify gives one: six letters and digits, the widest.
+    try testing.expect(p.code_at.x + @as(i32, @intCast(bmp.measureText("WWWWWW", p.code_font))) <= display_width);
 }

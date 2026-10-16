@@ -16,6 +16,9 @@ const log = std.log.scoped(.panel);
 /// One full panel frame, in the controller's own format.
 pub const Frame = epd2in9.Frame;
 
+/// A frame in four greys: two banks of a bit a pixel; see `epd2in9.Gray`.
+pub const GrayPlanes = [2]Frame;
+
 /// How a frame is put on the glass.
 pub const Refresh = enum {
     /// Only what differs from the frame already there, with a waveform weak
@@ -49,6 +52,15 @@ pub fn Panel(comptime Transport: type) type {
         /// full refresh, because a partial one would diff against a reference
         /// that is not what is showing.
         state_unknown: bool = false,
+        /// The controller is set up for grey, and its banks hold grey planes,
+        /// not a reference: it is re-initialised and given the reference back
+        /// before it shows anything else, as after deep sleep. See `showGray`.
+        set_for_gray: bool = false,
+        /// A grey picture is on the glass. Partial updates leave the pixels
+        /// they do not change undriven while it is, rather than holding them,
+        /// which would wear the grey down to black and white; a full refresh
+        /// clears it.
+        gray_on_glass: bool = false,
 
         /// `transport` is borrowed, not owned: the caller outlives the panel and
         /// is responsible for tearing it down.
@@ -75,6 +87,7 @@ pub fn Panel(comptime Transport: type) type {
             try self.wake();
             self.state_unknown = true;
             try self.epd.display(frame);
+            self.gray_on_glass = false;
         }
 
         /// Put `frame` on the glass.
@@ -106,13 +119,16 @@ pub fn Panel(comptime Transport: type) type {
                 // Any failure below leaves the glass in an unknown state.
                 errdefer self.state_unknown = true;
 
-                if (partial) {
+                if (partial and self.gray_on_glass) {
+                    try self.epd.displayPartialStill(frame);
+                } else if (partial) {
                     try self.epd.displayPartial(frame);
                 } else {
                     // displayBase, not display: it refreshes fully *and* rewrites the
                     // reference RAM, keeping later partial updates diffing against
                     // what is actually on the glass.
                     try self.epd.displayBase(frame);
+                    self.gray_on_glass = false;
                 }
             }
 
@@ -121,6 +137,31 @@ pub fn Panel(comptime Transport: type) type {
             self.park();
 
             log.debug("show: EPD done (partial={})", .{partial});
+        }
+
+        /// Put a picture on the glass in four greys, by a full refresh.
+        ///
+        /// `planes` is the picture, and `frame` the same in black and white,
+        /// which becomes the reference later partial updates diff against.
+        /// Where those leave the picture as it was, they leave its grey as it
+        /// was too; see `gray_on_glass`.
+        pub fn showGray(self: *Self, planes: *const GrayPlanes, frame: *const Frame) !void {
+            log.debug("show: START (grey)", .{});
+            try self.wake();
+            {
+                errdefer self.state_unknown = true;
+                // Before the refresh: one that fails partway has set the
+                // controller up for grey all the same.
+                self.set_for_gray = true;
+                try self.epd.displayGray(planes);
+            }
+
+            self.remember(frame);
+            self.state_unknown = false;
+            self.gray_on_glass = true;
+            self.park();
+
+            log.debug("show: EPD done (grey)", .{});
         }
 
         /// Leave `frame` on the glass and the controller in deep sleep, ready
@@ -132,10 +173,12 @@ pub fn Panel(comptime Transport: type) type {
                 log.err("Failed to re-init display for sleep: {t}", .{err});
             };
             self.asleep = false;
+            self.set_for_gray = false;
 
             // displayBase also resets the base RAM used by partial updates.
             try self.epd.displayBase(frame);
             self.remember(frame);
+            self.gray_on_glass = false;
 
             // Unconditional, unlike park: Waveshare requires deep sleep before
             // power is cut, whatever `sleep_between_updates` is set to.
@@ -147,16 +190,20 @@ pub fn Panel(comptime Transport: type) type {
             log.info("Display parked in deep sleep", .{});
         }
 
-        /// Bring the controller out of deep sleep, if it is in it.
+        /// Bring the controller out of deep sleep, if it is in it, or out of
+        /// its set-up for grey, if it is in that.
         ///
         /// Deep sleep drops the reference frame that partial updates diff against,
         /// so it has to be restored from the frame we know is on the glass — before
         /// the partial sequence powers the analog stage up, or the write is ignored.
+        /// A grey refresh leaves grey planes where the reference was, and the
+        /// controller set up as nothing else expects: the same cure.
         fn wake(self: *Self) !void {
-            if (!self.asleep) return;
+            if (!self.asleep and !self.set_for_gray) return;
 
-            log.debug("waking from deep sleep", .{});
+            log.debug("{s}", .{if (self.asleep) "waking from deep sleep" else "leaving grey"});
             try self.epd.reInit();
+            self.set_for_gray = false;
             if (self.has_last_frame) {
                 self.epd.primeBase(&self.last_frame) catch |err| {
                     // Without a reference a partial update would smear, so fall back
@@ -388,4 +435,70 @@ test "shutdown sleeps the controller whatever the options say" {
     try testing.expectEqualSlices(u8, &.{0xC7}, transport.lastArgsAfter(0x22).?);
     try testing.expectEqualSlices(u8, &.{0x01}, transport.argsAfter(0x10).?);
     try testing.expect(panel.asleep);
+}
+
+const grey: GrayPlanes = .{ @splat(0x0F), @splat(0xF0) };
+
+test "after a grey refresh, a partial update has a re-initialised controller, the black-and-white reference and the still waveform" {
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+    // Awake throughout: grey alone has to bring the re-initialisation about.
+    var panel = TestPanel.init(&transport, .{ .sleep_between_updates = false });
+
+    try panel.show(&first, .full);
+    transport.resetLog();
+    try panel.showGray(&grey, &first);
+    try testing.expectEqual(FakeTransport.Waveform.gray, transport.lastWaveform().?);
+
+    transport.resetLog();
+    try panel.show(&second, .partial);
+    try testing.expect(transport.sentCommand(0x12)); // SW_RESET: re-initialised
+    try testing.expectEqualSlices(u8, &first, transport.argsAfter(0x26).?); // reference back
+    try testing.expectEqualSlices(u8, &second, transport.argsAfter(0x24).?);
+    try testing.expectEqual(FakeTransport.Waveform.partial, transport.lastWaveform().?);
+    // No hold pulses: the first row of the waveform is empty.
+    for (transport.lastArgsAfter(0x32).?[0..12]) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "a grey picture that has not changed is left alone" {
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+    var panel = TestPanel.init(&transport, .{});
+
+    try panel.showGray(&grey, &first);
+    transport.resetLog();
+    try panel.show(&first, .partial);
+    try testing.expectEqual(@as(usize, 0), transport.events.items.len);
+}
+
+test "a full refresh after grey is black and white, and partial updates hold their pixels again" {
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+    var panel = TestPanel.init(&transport, .{});
+
+    try panel.showGray(&grey, &first);
+    transport.resetLog();
+    try panel.show(&second, .full);
+    try testing.expectEqual(FakeTransport.Waveform.full, transport.lastWaveform().?);
+    try testing.expect(!panel.gray_on_glass);
+
+    transport.resetLog();
+    try panel.show(&first, .partial);
+    try testing.expectEqual(@as(u8, 0x40), transport.lastArgsAfter(0x32).?[1]);
+}
+
+test "a grey refresh that fails is followed by a full one from a re-initialised controller" {
+    var transport = FakeTransport.init(testing.allocator);
+    defer transport.deinit();
+    var panel = TestPanel.init(&transport, .{ .sleep_between_updates = false });
+
+    try panel.show(&first, .full);
+    transport.busy_reads_remaining = std.math.maxInt(u32);
+    try testing.expectError(error.EpdBusyTimeout, panel.showGray(&grey, &second));
+
+    transport.busy_reads_remaining = 0;
+    transport.resetLog();
+    try panel.show(&second, .partial);
+    try testing.expect(transport.sentCommand(0x12));
+    try testing.expectEqual(FakeTransport.Waveform.full, transport.lastWaveform().?);
 }

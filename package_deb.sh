@@ -83,6 +83,10 @@ LockPersonality=yes
 # /run/sys-ink, for the notice pipe. Removed when the service stops, so a
 # notice sent then fails at once instead of blocking on a pipe nobody reads.
 RuntimeDirectory=$APP_NAME
+# /var/lib/sys-ink, for the link to a Spotify account. It holds a refresh
+# token, so it is root's alone, and it is kept across restarts and upgrades.
+StateDirectory=$APP_NAME
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
@@ -145,6 +149,14 @@ BMP_EXPORT_PATH=/tmp/sys-ink.bmp
 # Group allowed to write to the pipe besides root; unset means root only.
 #NOTIFY_GROUP=sysink-notify
 #NOTIFY_DURATION=30
+
+# --- Spotify ------------------------------------------------------------
+# Show what plays on a Spotify account. Off until turned on; the panel
+# then shows a code to enter at spotify.com/pair.
+#SPOTIFY_ENABLED=false
+#SPOTIFY_STATE_FILE=/var/lib/sys-ink/spotify.json
+#SPOTIFY_PAUSE_HOLD=30
+#SPOTIFY_INTERVAL=5
 
 # --- MQTT / Home Assistant ----------------------------------------------
 #MQTT_ENABLED=true

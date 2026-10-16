@@ -12,6 +12,7 @@
 const std = @import("std");
 const testing = std.testing;
 const update_select = @import("epd2in9.zig").update_select;
+const gray4_2in9 = @import("epd2in9.zig").gray4_2in9;
 
 pub const FakeTransport = struct {
     pub const rst_pin: u32 = 17;
@@ -107,8 +108,9 @@ pub const FakeTransport = struct {
         return std.mem.indexOfScalar(u8, self.commands(&buf), cmd) != null;
     }
 
-    /// How a refresh was driven.
-    pub const Waveform = enum { full, partial };
+    /// How a refresh was driven. A grey one is full as well, told apart by the
+    /// waveform loaded for it.
+    pub const Waveform = enum { full, partial, gray };
 
     /// The waveform of the last refresh in the log, or null if the log holds
     /// none. For tests above the driver, which care that the panel was
@@ -117,10 +119,15 @@ pub const FakeTransport = struct {
         const args = self.lastArgsAfter(update_select.command) orelse return null;
         if (args.len != 1) return null;
         return switch (args[0]) {
-            update_select.full => .full,
+            update_select.full => if (self.lastLutWas(&gray4_2in9)) .gray else .full,
             update_select.partial => .partial,
             else => null,
         };
+    }
+
+    fn lastLutWas(self: *FakeTransport, lut: []const u8) bool {
+        const loaded = self.lastArgsAfter(0x32) orelse return false;
+        return loaded.len <= lut.len and std.mem.eql(u8, loaded, lut[0..loaded.len]);
     }
 
     /// Payload following the *last* occurrence of `cmd`.

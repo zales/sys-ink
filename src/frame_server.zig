@@ -221,7 +221,8 @@ pub fn respondNotFound(stream: net.Stream, io: std.Io) void {
     respond(stream, io, "404 Not Found", "text/plain", "not found\n");
 }
 
-/// Send a packed 1-bit frame as a BMP, serialised into `scratch`.
+/// Send a packed frame (see `bmp.packedRowBytes`) as a BMP, serialised into
+/// `scratch`.
 pub fn respondFrame(
     stream: net.Stream,
     io: std.Io,
@@ -234,7 +235,17 @@ pub fn respondFrame(
         respond(stream, io, "500 Internal Server Error", "text/plain", "serialize failed\n");
         return;
     };
+    reserveSendBuffer(stream, bytes.len);
     respond(stream, io, "200 OK", "image/bmp", bytes);
+}
+
+/// Room in the socket's send buffer for `len` bytes and the head before them,
+/// so that writing them never waits on a client that has stopped reading:
+/// a frame in four greys is some 19 kB, more than Linux's default of 16. A
+/// socket that will not have it is written to as it is.
+fn reserveSendBuffer(stream: net.Stream, len: usize) void {
+    const size: c_int = std.math.lossyCast(c_int, len + 1024);
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&size)) catch {};
 }
 
 // ----------------------------------------------------------------------------

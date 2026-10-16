@@ -5,19 +5,22 @@
 //! several orders of magnitude to visit every unit, the signal reading crosses
 //! the width where it drops its `dBm` suffix, the fault overlay flares
 //! periodically so the inverted status bar can be checked too, a few readings
-//! go stale now and then so the faded rendering can, and notices of every
-//! length come and go so each font step of their layout shows up.
+//! go stale now and then so the faded rendering can, notices of every length
+//! come and go so each font step of their layout shows up, and so does the
+//! music screen: playing, paused, and asking for its code.
 
 const std = @import("std");
 const parse = @import("parse.zig");
 const layout = @import("display_config.zig");
 const Reading = @import("reading.zig").Reading;
+const now_playing = @import("now_playing.zig");
 pub const Renderer = @import("display_renderer.zig").Renderer;
+const bmp = @import("bmp.zig");
 
 pub const width = layout.display_width;
 pub const height = layout.display_height;
-/// Row stride of the renderer's 1-bit frame, matching `packBmpBuffer`.
-pub const row_bytes = @divCeil(width, 8);
+/// Row stride of the renderer's packed frame, four greys a byte.
+pub const row_bytes = bmp.packedRowBytes(width);
 
 /// Fault overlay on for 6 s out of every 30.
 pub fn faultActive(t: f64) bool {
@@ -38,7 +41,7 @@ fn reading(comptime T: type, value: T, stale: bool) Reading(T) {
 }
 
 /// Samples from one line up to one too long for the panel, with diacritics
-/// the renderer has to fold away.
+/// the fonts have to draw.
 const notice_samples = [_][]const u8{
     "Záloha dokončena",
     "Pračka doprala. Nezapomeň pověsit prádlo.",
@@ -56,6 +59,57 @@ pub fn noticeAt(t: f64) ?[]const u8 {
     if (phase < 40.0 or phase >= 48.0) return null;
     const round: usize = @intFromFloat(@floor(t / 60.0));
     return notice_samples[round % notice_samples.len];
+}
+
+/// Tracks from a title that fits one line of the largest font to one that
+/// fits none, with diacritics to draw. Made up.
+const music_samples = [_]struct { artist: []const u8, title: []const u8 }{
+    .{ .artist = "Kapela bez jména", .title = "Jednou" },
+    .{ .artist = "Žluťoučký kůň, Ďábelské ódy", .title = "Pět hospod, jedna ulice" },
+    .{
+        .artist = "Orchestr, který má tak dlouhé jméno, že se na řádek nevejde",
+        .title = "Píseň, jejíž název je schválně tak dlouhý, že se nevejde ani nejmenším písmem a musí skončit trojtečkou",
+    },
+};
+
+/// A cover to dither: a gradient across, and rings, which between them have
+/// every grey and edges in every direction.
+const synthetic_cover: [now_playing.cover_len]u8 = cover: {
+    @setEvalBranchQuota(200_000);
+    const side = now_playing.cover_side;
+    var pixels: [now_playing.cover_len]u8 = undefined;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const dx = @as(i32, @intCast(x)) - side / 2;
+            const dy = @as(i32, @intCast(y)) - side / 2;
+            const ring = ((dx * dx + dy * dy) / 120) % 2 == 0;
+            const ramp = (x + y) * 255 / (2 * side - 2);
+            pixels[y * side + x] = if (ring) @intCast(ramp) else @intCast(255 - ramp);
+        }
+    }
+    break :cover pixels;
+};
+
+/// The music screen for 12 s out of every 60, clear of the notices, the stale
+/// readings and the fault: playing for nine, then paused. Every third time
+/// round, the code to link with instead. Null for the rest.
+pub fn musicAt(t: f64) ?now_playing.View {
+    const phase = @mod(t, 60.0);
+    if (phase < 26.0 or phase >= 38.0) return null;
+    const round: usize = @intFromFloat(@floor(t / 60.0));
+    if (round % 3 == 2) return .{ .pairing = .{ .code = "AB12CD" } };
+
+    // Counted over the rounds that show a track, so every sample comes round.
+    const sample = music_samples[(round - round / 3) % music_samples.len];
+    const elapsed: u32 = @intFromFloat(@min(phase, 35.0) - 26.0 + 40.0);
+    return .{ .track = .{
+        .title = sample.title,
+        .artist = sample.artist,
+        .elapsed_s = elapsed,
+        .duration_s = 232,
+        .playing = phase < 35.0,
+        .cover = if (round % 2 == 0) &synthetic_cover else null,
+    } };
 }
 
 fn wave(t: f64, period: f64) f64 {
@@ -96,10 +150,11 @@ pub fn draw(renderer: *Renderer, t: f64, uptime_s: u64) void {
     renderer.setFaultWarning(faultActive(t));
 
     if (noticeAt(t)) |text| renderer.showNotice(text) else renderer.clearNotice();
+    if (musicAt(t)) |view| renderer.showMusic(view) else renderer.clearMusic();
 }
 
-/// Expand the renderer's packed 1-bit frame into 8-bit greyscale, magnified by
-/// an integer factor with no interpolation.
+/// Expand the renderer's packed frame into 8-bit greyscale, magnified by an
+/// integer factor with no interpolation.
 ///
 /// `dest` must hold `width * scale * height * scale` bytes. Scaling here rather
 /// than in the window keeps pixel edges hard, which is the point of previewing
@@ -115,9 +170,9 @@ pub fn expand(packed_frame: []const u8, dest: []u8, comptime scale: u32) void {
         const first = (y * scale) * dest_width;
         const row_out = dest[first..][0..dest_width];
         for (0..width) |x| {
-            // 1 = white, MSB first.
-            const on = (src_row[x >> 3] >> @intCast(7 - (x & 7))) & 1 == 1;
-            @memset(row_out[x * scale ..][0..scale], if (on) 255 else 0);
+            // A grey from 0, black, to 3, white; the first pixel highest.
+            const shade = (src_row[x / 4] >> @intCast(6 - 2 * (x % 4))) & 0b11;
+            @memset(row_out[x * scale ..][0..scale], shade * 85);
         }
 
         for (1..scale) |dup| {
@@ -195,13 +250,38 @@ test "every notice sample comes round, and the dashboard in between" {
     for (seen) |s| try testing.expect(s);
 }
 
+test "every music sample comes round, paused and playing, and the code to link with too" {
+    const testing = std.testing;
+    var titles: [music_samples.len]bool = @splat(false);
+    var paused = false;
+    var pairing = false;
+    for (0..60 * 3 * music_samples.len) |t| {
+        const view = musicAt(@floatFromInt(t)) orelse continue;
+        switch (view) {
+            .pairing => pairing = true,
+            .track => |track| {
+                if (!track.playing) paused = true;
+                for (music_samples, 0..) |sample, i| {
+                    if (sample.title.ptr == track.title.ptr) titles[i] = true;
+                }
+            },
+        }
+        // Never at the same time as a notice or a fault, so each is seen alone.
+        try testing.expect(noticeAt(@floatFromInt(t)) == null);
+        try testing.expect(!faultActive(@floatFromInt(t)));
+    }
+    try testing.expect(paused and pairing);
+    for (titles) |seen| try testing.expect(seen);
+}
+
 test "expand magnifies without smearing neighbouring pixels" {
     const testing = std.testing;
     const scale = 3;
 
-    // A frame with a single black pixel at (1,0), everything else white.
+    // A frame with a single black pixel at (1,0) and a dark grey one at
+    // (3,0), everything else white.
     var frame: [row_bytes * height]u8 = @splat(0xFF);
-    frame[0] = 0b1011_1111;
+    frame[0] = 0b11_00_11_01;
 
     var out: [width * scale * height * scale]u8 = undefined;
     expand(&frame, &out, scale);
@@ -213,6 +293,8 @@ test "expand magnifies without smearing neighbouring pixels" {
             try testing.expectEqual(@as(u8, 0), out[dy * dest_width + scale + dx]);
         }
     }
+    // The grey one is grey.
+    try testing.expectEqual(@as(u8, 85), out[3 * scale]);
     // Its neighbours stay white.
     try testing.expectEqual(@as(u8, 255), out[0]);
     try testing.expectEqual(@as(u8, 255), out[scale * 2]);

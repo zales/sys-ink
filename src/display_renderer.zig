@@ -1,5 +1,6 @@
 const std = @import("std");
-const Frame = @import("waveshare_epd/epd2in9.zig").Frame;
+const epd2in9 = @import("waveshare_epd/epd2in9.zig");
+const Frame = epd2in9.Frame;
 const layout = @import("display_config.zig");
 const Thresholds = @import("config.zig").Thresholds;
 const parse = @import("parse.zig");
@@ -8,6 +9,8 @@ const Graphics = @import("graphics.zig");
 const Bitmap = Graphics.Bitmap;
 const FontType = Graphics.Bitmap.FontType;
 const notice_text = @import("notice.zig");
+const bmp = @import("bmp.zig");
+const now_playing = @import("now_playing.zig");
 
 /// Bytes per hardware row after the 90° rotation.
 const hw_bytes_per_row = layout.display_height / 8;
@@ -44,8 +47,16 @@ pub const Renderer = struct {
     notice: Bitmap,
     /// Whether the panel shows `notice` rather than `bitmap`.
     notice_shown: bool = false,
+    /// The music screen, kept apart for the same reason as the notice.
+    music: Bitmap,
+    /// Whether the panel shows `music`, when there is no notice to show.
+    music_shown: bool = false,
+    /// Whether `music` has a picture in grey on it, for a grey refresh.
+    music_gray: bool = false,
     /// The frame as `panelFrame` hands it over: 128x296 portrait, 4736 bytes.
     panel_buffer: *Frame,
+    /// The frame as `panelGrayPlanes` hands it over: the same, in two banks.
+    gray_buffer: *[2]Frame,
     /// The frame as `packedFrame` hands it over. Both are kept around so
     /// that producing a frame does not allocate.
     bmp_buffer: []u8,
@@ -62,17 +73,22 @@ pub const Renderer = struct {
         errdefer bitmap.deinit();
         var notice = try Bitmap.init(allocator, layout.display_width, layout.display_height);
         errdefer notice.deinit();
+        var music = try Bitmap.init(allocator, layout.display_width, layout.display_height);
+        errdefer music.deinit();
 
         const panel_buffer = try allocator.create(Frame);
         errdefer allocator.destroy(panel_buffer);
+        const gray_buffer = try allocator.create([2]Frame);
+        errdefer allocator.destroy(gray_buffer);
 
-        const bmp_row_bytes = @divCeil(layout.display_width, 8);
-        const bmp_buffer = try allocator.alloc(u8, bmp_row_bytes * layout.display_height);
+        const bmp_buffer = try allocator.alloc(u8, bmp.packedLen(layout.display_width, layout.display_height));
 
         return .{
             .bitmap = bitmap,
             .notice = notice,
+            .music = music,
             .panel_buffer = panel_buffer,
+            .gray_buffer = gray_buffer,
             .bmp_buffer = bmp_buffer,
             .thresholds = options.thresholds,
             .allocator = allocator,
@@ -82,8 +98,10 @@ pub const Renderer = struct {
     pub fn deinit(self: *Self) void {
         self.bitmap.deinit();
         self.notice.deinit();
+        self.music.deinit();
         self.allocator.free(self.bmp_buffer);
         self.allocator.destroy(self.panel_buffer);
+        self.allocator.destroy(self.gray_buffer);
     }
 
     // ------------------------------------------------------------------------
@@ -176,6 +194,7 @@ pub const Renderer = struct {
         const b = &self.bitmap;
 
         self.notice_shown = false;
+        self.music_shown = false;
         self.warn_fault = false;
 
         b.clear(background);
@@ -210,9 +229,9 @@ pub const Renderer = struct {
     /// Put a notice on the panel in place of the dashboard, from the next
     /// update until `clearNotice`.
     ///
-    /// The fonts cover ASCII only, so the text is folded to it first, and it
-    /// is set in the largest font it fits. What does not fit even the
-    /// smallest is cut off with an ellipsis.
+    /// The text is folded to what the font draws first, and set in the
+    /// largest size it fits. What does not fit even the smallest is cut off
+    /// with an ellipsis.
     pub fn showNotice(self: *Self, text: []const u8) void {
         const b = &self.notice;
         const page = layout.notice;
@@ -224,7 +243,7 @@ pub const Renderer = struct {
         b.drawLine(rule_x, page.rule_y, layout.display_width - 1, page.rule_y, .black);
 
         var folded_buf: [notice_text.max_len]u8 = undefined;
-        const folded = notice_text.foldToAscii(&folded_buf, text);
+        const folded = notice_text.foldToFont(&folded_buf, text);
 
         var lines: [page.max_lines][]const u8 = undefined;
         var last_buf: [notice_text.max_len + 3]u8 = undefined;
@@ -250,10 +269,7 @@ pub const Renderer = struct {
         self.notice_shown = false;
     }
 
-    const NoticeLayout = struct {
-        font: FontType,
-        count: usize,
-    };
+    const NoticeLayout = Fitted;
 
     /// Wrap `text` into `lines` in the largest notice font that holds all of
     /// it. Failing that, the smallest font's lines as far as they go, the last
@@ -264,27 +280,47 @@ pub const Renderer = struct {
         lines: *[layout.notice.max_lines][]const u8,
         last_buf: []u8,
     ) NoticeLayout {
-        const b = &self.notice;
         const body = layout.notice.body;
-        const fonts = layout.notice.fonts;
+        return fitText(&self.notice, text, &layout.notice.fonts, body.width, body.height, lines, last_buf);
+    }
 
+    const Fitted = struct {
+        font: FontType,
+        count: usize,
+    };
+
+    /// Wrap `text` into `lines`, `width` wide, in the first of `fonts` that
+    /// holds all of it in `height`. Failing that, the last font's lines as far
+    /// as they go, the last of them rebuilt in `last_buf` to end in an
+    /// ellipsis. `last_buf` is three bytes longer than `text` can be.
+    fn fitText(
+        b: *Bitmap,
+        text: []const u8,
+        fonts: []const FontType,
+        width: u32,
+        height: u32,
+        lines: [][]const u8,
+        last_buf: []u8,
+    ) Fitted {
         var max: usize = 0;
         for (fonts) |font| {
-            max = @min(lines.len, body.height / b.getLineHeight(font));
-            const needed = b.wrapText(text, font, body.width, lines[0..max]);
+            max = @min(lines.len, height / b.getLineHeight(font));
+            const needed = b.wrapText(text, font, width, lines[0..max]);
             if (needed <= max) return .{ .font = font, .count = needed };
         }
 
-        // The loop left the smallest font's lines in place.
+        // The loop left the last font's lines in place.
         const font = fonts[fonts.len - 1];
         const ellipsis = "...";
+        // A box not even one line of it tall holds nothing at all.
+        if (max == 0) return .{ .font = font, .count = 0 };
 
         var last = lines[max - 1];
         while (true) {
             last = std.mem.trimEnd(u8, last, " ");
-            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= body.width) break;
-            // A whole codepoint at a time: the degree sign survives folding
-            // and is two bytes, and half of it would eat the ellipsis.
+            if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
+            // A whole codepoint at a time: a letter with a diacritic is two
+            // bytes, and half of it would eat the ellipsis.
             var cut = last.len - 1;
             while (cut > 0 and last[cut] & 0xC0 == 0x80) cut -= 1;
             last = last[0..cut];
@@ -297,12 +333,110 @@ pub const Renderer = struct {
     }
 
     // ------------------------------------------------------------------------
+    // The music screen
+    // ------------------------------------------------------------------------
+
+    /// Put the music screen up in place of the dashboard, from the next update
+    /// until `clearMusic`, drawn as `view` says. A notice still goes over it,
+    /// and a hardware fault takes it down: the fault is shown on the
+    /// dashboard's status bar, which this screen does not have.
+    pub fn showMusic(self: *Self, view: now_playing.View) void {
+        self.music.clear(.white);
+        self.music_gray = false;
+        switch (view) {
+            .pairing => |p| self.drawPairing(p.code),
+            .track => |t| self.drawTrack(t),
+        }
+        self.music_shown = true;
+    }
+
+    /// Go back to the dashboard.
+    pub fn clearMusic(self: *Self) void {
+        self.music_shown = false;
+    }
+
+    fn drawTrack(self: *Self, t: now_playing.TrackView) void {
+        const b = &self.music;
+        const m = layout.music;
+
+        if (t.cover) |cover| {
+            // In the panel's four greys; see `panelGrayPlanes`.
+            b.drawDithered(m.cover.x, m.cover.y, m.cover.width, m.cover.height, cover, .four);
+            self.music_gray = true;
+        } else {
+            b.drawRect(m.cover.x, m.cover.y, m.cover.width, m.cover.height, .black);
+        }
+
+        // Both cut to fit, as the font draws them.
+        var folded_buf: [now_playing.max_text]u8 = undefined;
+        var last_buf: [now_playing.max_text + 3]u8 = undefined;
+
+        var artist_line: [1][]const u8 = undefined;
+        const artist = notice_text.foldToFont(&folded_buf, t.artist);
+        const artist_height = b.getLineHeight(m.artist_font);
+        const fitted_artist = fitText(b, artist, &.{m.artist_font}, m.width, artist_height, &artist_line, &last_buf);
+        if (fitted_artist.count > 0) b.drawTextFont(m.artist_at.x, m.artist_at.y, artist_line[0], m.artist_font, .black);
+
+        var title_lines: [m.max_title_lines][]const u8 = undefined;
+        const folded_title = notice_text.foldToFont(&folded_buf, t.title);
+        // Nothing known of what plays: a dash, as an empty slot has.
+        const title = if (folded_title.len > 0) folded_title else "-";
+        const fitted = fitText(b, title, &m.title_fonts, m.title.width, m.title.height, &title_lines, &last_buf);
+        var baseline = m.title.y + Bitmap.fontAscent(fitted.font);
+        for (title_lines[0..fitted.count]) |line| {
+            b.drawTextFont(m.title.x, baseline, line, fitted.font, .black);
+            baseline += @intCast(b.getLineHeight(fitted.font));
+        }
+
+        const bar = m.bar;
+        b.drawRect(bar.x, bar.y, bar.width, bar.height, .black);
+        const inner = bar.width - 4;
+        const filled: u32 = if (t.duration_s == 0) 0 else @intCast(@min(
+            inner,
+            @as(u64, inner) * t.elapsed_s / t.duration_s,
+        ));
+        b.fillRect(bar.x + 2, bar.y + 2, filled, bar.height - 4, .black);
+
+        var time_buf: [16]u8 = undefined;
+        b.drawTextFont(m.left, m.time_baseline, now_playing.formatTime(&time_buf, t.elapsed_s), m.time_font, .black);
+        const total = now_playing.formatTime(&time_buf, t.duration_s);
+        const total_x = m.right - @as(i32, @intCast(b.measureText(total, m.time_font)));
+        b.drawTextFont(total_x, m.time_baseline, total, m.time_font, .black);
+
+        if (!t.playing) {
+            const mark = m.pause_mark;
+            const stroke = mark.width / 3;
+            b.fillRect(mark.x, mark.y, stroke, mark.height, .black);
+            b.fillRect(mark.x + @as(i32, @intCast(mark.width - stroke)), mark.y, stroke, mark.height, .black);
+        }
+    }
+
+    fn drawPairing(self: *Self, code: []const u8) void {
+        const b = &self.music;
+        const page = layout.pairing;
+
+        b.drawTextFont(page.label_at.x, page.label_at.y, page.label, .ubuntu14, .black);
+        const label_width: i32 = @intCast(b.measureText(page.label, .ubuntu14));
+        const rule_x = page.label_at.x + label_width + layout.notice.rule_gap;
+        b.drawLine(rule_x, layout.notice.rule_y, layout.display_width - 1, layout.notice.rule_y, .black);
+
+        b.drawTextFont(page.prompt_at.x, page.prompt_at.y, page.prompt, page.prompt_font, .black);
+        var folded_buf: [now_playing.max_text]u8 = undefined;
+        b.drawTextFont(page.code_at.x, page.code_at.y, notice_text.foldToFont(&folded_buf, code), page.code_font, .black);
+        b.drawTextFont(page.hint_at.x, page.hint_at.y, page.hint, .ubuntu14, .black);
+    }
+
+    // ------------------------------------------------------------------------
     // Handing the frame over
     // ------------------------------------------------------------------------
 
-    /// What the panel shows: the notice while there is one, else the dashboard.
+    /// What the panel shows: the notice while there is one, else the music
+    /// screen while it is up and there is no fault to show, else the
+    /// dashboard.
     fn frameBitmap(self: *Self) *Bitmap {
-        return if (self.notice_shown) &self.notice else &self.bitmap;
+        if (self.notice_shown) return &self.notice;
+        if (self.music_shown and !self.warn_fault) return &self.music;
+        return &self.bitmap;
     }
 
     /// On whatever is shown: a notice can stay up for a day, and a hardware
@@ -335,9 +469,60 @@ pub const Renderer = struct {
         return self.panel_buffer;
     }
 
+    /// Whether what is shown has grey in it, and so goes on the panel by a
+    /// grey refresh when it goes up in full: the music screen with a cover.
+    pub fn grayShown(self: *Self) bool {
+        return self.frameBitmap() == &self.music and self.music_gray;
+    }
+
+    /// The current frame in four greys, as a grey refresh takes it: two banks
+    /// of a bit a pixel, each rotated and packed as `panelFrame` is. Black and
+    /// white stay black and white, and the greys `Shades.four` draws are the
+    /// panel's two. Borrowed: valid until the next call.
+    pub fn panelGrayPlanes(self: *Self) *const [2]Frame {
+        const src = self.frameBitmap();
+        const width = src.width;
+
+        for (0..width) |hw_y| {
+            const src_x = (width - 1) - hw_y;
+            const ram_row = self.gray_buffer[0][hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
+            const base_row = self.gray_buffer[1][hw_y * hw_bytes_per_row ..][0..hw_bytes_per_row];
+
+            for (ram_row, base_row, 0..) |*ram_byte, *base_byte, byte_idx| {
+                var ram: u8 = 0;
+                var base: u8 = 0;
+                for (0..8) |b| {
+                    const level = src.data[(byte_idx * 8 + b) * src.stride + src_x];
+                    const gray = grayOf(level);
+                    ram |= @as(u8, gray.ram()) << @intCast(7 - b);
+                    base |= @as(u8, gray.base()) << @intCast(7 - b);
+                }
+                ram_byte.* = ram;
+                base_byte.* = base;
+            }
+        }
+        return self.gray_buffer;
+    }
+
+    /// Of the panel's four greys, the nearest `level`: 0 black, 3 white.
+    fn shadeOf(level: u8) u8 {
+        return @intCast((@as(u16, level) + 42) / 85);
+    }
+
+    /// The panel's grey nearest `level`, as its banks encode it.
+    fn grayOf(level: u8) epd2in9.Gray {
+        return switch (shadeOf(level)) {
+            0 => .black,
+            1 => .dark,
+            2 => .light,
+            else => .white,
+        };
+    }
+
     /// The same frame the right way up, for whoever shows it rather than
     /// sending it to the panel: the web preview, the BMP export and the
-    /// simulators. Borrowed: valid until the next call.
+    /// simulators. In the panel's four greys, packed as `bmp.packedRowBytes`
+    /// says. Borrowed: valid until the next call.
     pub fn packedFrame(self: *Self) []const u8 {
         if (layout.debug_text_areas) self.drawTextAreaFrames();
 
@@ -377,7 +562,7 @@ pub const Renderer = struct {
                 var bits: u8 = 0;
                 for (0..8) |b| {
                     const src_y = byte_idx * 8 + b;
-                    if (src.data[src_y * src.stride + src_x] >= 128) {
+                    if (Graphics.bayer2(src.data[src_y * src.stride + src_x], src_x, src_y)) {
                         bits |= @as(u8, 0x80) >> @intCast(b);
                     }
                 }
@@ -386,28 +571,25 @@ pub const Renderer = struct {
         }
     }
 
-    /// Pack the bitmap into `bmp_buffer`, unrotated, 1 bit per pixel.
+    /// Pack the bitmap into `bmp_buffer`, unrotated, a grey from 0 to 3 a pixel.
     fn packBmpBuffer(self: *Self) void {
         const src = self.frameBitmap();
         const width = src.width;
-        const height = src.height;
-        const row_bytes = @divCeil(width, 8);
+        const row_bytes = bmp.packedRowBytes(width);
 
-        // Pack to 1-bit without rotation, into the preallocated scratch buffer.
-        var y: u32 = 0;
-        while (y < height) : (y += 1) {
+        for (0..src.height) |y| {
             const src_row = src.data[y * src.stride ..][0..width];
             const dst_row = self.bmp_buffer[y * row_bytes ..][0..row_bytes];
 
             for (dst_row, 0..) |*out_byte, byte_idx| {
-                var bits: u8 = 0;
-                for (0..8) |b| {
-                    const x = byte_idx * 8 + b;
-                    if (x >= width or src_row[x] >= 128) {
-                        bits |= @as(u8, 0x80) >> @intCast(b);
-                    }
+                var grays: u8 = 0;
+                for (0..4) |p| {
+                    const x = byte_idx * 4 + p;
+                    // Past the right edge, white.
+                    const shade: u8 = if (x < width) shadeOf(src_row[x]) else 3;
+                    grays |= shade << @intCast(6 - 2 * p);
                 }
-                out_byte.* = bits;
+                out_byte.* = grays;
             }
         }
     }
@@ -958,8 +1140,8 @@ test "the thresholds the renderer is given are the ones it inverts at" {
 
 /// Rows of the unrotated BMP buffer covering the status bar.
 fn statusBarRows(r: *Renderer) []const u8 {
-    const row_bytes = @divCeil(layout.display_width, 8);
-    return r.bmp_buffer[layout.status_bar.y * row_bytes ..];
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    return r.bmp_buffer[@as(usize, @intCast(layout.status_bar.y)) * row_bytes ..];
 }
 
 test "the warning inverts the status bar in the frame sent to the panel" {
@@ -1035,8 +1217,8 @@ test "the warning leaves everything above the status bar alone" {
 
     r.drawReferenceScreen();
     r.packBmpBuffer();
-    const row_bytes = @divCeil(layout.display_width, 8);
-    const above_len = layout.status_bar.y * row_bytes;
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    const above_len = @as(usize, @intCast(layout.status_bar.y)) * row_bytes;
     const clean_above = try testing.allocator.dupe(u8, r.bmp_buffer[0..above_len]);
     defer testing.allocator.free(clean_above);
 
@@ -1113,8 +1295,8 @@ test "a hardware fault shows over a notice too" {
     const faulted = r.packedFrame();
 
     // The status bar rows are inverted on the notice, and only they are.
-    const row_bytes = @divCeil(layout.display_width, 8);
-    const bar_start = layout.status_bar.y * row_bytes;
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    const bar_start = @as(usize, @intCast(layout.status_bar.y)) * row_bytes;
     try testing.expectEqualSlices(u8, quiet[0..bar_start], faulted[0..bar_start]);
     for (quiet[bar_start..], faulted[bar_start..]) |q, f| try testing.expectEqual(~q, f);
 
@@ -1258,4 +1440,191 @@ test "no warning means no overlay at all" {
     r.toggleFaultOverlay();
 
     try testing.expectEqualSlices(u8, clean, r.bmp_buffer);
+}
+
+fn trackView(title: []const u8, elapsed_s: u32, duration_s: u32, playing: bool) now_playing.View {
+    return .{ .track = .{
+        .title = title,
+        .artist = "Vladimír Mišík",
+        .elapsed_s = elapsed_s,
+        .duration_s = duration_s,
+        .playing = playing,
+        .cover = null,
+    } };
+}
+
+test "the music screen replaces the dashboard and clearing it brings the dashboard back intact" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    const dashboard = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(dashboard);
+
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expect(!std.mem.eql(u8, dashboard, r.packedFrame()));
+
+    r.clearMusic();
+    try testing.expectEqualSlices(u8, dashboard, r.packedFrame());
+}
+
+test "a notice goes over the music screen, which is back once it is cleared" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    const music = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(music);
+
+    r.showNotice("Backup finished");
+    try testing.expect(!std.mem.eql(u8, music, r.packedFrame()));
+    r.clearNotice();
+    try testing.expectEqualSlices(u8, music, r.packedFrame());
+}
+
+test "a hardware fault takes the music screen down for the dashboard that shows it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.drawReferenceScreen();
+    r.setFaultWarning(true);
+    const faulted_dashboard = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(faulted_dashboard);
+
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expectEqualSlices(u8, faulted_dashboard, r.packedFrame());
+}
+
+/// Black pixels on the progress bar's middle row, inside its outline.
+fn barFill(r: *Renderer) u32 {
+    const bar = layout.music.bar;
+    const y: usize = @intCast(bar.y + @as(i32, @intCast(bar.height / 2)));
+    var filled: u32 = 0;
+    for (0..bar.width - 4) |i| {
+        const x: usize = @intCast(bar.x + 2 + @as(i32, @intCast(i)));
+        filled += @intFromBool(r.music.data[y * r.music.stride + x] == 0);
+    }
+    return filled;
+}
+
+test "the progress bar fills as the track plays" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const inner = layout.music.bar.width - 4;
+
+    r.showMusic(trackView("Jednou", 0, 200, true));
+    try testing.expectEqual(@as(u32, 0), barFill(&r));
+    r.showMusic(trackView("Jednou", 100, 200, true));
+    try testing.expectEqual(inner / 2, barFill(&r));
+    r.showMusic(trackView("Jednou", 200, 200, true));
+    try testing.expectEqual(inner, barFill(&r));
+    // A length nobody knows is no progress, not a division by zero.
+    r.showMusic(trackView("Jednou", 10, 0, true));
+    try testing.expectEqual(@as(u32, 0), barFill(&r));
+}
+
+test "a pause is marked, and only while paused" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const mark = layout.music.pause_mark;
+
+    r.showMusic(trackView("Jednou", 60, 232, false));
+    const at = @as(usize, @intCast(mark.y)) * r.music.stride + @as(usize, @intCast(mark.x));
+    try testing.expectEqual(@as(u8, 0), r.music.data[at]);
+    r.showMusic(trackView("Jednou", 60, 232, true));
+    try testing.expectEqual(@as(u8, 255), r.music.data[at]);
+}
+
+test "a title too long for its box ends in an ellipsis inside it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    const m = layout.music;
+
+    const long: *const [40 * 6]u8 = comptime long: {
+        const words: [40][6]u8 = @splat("words ".*);
+        break :long @ptrCast(&words);
+    };
+    var lines: [m.max_title_lines][]const u8 = undefined;
+    var last_buf: [now_playing.max_text + 3]u8 = undefined;
+    const fitted = Renderer.fitText(&r.music, long, &m.title_fonts, m.title.width, m.title.height, &lines, &last_buf);
+
+    try testing.expectEqual(FontType.ubuntu14, fitted.font);
+    try testing.expect(std.mem.endsWith(u8, lines[fitted.count - 1], "..."));
+    for (lines[0..fitted.count]) |line| try testing.expect(r.music.measureText(line, fitted.font) <= m.title.width);
+    try testing.expect(fitted.count * r.music.getLineHeight(fitted.font) <= m.title.height);
+}
+
+test "text for a box too short for a single line is not drawn, rather than crash" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    var lines: [4][]const u8 = undefined;
+    var last_buf: [64]u8 = undefined;
+    const fitted = Renderer.fitText(&r.music, "anything at all", &.{.ubuntu14}, 100, 10, &lines, &last_buf);
+    try testing.expectEqual(@as(usize, 0), fitted.count);
+}
+
+test "the pairing screen shows the code" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    r.showMusic(.{ .pairing = .{ .code = "ABC123" } });
+    const with_code = try testing.allocator.dupe(u8, r.packedFrame());
+    defer testing.allocator.free(with_code);
+    r.showMusic(.{ .pairing = .{ .code = "XYZ789" } });
+    try testing.expect(!std.mem.eql(u8, with_code, r.packedFrame()));
+}
+
+test "the music screen with a cover goes to the panel in grey, and only it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    r.drawReferenceScreen();
+    try testing.expect(!r.grayShown());
+
+    const cover: [now_playing.cover_len]u8 = @splat(85);
+    r.showMusic(.{ .track = .{ .title = "x", .artist = "y", .elapsed_s = 0, .duration_s = 1, .playing = true, .cover = &cover } });
+    try testing.expect(r.grayShown());
+
+    // Not under a notice, nor with a fault to show, nor without a cover.
+    r.showNotice("hello");
+    try testing.expect(!r.grayShown());
+    r.clearNotice();
+    r.setFaultWarning(true);
+    try testing.expect(!r.grayShown());
+    r.setFaultWarning(false);
+    r.showMusic(trackView("x", 0, 1, true));
+    try testing.expect(!r.grayShown());
+}
+
+test "each of the four greys reaches the panel's banks as the bits the driver gives it" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+    r.showMusic(trackView("x", 0, 1, true));
+
+    // Four pixels down the last column, which is the first hardware row, MSB first.
+    const x = layout.display_width - 1;
+    const levels = [_]u8{ 0, 85, 170, 255 };
+    const expected = [_]epd2in9.Gray{ .black, .dark, .light, .white };
+    for (levels, 0..) |level, y| r.music.data[y * r.music.stride + x] = level;
+
+    const planes = r.panelGrayPlanes();
+    for (expected, 0..) |gray, y| {
+        const bit = @as(u8, 0x80) >> @intCast(y);
+        try testing.expectEqual(gray.ram() == 1, planes[0][0] & bit != 0);
+        try testing.expectEqual(gray.base() == 1, planes[1][0] & bit != 0);
+    }
+}
+
+test "in the preview, a grey cover keeps its grey" {
+    var r = try Renderer.init(testing.allocator, .{});
+    defer r.deinit();
+
+    const cover: [now_playing.cover_len]u8 = @splat(85);
+    r.showMusic(.{ .track = .{ .title = "x", .artist = "y", .elapsed_s = 0, .duration_s = 1, .playing = true, .cover = &cover } });
+    const frame = r.packedFrame();
+    const row_bytes = bmp.packedRowBytes(layout.display_width);
+    // Two rows across the cover, 128 pixels each: all dark grey, 1 of 0 to 3.
+    for (40..42) |y| {
+        for (frame[y * row_bytes ..][0..32]) |byte| try testing.expectEqual(@as(u8, 0b01_01_01_01), byte);
+    }
 }

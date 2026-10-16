@@ -226,6 +226,10 @@ void generate_font(const char* font_path, const char* name, int* sizes, int size
 // versions, and the layout constants in src/display_config.zig are tuned to the
 // checked-in output. Regenerating with a different toolchain will shift glyph
 // metrics and require re-tuning that layout — diff the result before committing.
+// The letters U+00C0 to U+017F were added on 2026-10-16 with cairo 1.18.6 and
+// FreeType 26.6.20, and merged into the checked-in file beside the glyphs that
+// were there, which were left as they were: rendered with that toolchain, a few
+// of them, the double quote among them, come out a column narrower.
 int main() {
     out = fopen("src/font_data.zig", "w");
     if (!out) return 1;
@@ -237,12 +241,18 @@ int main() {
     uint32_t ascii[95];
     for(int i=0; i<95; i++) ascii[i] = 32 + i;
     
-    // Add degree symbol (0xB0)
-    uint32_t ubuntu_cps[96];
+    // The degree sign, and the Latin letters with diacritics: U+00C0 to
+    // U+017F, Latin-1 and Latin Extended-A, less the two signs among them.
+    uint32_t ubuntu_cps[96 + 190];
     memcpy(ubuntu_cps, ascii, sizeof(ascii));
-    ubuntu_cps[95] = 0xB0; // °
-    
-    generate_font("lib/fonts/Ubuntu-Regular.ttf", "ubuntu", ubuntu_sizes, 5, ubuntu_cps, 96);
+    int ubuntu_count = 95;
+    ubuntu_cps[ubuntu_count++] = 0xB0; // °
+    for (uint32_t cp = 0xC0; cp <= 0x17F; cp++) {
+        if (cp == 0xD7 || cp == 0xF7) continue; // × ÷
+        ubuntu_cps[ubuntu_count++] = cp;
+    }
+
+    generate_font("lib/fonts/Ubuntu-Regular.ttf", "ubuntu", ubuntu_sizes, 5, ubuntu_cps, ubuntu_count);
     
     // Material Symbols
     int material_sizes[] = {14, 24, 50};

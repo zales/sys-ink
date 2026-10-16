@@ -421,6 +421,17 @@ pub const Config = struct {
     /// How long a notice stays on the panel, in seconds.
     notify_duration: u32 = 30,
 
+    /// Show what Spotify plays. See `spotify_client.zig`.
+    spotify_enabled: bool = false,
+    /// Where the link to the Spotify account is kept between runs. It holds
+    /// a refresh token, so it is written readable by its owner alone.
+    spotify_state_file: []const u8 = "/var/lib/sys-ink/spotify.json",
+    /// How long the music screen stays up once playback pauses, in seconds.
+    spotify_pause_hold: u32 = 30,
+    /// Seconds between redraws of the music screen while it plays, which move
+    /// its progress bar. Each is a partial refresh of the panel.
+    spotify_interval: u32 = 5,
+
     /// The settings `map` gives, over the defaults above. Strings are borrowed
     /// from `map`, which must outlive the result.
     pub fn fromEnv(map: *const EnvMap, report: *Report) Config {
@@ -462,6 +473,11 @@ pub const Config = struct {
             .notify_fifo = env.string("NOTIFY_FIFO", defaults.notify_fifo),
             .notify_group = env.get("NOTIFY_GROUP"),
             .notify_duration = env.int(u32, "NOTIFY_DURATION", defaults.notify_duration, 1),
+
+            .spotify_enabled = env.boolean("SPOTIFY_ENABLED", defaults.spotify_enabled),
+            .spotify_state_file = env.string("SPOTIFY_STATE_FILE", defaults.spotify_state_file),
+            .spotify_pause_hold = env.int(u32, "SPOTIFY_PAUSE_HOLD", defaults.spotify_pause_hold, 0),
+            .spotify_interval = env.int(u32, "SPOTIFY_INTERVAL", defaults.spotify_interval, 1),
         };
     }
 
@@ -611,6 +627,32 @@ test "what the environment sets is what the config holds" {
     try testing.expectEqual(LogLevel.debug, cfg.log_level);
     try testing.expectEqualStrings("s3cret", cfg.web_api_token.?);
     try testing.expectEqualStrings("panel", cfg.notify_group.?);
+}
+
+test "Spotify stays off unless asked for, and its settings are read when given" {
+    var off = try envOf(&.{});
+    defer off.deinit();
+    var report: Report = .{};
+    const defaults = Config.fromEnv(&off, &report);
+    try testing.expect(!defaults.spotify_enabled);
+    try testing.expectEqualStrings("/var/lib/sys-ink/spotify.json", defaults.spotify_state_file);
+
+    var map = try envOf(&.{
+        .{ "SPOTIFY_ENABLED", "true" },
+        .{ "SPOTIFY_STATE_FILE", "/srv/spotify.json" },
+        .{ "SPOTIFY_PAUSE_HOLD", "0" },
+        .{ "SPOTIFY_INTERVAL", "0" },
+    });
+    defer map.deinit();
+    report = .{};
+    const cfg = Config.fromEnv(&map, &report);
+    try testing.expect(cfg.spotify_enabled);
+    try testing.expectEqualStrings("/srv/spotify.json", cfg.spotify_state_file);
+    // No hold at all is a choice; no interval between redraws is not.
+    try testing.expectEqual(@as(u32, 0), cfg.spotify_pause_hold);
+    try testing.expectEqual(@as(u32, 1), cfg.spotify_interval);
+    try testing.expectEqual(@as(usize, 1), report.rejected().len);
+    try testing.expect(rejectionOf(&report, "SPOTIFY_INTERVAL") != null);
 }
 
 test "a number that is not one keeps the default, and says so" {

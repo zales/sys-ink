@@ -23,6 +23,9 @@ pub const PanelSpec = struct {
     lut_full: *const [lut_len]u8,
     /// Partial-refresh waveform, same layout.
     lut_partial: *const [lut_len]u8,
+    /// Four-grey full-refresh waveform, same layout; null for a panel that
+    /// cannot show grey.
+    lut_gray4: ?*const [lut_len]u8 = null,
     /// Gate scan configuration for DRIVER_OUTPUT_CONTROL. The first two bytes
     /// are the gate line count minus one, little endian; the third selects the
     /// scan order.
@@ -62,6 +65,7 @@ pub const waveshare_2in9_v2: PanelSpec = .{
     .height = 296,
     .lut_full = &ws_20_30,
     .lut_partial = &wf_partial_2in9,
+    .lut_gray4 = &gray4_2in9,
 };
 
 // Kept for the production instance's users.
@@ -91,6 +95,52 @@ const wf_partial_2in9 = [_]u8{
     0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0, 0x0, 0x0, 0x0,  0x0,  0x0,
     0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x0, 0x0, 0x0, 0x22, 0x17, 0x41,
     0xB0, 0x32, 0x36,
+};
+
+/// The partial waveform less its hold pulses: of its four rows, the first and
+/// the last drive the pixels a frame leaves as they were, one frame towards
+/// black or towards white, to keep them there. Zeroed here, which leaves those
+/// pixels alone. Used while a grey picture is on the glass, which the pulses
+/// would push a little nearer black and white with every update.
+const wf_partial_still: [lut_len]u8 = stillOf(&wf_partial_2in9);
+
+/// Four-grey update LUT for V2 (159 bytes), Waveshare's `Gray4`. A full
+/// refresh, driven by two bits a pixel: one from each RAM bank.
+pub const gray4_2in9 = [_]u8{
+    0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x20, 0x60, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x28, 0x60, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2A, 0x60, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x05, 0x14, 0x00, 0x00, 0x1E, 0x1E, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x02, 0x00, 0x05, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x24, 0x22, 0x22, 0x22, 0x23, 0x32, 0x00, 0x00, 0x00, 0x22, 0x17, 0x41,
+    0xAE, 0x32, 0x28,
+};
+
+/// The four greys a pixel can have in a grey refresh, by the bit each RAM
+/// bank holds for it: (0x24, 0x26). As Waveshare's `display_4Gray` maps them;
+/// note that white is 0 in both, where in black and white it is 1.
+pub const Gray = enum(u2) {
+    black = 0b11,
+    dark = 0b01,
+    light = 0b10,
+    white = 0b00,
+
+    /// The bit for this grey in the bank written by 0x24.
+    pub fn ram(self: Gray) u1 {
+        return @intCast(@backingInt(self) >> 1);
+    }
+
+    /// The bit for this grey in the bank written by 0x26.
+    pub fn base(self: Gray) u1 {
+        return @intCast(@backingInt(self) & 1);
+    }
 };
 
 // Full update LUT for V2 (159 bytes) - from C reference
@@ -132,6 +182,9 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
         /// One frame for this panel. Sized from the spec, so a buffer of the wrong
         /// length cannot be passed in.
         pub const PanelFrame = [panel.bufferSize()]u8;
+        /// A frame in four greys: the bank written by 0x24 and the one written
+        /// by 0x26, a bit a pixel each, laid out as `PanelFrame` is.
+        pub const GrayPlanes = [2]PanelFrame;
 
         config: *Transport,
 
@@ -398,12 +451,49 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             try self.turnOnDisplay();
         }
 
+        /// Refresh fully in four greys, as Waveshare's `Init_4Gray` and
+        /// `display_4Gray` do: the controller is reset and set up for it, and
+        /// each bank is given one of the two bits of every pixel; see `Gray`.
+        ///
+        /// Leaves the controller set up for grey and both banks holding grey
+        /// planes. A partial update cannot follow until `reInit` and `primeBase`
+        /// have put back a black-and-white reference: `panel.zig` sees to that.
+        pub fn displayGray(self: *Self, planes: *const GrayPlanes) !void {
+            const lut = panel.lut_gray4 orelse @compileError("this panel shows no grey");
+
+            try self.reset();
+            self.config.delayMs(100);
+            try self.readBusy();
+
+            try self.sendCommand(.sw_reset);
+            try self.readBusy();
+
+            try self.sendCommandArgs(.driver_output_control, &panel.driverOutputControl());
+            try self.sendCommandArgs(.data_entry_mode, &[_]u8{0x03});
+            // One RAM column on from black and white, as in Waveshare's grey
+            // mode, which leaves DISPLAY_UPDATE_CONTROL_1 at its default and so
+            // drives all the sources rather than S8 onwards.
+            try self.setWindows(8, 0, panel.width, panel.height - 1);
+            try self.sendCommandArgs(.border_waveform_control, &[_]u8{0x04});
+            try self.setCursor(8, 0);
+            try self.readBusy();
+
+            try self.loadLutByHost(lut);
+
+            try self.sendCommand(.write_ram);
+            try self.sendDataSlice(&planes[0]);
+            try self.sendCommand(.write_ram_base);
+            try self.sendDataSlice(&planes[1]);
+
+            try self.turnOnDisplay();
+        }
+
         /// Soft-reset and arm the panel for a partial update: partial LUT, border
         /// waveform and analog power-up. Drives nothing, so it cannot flicker.
         ///
         /// The RST pulse resets the registers but leaves both RAM banks intact —
         /// which is why partial updates work at all, given this runs before each one.
-        fn beginPartial(self: *Self) !void {
+        fn beginPartial(self: *Self, lut: *const [lut_len]u8) !void {
             // Reset (from C reference - only 1ms delays)
             try self.config.digitalWrite(Transport.rst_pin, 0);
             self.config.delayMs(1);
@@ -411,7 +501,7 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             self.config.delayMs(2);
 
             // Load partial LUT
-            try self.loadLut(panel.lut_partial);
+            try self.loadLut(lut);
 
             // WriteOtpSelection (0x37 in C, not 0x2F!)
             try self.sendCommandArgs(.write_otp_selection, &[_]u8{
@@ -448,7 +538,19 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
 
         /// Partial update display - from C reference EPD_2IN9_V2_Display_Partial
         pub fn displayPartial(self: *Self, image: *const PanelFrame) !void {
-            try self.beginPartial();
+            try self.partialWith(image, panel.lut_partial);
+        }
+
+        /// As `displayPartial`, but the pixels the frame leaves as they were are
+        /// not driven at all; see `wf_partial_still`. For a grey picture on the
+        /// glass, which the usual waveform would wear down to black and white.
+        pub fn displayPartialStill(self: *Self, image: *const PanelFrame) !void {
+            const still = comptime stillOf(panel.lut_partial);
+            try self.partialWith(image, &still);
+        }
+
+        fn partialWith(self: *Self, image: *const PanelFrame, lut: *const [lut_len]u8) !void {
+            try self.beginPartial(lut);
 
             // Reset window to full frame
             try self.setWindows(0, 0, panel.width - 1, panel.height - 1);
@@ -473,6 +575,14 @@ pub fn EpdPanel(comptime Transport: type, comptime panel: PanelSpec) type {
             self.config.delayMs(100);
         }
     };
+}
+
+/// `lut`, a partial waveform, less the hold pulses of its first and last rows.
+fn stillOf(lut: *const [lut_len]u8) [lut_len]u8 {
+    var still = lut.*;
+    @memset(still[0..12], 0);
+    @memset(still[36..48], 0);
+    return still;
 }
 
 /// Deep Sleep Mode 1. Mode 2 (0x03) additionally drops RAM, which would make
@@ -707,4 +817,59 @@ test "initDisplay brings the transport up before talking to the panel" {
     try epd.initDisplay();
     try testing.expectEqual(@as(u32, 1), fake.module_init_calls);
     try testing.expect(fake.sentCommand(0x12)); // SW_RESET, so reInit ran too
+}
+
+test "the grey waveform is Waveshare's, 159 bytes ending in its voltages" {
+    try testing.expectEqual(@as(usize, lut_len), gray4_2in9.len);
+    try testing.expectEqualSlices(u8, &.{ 0x22, 0x17, 0x41, 0xAE, 0x32, 0x28 }, gray4_2in9[153..]);
+}
+
+test "the four greys take the bits Waveshare gives them, white 0 in both banks" {
+    try testing.expectEqual(@as(u1, 0), Gray.white.ram());
+    try testing.expectEqual(@as(u1, 0), Gray.white.base());
+    try testing.expectEqual(@as(u1, 1), Gray.light.ram());
+    try testing.expectEqual(@as(u1, 0), Gray.light.base());
+    try testing.expectEqual(@as(u1, 0), Gray.dark.ram());
+    try testing.expectEqual(@as(u1, 1), Gray.dark.base());
+    try testing.expectEqual(@as(u1, 1), Gray.black.ram());
+    try testing.expectEqual(@as(u1, 1), Gray.black.base());
+}
+
+test "displayGray writes a plane to each bank with the grey waveform and refreshes fully" {
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+
+    const planes: TestEpd.GrayPlanes = .{ @splat(0x0F), @splat(0xF0) };
+    try epd.displayGray(&planes);
+
+    try testing.expect(fake.sentCommand(0x12)); // SW_RESET
+    try testing.expectEqualSlices(u8, gray4_2in9[0..153], fake.argsAfter(0x32).?);
+    try testing.expectEqualSlices(u8, &.{0x28}, fake.argsAfter(0x2C).?); // its VCOM, not the full one's
+    // Waveshare's window and border for grey.
+    try testing.expectEqualSlices(u8, &.{ 1, 16 }, fake.argsAfter(0x44).?);
+    try testing.expectEqualSlices(u8, &.{1}, fake.argsAfter(0x4E).?);
+    try testing.expectEqualSlices(u8, &.{0x04}, fake.argsAfter(0x3C).?);
+    // No source range set, unlike black and white.
+    try testing.expect(!fake.sentCommand(0x21));
+
+    try testing.expectEqualSlices(u8, &planes[0], fake.argsAfter(0x24).?);
+    try testing.expectEqualSlices(u8, &planes[1], fake.argsAfter(0x26).?);
+    try testing.expectEqualSlices(u8, &.{0xC7}, fake.lastArgsAfter(0x22).?);
+}
+
+test "the still partial waveform drives changed pixels as the partial one does, and the rest not at all" {
+    // Rows 1 and 2 are the changes; 0 and 3, the hold pulses, are gone.
+    try testing.expectEqualSlices(u8, wf_partial_2in9[12..36], wf_partial_still[12..36]);
+    try testing.expectEqualSlices(u8, wf_partial_2in9[48..], wf_partial_still[48..]);
+    for (wf_partial_still[0..12]) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (wf_partial_still[36..48]) |b| try testing.expectEqual(@as(u8, 0), b);
+
+    var fake = FakeTransport.init(testing.allocator);
+    defer fake.deinit();
+    var epd = testEpd(&fake);
+    var frame: Frame = @splat(0x0F);
+    try epd.displayPartialStill(&frame);
+    try testing.expectEqualSlices(u8, wf_partial_still[0..153], fake.argsAfter(0x32).?);
+    try testing.expectEqualSlices(u8, &.{0x0F}, fake.lastArgsAfter(0x22).?);
 }

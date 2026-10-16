@@ -27,6 +27,7 @@ const api = @import("api.zig");
 const app_logic = @import("app_logic.zig");
 const parse = @import("parse.zig");
 const notice = @import("notice.zig");
+const now_playing = @import("now_playing.zig");
 const network_ops = @import("network_ops.zig");
 const panel_mod = @import("panel.zig");
 const layout = @import("display_config.zig");
@@ -52,6 +53,8 @@ pub const Options = struct {
     /// Whether the APT check may refresh the package lists first, which takes
     /// root. Without it the count comes from the lists as they stand.
     may_update_package_lists: bool = false,
+    /// When the music screen shows, with Spotify on. Null: never.
+    music: ?now_playing.Options = null,
 };
 
 /// Whoever else shows the frame: given each one as it goes up, with the
@@ -92,6 +95,9 @@ pub fn App(comptime Transport: type) type {
         refresh: app_logic.RefreshClock,
         /// When notices go up and when they come down.
         pacer: notice.Pacer = .{},
+        /// When the music screen goes up, comes down and is redrawn. Null
+        /// with Spotify off.
+        music: ?now_playing.Screen = null,
         /// Which faults have been announced, so each is logged once. What the
         /// faults are is in the readings; see `showFaults`.
         fault_log: app_logic.FaultLog = .{},
@@ -106,6 +112,7 @@ pub fn App(comptime Transport: type) type {
                 .renderer = parts.renderer,
                 .panel = parts.panel,
                 .refresh = .{ .interval = options.interval_full_refresh },
+                .music = if (options.music) |music| .{ .options = music } else null,
             };
         }
 
@@ -148,6 +155,12 @@ pub fn App(comptime Transport: type) type {
 
         fn nowSeconds(self: *Self) i64 {
             return std.Io.Timestamp.now(self.io, .awake).toSeconds();
+        }
+
+        /// The same clock in milliseconds, which the Spotify client stamps
+        /// what it receives with.
+        fn nowMs(self: *Self) i64 {
+            return std.Io.Timestamp.now(self.io, .awake).toMilliseconds();
         }
 
         // ------------------------------------------------------------------------
@@ -349,7 +362,14 @@ pub fn App(comptime Transport: type) type {
         pub fn updateDisplayAt(self: *Self, now: i64) void {
             const refresh = self.refresh.next(now);
 
-            if (self.panel.show(self.renderer.panelFrame(), refresh)) {
+            // A picture in grey goes up in full by a grey refresh; partial
+            // updates over it leave its grey alone.
+            const shown = if (refresh == .full and self.renderer.grayShown())
+                self.panel.showGray(self.renderer.panelGrayPlanes(), self.renderer.panelFrame())
+            else
+                self.panel.show(self.renderer.panelFrame(), refresh);
+
+            if (shown) {
                 self.exportBmp();
             } else |err| {
                 log.warn("Failed to update display: {t}", .{err});
@@ -547,6 +567,67 @@ pub fn App(comptime Transport: type) type {
         /// its turn going up. Null when there is nothing to wake for.
         pub fn noticeSecondsLeft(self: *Self) ?i64 {
             return self.pacer.secondsLeft(self.nowSeconds());
+        }
+
+        // ------------------------------------------------------------------------
+        // Music
+        // ------------------------------------------------------------------------
+
+        /// Take in what the Spotify client has just handed over, and put it on
+        /// the panel if it calls for that.
+        pub fn applySpotify(self: *Self, snapshot: *const now_playing.Snapshot) void {
+            self.applySpotifyAt(snapshot, self.nowMs());
+        }
+
+        /// `applySpotify` at an explicit time, in milliseconds.
+        pub fn applySpotifyAt(self: *Self, snapshot: *const now_playing.Snapshot, now_ms: i64) void {
+            const screen = if (self.music) |*m| m else return;
+            screen.update(snapshot, now_ms);
+            _ = self.stepMusicAt(now_ms);
+        }
+
+        /// Do to the panel what the music calls for by now: put the screen up,
+        /// move its progress bar, or take it down. Asked every time round the
+        /// main loop, and whenever the client hands something over.
+        pub fn stepMusic(self: *Self) void {
+            _ = self.stepMusicAt(self.nowMs());
+        }
+
+        /// `stepMusic` at an explicit time, in milliseconds. True when the
+        /// panel was changed.
+        pub fn stepMusicAt(self: *Self, now_ms: i64) bool {
+            const screen = if (self.music) |*m| m else return false;
+            // The dashboard has a fault to show on its status bar, which the
+            // music screen does not have.
+            const step = screen.step(now_ms, self.renderer.warn_fault) orelse return false;
+
+            // Under a notice the screen is drawn all the same, for when the
+            // notice comes down, which is a full refresh of its own.
+            const visible = !self.renderer.notice_shown;
+            switch (step) {
+                .show => |shown| {
+                    self.renderer.showMusic(shown.view);
+                    // A new picture over an old one by a partial update would
+                    // leave a ghost of the old.
+                    if (shown.full and visible) self.refresh.force();
+                },
+                .hide => {
+                    self.renderer.clearMusic();
+                    if (visible) self.refresh.force();
+                },
+            }
+            if (!visible) return false;
+            self.updateDisplayAt(@divFloor(now_ms, 1000));
+            return true;
+        }
+
+        /// Seconds until the music next calls for something without the client
+        /// handing anything over, rounded up, for the main loop to wake on time.
+        /// Null when there is nothing to wake for.
+        pub fn musicSecondsLeft(self: *Self) ?i64 {
+            const screen = if (self.music) |*m| m else return null;
+            const ms = screen.msLeft(self.nowMs()) orelse return null;
+            return @divCeil(ms, 1000);
         }
 
         // ------------------------------------------------------------------------
@@ -1054,6 +1135,139 @@ test "the notice on show sent again is not drawn again, and stays up longer" {
     try testing.expectEqual(@as(?i64, 30), bench.app.pacer.secondsLeft(1025));
 }
 
+fn playingSnapshot(uri: []const u8, position_ms: i64, at_ms: i64) now_playing.Snapshot {
+    return .{
+        .playback = .{
+            .uri = .init(uri),
+            .playing = true,
+            .position_ms = position_ms,
+            .at_ms = at_ms,
+            .duration_ms = 200_000,
+        },
+        .track = .{ .uri = .init(uri), .title = .init("Jednou"), .artist = .init("Vladimir Misik") },
+    };
+}
+
+test "music goes up with a full refresh, moves on its tick by partial ones, and comes down with a full one" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .music = .{ .hold_paused = 30, .tick = 5 } });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    try testing.expect(bench.renderer.music_shown);
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+    try testing.expectEqual(@as(?i64, 5), @divTrunc(bench.app.music.?.msLeft(1_000_000).?, 1000));
+
+    bench.transport.resetLog();
+    try testing.expect(bench.app.stepMusicAt(1_005_000));
+    try testing.expectEqual(Waveform.partial, bench.refreshed().?);
+
+    var paused = playingSnapshot("spotify:track:a", 6_000, 1_006_000);
+    paused.playback.?.playing = false;
+    bench.app.applySpotifyAt(&paused, 1_006_000);
+
+    bench.transport.resetLog();
+    try testing.expect(bench.app.stepMusicAt(1_036_000));
+    try testing.expect(!bench.renderer.music_shown);
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+}
+
+test "a cover goes up in grey, the bar moves on by partial updates, and the dashboard comes back in black and white" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .music = .{ .hold_paused = 0, .tick = 5 } });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    var snapshot = playingSnapshot("spotify:track:a", 0, 1_000_000);
+    snapshot.cover_valid = true;
+    snapshot.cover_serial = 1;
+    snapshot.cover = @splat(128);
+
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&snapshot, 1_000_000);
+    try testing.expectEqual(Waveform.gray, bench.refreshed().?);
+
+    bench.transport.resetLog();
+    try testing.expect(bench.app.stepMusicAt(1_005_000));
+    try testing.expectEqual(Waveform.partial, bench.refreshed().?);
+
+    // With no hold, a pause takes the screen down at once.
+    snapshot.playback.?.playing = false;
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&snapshot, 1_006_000);
+    try testing.expect(!bench.renderer.music_shown);
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+}
+
+test "under a notice the music is drawn without touching the panel, and shows once the notice is down" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .notify_duration = 30, .music = .{} });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    bench.app.applyNoticeAt("Backup finished", 1010);
+    try testing.expect(bench.renderer.notice_shown);
+
+    // A new track with a new cover under the notice: no refresh, full or not.
+    var next = playingSnapshot("spotify:track:b", 0, 1_012_000);
+    next.cover_serial = 1;
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&next, 1_012_000);
+    try testing.expect(!bench.panelTouched());
+
+    // The notice's time is up: the music, in full, as it was drawn under it.
+    try testing.expect(bench.app.stepNoticesAt(1040));
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+    try testing.expect(bench.renderer.music_shown and !bench.renderer.notice_shown);
+    var expected = try Renderer.init(testing.allocator, .{});
+    defer expected.deinit();
+    expected.showMusic(.{ .track = .{
+        .title = "Jednou",
+        .artist = "Vladimir Misik",
+        .elapsed_s = 0,
+        .duration_s = 200,
+        .playing = true,
+        .cover = null,
+    } });
+    try testing.expectEqualSlices(u8, expected.music.data, bench.renderer.music.data);
+}
+
+test "a hardware fault takes the music screen down, and it comes back once cleared" {
+    var bench: Bench = undefined;
+    try bench.init(.{ .music = .{} });
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    try testing.expect(bench.renderer.music_shown);
+
+    bench.renderer.setFaultWarning(true);
+    bench.transport.resetLog();
+    try testing.expect(bench.app.stepMusicAt(1_002_000));
+    try testing.expect(!bench.renderer.music_shown);
+    try testing.expectEqual(Waveform.full, bench.refreshed().?);
+
+    bench.renderer.setFaultWarning(false);
+    try testing.expect(bench.app.stepMusicAt(1_003_000));
+    try testing.expect(bench.renderer.music_shown);
+}
+
+test "with Spotify off, nothing it could send changes the panel" {
+    var bench: Bench = undefined;
+    try bench.init(.{});
+    defer bench.deinit();
+    try bench.app.showInitialFrameAt(1000);
+
+    bench.transport.resetLog();
+    bench.app.applySpotifyAt(&playingSnapshot("spotify:track:a", 0, 1_000_000), 1_000_000);
+    try testing.expect(!bench.app.stepMusicAt(1_005_000));
+    try testing.expect(!bench.panelTouched());
+    try testing.expect(bench.app.musicSecondsLeft() == null);
+}
+
 const Collector = struct {
     frames: u32 = 0,
     last_len: usize = 0,
@@ -1080,7 +1294,7 @@ test "every display update hands the frame on, with the readings it was drawn fr
     bench.app.updateDisplayAt(10);
 
     try testing.expectEqual(@as(u32, 1), collector.frames);
-    try testing.expectEqual(@as(usize, @divCeil(layout.display_width, 8) * layout.display_height), collector.last_len);
+    try testing.expectEqual(@import("bmp.zig").packedLen(layout.display_width, layout.display_height), collector.last_len);
     try testing.expectEqual(@as(?u8, 50), collector.last_cpu_load);
 
     // On request too, which is how a preview that has just started gets its
