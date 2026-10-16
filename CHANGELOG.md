@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-10-16
+
 ### Added
 - **What Kodi plays, on the panel.** With `KODI_ENABLED=true` and `KODI_HOST`
   set, the music screen shows what plays on that Kodi as it shows what
@@ -663,6 +665,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.14.0]: https://github.com/zales/sys-ink/releases/tag/v1.14.0
 [1.13.0]: https://github.com/zales/sys-ink/releases/tag/v1.13.0
 [1.12.0]: https://github.com/zales/sys-ink/releases/tag/v1.12.0
 [1.11.1]: https://github.com/zales/sys-ink/releases/tag/v1.11.1
