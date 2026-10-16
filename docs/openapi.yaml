@@ -99,10 +99,11 @@ paths:
         A JSON object without `text` takes the notice on show down, as `{}`
         does.
 
-        The panel's fonts cover ASCII only: diacritics are dropped
-        ("Záloha" shows as "Zaloha"), typographic punctuation becomes its
-        ASCII lookalike, anything else shows as `?`. About 250 characters fit;
-        longer text is cut off with `...`.
+        The panel's fonts have ASCII and the Latin letters with diacritics,
+        so "Záloha hotová" shows as sent; typographic punctuation becomes
+        its ASCII lookalike, and anything else, other scripts and emoji
+        included, shows as `?`. About 250 characters fit; longer text is
+        cut off with `...`.
 
         The body must carry `Content-Length`; chunked bodies are refused.
       security:

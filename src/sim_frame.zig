@@ -40,7 +40,7 @@ fn reading(comptime T: type, value: T, stale: bool) Reading(T) {
 }
 
 /// Samples from one line up to one too long for the panel, with diacritics
-/// the renderer has to fold away.
+/// the fonts have to draw.
 const notice_samples = [_][]const u8{
     "Záloha dokončena",
     "Pračka doprala. Nezapomeň pověsit prádlo.",
@@ -61,7 +61,7 @@ pub fn noticeAt(t: f64) ?[]const u8 {
 }
 
 /// Tracks from a title that fits one line of the largest font to one that
-/// fits none, with diacritics to fold. Made up.
+/// fits none, with diacritics to draw. Made up.
 const music_samples = [_]struct { artist: []const u8, title: []const u8 }{
     .{ .artist = "Kapela bez jména", .title = "Jednou" },
     .{ .artist = "Žluťoučký kůň, Ďábelské ódy", .title = "Pět hospod, jedna ulice" },

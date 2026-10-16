@@ -41,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link is kept in `SPOTIFY_STATE_FILE`. A notice still goes over the music, and
   a hardware fault takes it down. See the README's Spotify section.
 - The `.deb`'s unit has `StateDirectory=sys-ink`, for that link.
+- **Diacritics.** The fonts have the Latin letters with diacritics now, U+00C0
+  to U+017F, so notices and titles show `Příliš žluťoučký kůň` as written,
+  where every diacritic used to be dropped (`Prilis zlutoucky kun`). They are
+  generated as the rest of the fonts were, monochrome and fully hinted, and
+  the glyphs that were there are left as they were, so the dashboard is
+  unchanged to the pixel. Other scripts and emoji still show as `?`, and
+  typographic punctuation as its ASCII lookalike.
 
 ## [1.12.0] — 2026-10-13
 

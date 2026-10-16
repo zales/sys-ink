@@ -66,9 +66,9 @@ sandbox, with the credentials it needs.
   most the panel holds, and anything longer is cut off with `...`.
 - **Lead with the point:** "Backup failed: disk full", not "Hi! I wanted to
   let you know that...".
-- **Diacritics are dropped.** The fonts are ASCII only, so "Pračka dokončila"
-  shows as "Pracka dokoncila". It stays readable, so keep writing in the
-  user's language. Emoji and other symbols show as `?`, so leave them out.
+- **Write in the user's language.** The panel draws Latin letters with their
+  diacritics, so "Pračka dokončila" shows as it is. Other scripts, emoji and
+  other symbols show as `?`, so leave them out.
 - **No line breaks.** The text is wrapped to fit. On the pipe a newline splits
   it into separate notices of which only the last is shown; the helper joins
   the lines for you.

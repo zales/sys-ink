@@ -723,14 +723,27 @@ test "every glyph carries enough data for its own dimensions" {
             glyphs_checked += 1;
         }
     }
-    try testing.expectEqual(@as(u32, 525), glyphs_checked);
+    try testing.expectEqual(@as(u32, 1475), glyphs_checked);
+}
+
+test "every size of text has the same characters, the Latin letters with diacritics among them" {
+    // notice.zig folds text to what ubuntu_14 has and trusts the rest to have it too.
+    const sizes = [_]*const font_data.Font{ &font_data.ubuntu_20, &font_data.ubuntu_24, &font_data.ubuntu_26, &font_data.ubuntu_34 };
+    for (sizes) |font| {
+        try testing.expectEqual(font_data.ubuntu_14.glyphs.len, font.glyphs.len);
+        for (font_data.ubuntu_14.glyphs, font.glyphs) |a, b| try testing.expectEqual(a.codepoint, b.codepoint);
+    }
+    for ([_]u32{ 'č', 'Ř', 'ů', 'Ž', 'ß', 'Ł', 'ő', 'Œ' }) |cp| {
+        try testing.expect(font_data.ubuntu_14.get(cp) != null);
+    }
 }
 
 test "font lookup misses return null" {
     try testing.expect(font_data.ubuntu_14.get(0) == null);
     try testing.expect(font_data.ubuntu_14.get(0x1F600) == null);
-    // Degree sign is the one non-ASCII codepoint the Ubuntu faces carry.
+    // Beyond ASCII: the degree sign, and the Latin letters with diacritics.
     try testing.expect(font_data.ubuntu_14.get(0xB0) != null);
+    try testing.expect(font_data.ubuntu_14.get(0x3A9) == null); // Ω
 }
 
 test "measureText sums advances and handles missing glyphs" {

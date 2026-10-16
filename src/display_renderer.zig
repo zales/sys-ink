@@ -229,9 +229,9 @@ pub const Renderer = struct {
     /// Put a notice on the panel in place of the dashboard, from the next
     /// update until `clearNotice`.
     ///
-    /// The fonts cover ASCII only, so the text is folded to it first, and it
-    /// is set in the largest font it fits. What does not fit even the
-    /// smallest is cut off with an ellipsis.
+    /// The text is folded to what the font draws first, and set in the
+    /// largest size it fits. What does not fit even the smallest is cut off
+    /// with an ellipsis.
     pub fn showNotice(self: *Self, text: []const u8) void {
         const b = &self.notice;
         const page = layout.notice;
@@ -243,7 +243,7 @@ pub const Renderer = struct {
         b.drawLine(rule_x, page.rule_y, layout.display_width - 1, page.rule_y, .black);
 
         var folded_buf: [notice_text.max_len]u8 = undefined;
-        const folded = notice_text.foldToAscii(&folded_buf, text);
+        const folded = notice_text.foldToFont(&folded_buf, text);
 
         var lines: [page.max_lines][]const u8 = undefined;
         var last_buf: [notice_text.max_len + 3]u8 = undefined;
@@ -317,8 +317,8 @@ pub const Renderer = struct {
         while (true) {
             last = std.mem.trimEnd(u8, last, " ");
             if (last.len == 0 or b.measureText(last, font) + b.measureText(ellipsis, font) <= width) break;
-            // A whole codepoint at a time: the degree sign survives folding
-            // and is two bytes, and half of it would eat the ellipsis.
+            // A whole codepoint at a time: a letter with a diacritic is two
+            // bytes, and half of it would eat the ellipsis.
             var cut = last.len - 1;
             while (cut > 0 and last[cut] & 0xC0 == 0x80) cut -= 1;
             last = last[0..cut];
@@ -365,18 +365,18 @@ pub const Renderer = struct {
             b.drawRect(m.cover.x, m.cover.y, m.cover.width, m.cover.height, .black);
         }
 
-        // Both cut to fit, as the fonts draw them: ASCII.
+        // Both cut to fit, as the font draws them.
         var folded_buf: [now_playing.max_text]u8 = undefined;
         var last_buf: [now_playing.max_text + 3]u8 = undefined;
 
         var artist_line: [1][]const u8 = undefined;
-        const artist = notice_text.foldToAscii(&folded_buf, t.artist);
+        const artist = notice_text.foldToFont(&folded_buf, t.artist);
         const artist_height = b.getLineHeight(m.artist_font);
         const fitted_artist = fitText(b, artist, &.{m.artist_font}, m.width, artist_height, &artist_line, &last_buf);
         if (fitted_artist.count > 0) b.drawTextFont(m.artist_at.x, m.artist_at.y, artist_line[0], m.artist_font, .black);
 
         var title_lines: [m.max_title_lines][]const u8 = undefined;
-        const folded_title = notice_text.foldToAscii(&folded_buf, t.title);
+        const folded_title = notice_text.foldToFont(&folded_buf, t.title);
         // Nothing known of what plays: a dash, as an empty slot has.
         const title = if (folded_title.len > 0) folded_title else "-";
         const fitted = fitText(b, title, &m.title_fonts, m.title.width, m.title.height, &title_lines, &last_buf);
@@ -420,7 +420,7 @@ pub const Renderer = struct {
 
         b.drawTextFont(page.prompt_at.x, page.prompt_at.y, page.prompt, page.prompt_font, .black);
         var folded_buf: [now_playing.max_text]u8 = undefined;
-        b.drawTextFont(page.code_at.x, page.code_at.y, notice_text.foldToAscii(&folded_buf, code), page.code_font, .black);
+        b.drawTextFont(page.code_at.x, page.code_at.y, notice_text.foldToFont(&folded_buf, code), page.code_font, .black);
         b.drawTextFont(page.hint_at.x, page.hint_at.y, page.hint, .ubuntu14, .black);
     }
 

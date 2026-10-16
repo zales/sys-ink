@@ -10,11 +10,13 @@
 //! notice needs more than that — see `parse`.
 
 const std = @import("std");
+const font_data = @import("font_data.zig");
 const CodepointIterator = @import("graphics.zig").CodepointIterator;
 
 /// Longest notice kept, in bytes after folding. Six lines of the smallest font
-/// hold about this much; anything longer would be cut off on the glass anyway.
-pub const max_len = 280;
+/// hold some 280 characters, and a letter with a diacritic takes two bytes;
+/// anything longer would be cut off on the glass anyway.
+pub const max_len = 2 * 280;
 
 /// Longest a notice may ask to stay up, in seconds: a day. Anything meant to
 /// stay longer is not a notice.
@@ -95,22 +97,24 @@ fn visible(text: []const u8) []const u8 {
     return "";
 }
 
-/// The fonts are generated for printable ASCII and the degree sign only, so
-/// anything else would draw as a blank gap. Latin letters with diacritics lose
-/// them ("Příliš žluťoučký" becomes "Prilis zlutoucky"), typographic
-/// punctuation becomes its ASCII lookalike, whitespace of any kind collapses to
-/// single spaces, and whatever is left becomes '?'.
+/// `text` as the panel draws it.
+///
+/// The fonts have ASCII, the degree sign, and the Latin letters with
+/// diacritics, so `Příliš žluťoučký kůň` stays as it is. Whitespace of any kind
+/// collapses to single spaces, typographic punctuation becomes its ASCII
+/// lookalike, and whatever else is left becomes '?', which says more than the
+/// blank gap a missing glyph is drawn as.
 ///
 /// Stops at `out.len`, never mid-character.
-pub fn foldToAscii(out: []u8, text: []const u8) []const u8 {
+pub fn foldToFont(out: []u8, text: []const u8) []const u8 {
     var len: usize = 0;
     // Starts true so leading whitespace is dropped.
     var after_space = true;
 
     var it = CodepointIterator{ .text = text };
     while (it.next()) |cp| {
-        var one: [1]u8 = undefined;
-        const folded: []const u8 = if (isSpace(cp)) " " else fold(cp, &one);
+        var utf8: [4]u8 = undefined;
+        const folded: []const u8 = if (isSpace(cp)) " " else fold(cp, &utf8);
 
         if (std.mem.eql(u8, folded, " ")) {
             if (after_space) continue;
@@ -127,6 +131,13 @@ pub fn foldToAscii(out: []u8, text: []const u8) []const u8 {
     return std.mem.trimEnd(u8, out[0..len], " ");
 }
 
+fn isFormatting(cp: u32) bool {
+    return switch (cp) {
+        0x80...0x9F, 0x200B...0x200F, 0x2028...0x202E, 0x2060...0x206F, 0xFEFF, 0xFFF0...0xFFFF => true,
+        else => false,
+    };
+}
+
 fn isSpace(cp: u32) bool {
     return switch (cp) {
         // Every C0 control, tab and CR included, and DEL.
@@ -137,24 +148,20 @@ fn isSpace(cp: u32) bool {
     };
 }
 
-/// ASCII for one non-space codepoint. `one` backs single-character results.
-fn fold(cp: u32, one: *[1]u8) []const u8 {
-    if (cp < 0x80) {
-        one[0] = @intCast(cp);
-        return one;
+/// One non-space codepoint as the panel can draw it. `buf` backs a character
+/// kept as it was.
+fn fold(cp: u32, buf: *[4]u8) []const u8 {
+    // Never kept, whatever the fonts are given: the C1 controls, CSI among
+    // them, and the marks that break or reorder a line would let a notice
+    // forge lines in the log, or turn one round.
+    if (isFormatting(cp)) return "?";
+    // Every size has the same characters; the tests in graphics.zig hold
+    // them to it.
+    if (font_data.ubuntu_14.get(cp) != null) {
+        const len = std.unicode.utf8Encode(@intCast(cp), buf) catch return "?";
+        return buf[0..len];
     }
     return switch (cp) {
-        // The one non-ASCII glyph the fonts do have.
-        0xB0 => "\u{B0}",
-        0xC0...0xFF => latin1[cp - 0xC0],
-        0x132 => "IJ",
-        0x133 => "ij",
-        0x152 => "OE",
-        0x153 => "oe",
-        0x100...0x131, 0x134...0x151, 0x154...0x17F => blk: {
-            one[0] = latin_extended_a[cp - 0x100];
-            break :blk one;
-        },
         0x2018, 0x2019, 0x201A, 0x2032 => "'",
         0x201C, 0x201D, 0x201E, 0x2033, 0xAB, 0xBB => "\"",
         0x2010...0x2015, 0x2212 => "-",
@@ -162,26 +169,6 @@ fn fold(cp: u32, one: *[1]u8) []const u8 {
         0x2022, 0xB7 => "*",
         else => "?",
     };
-}
-
-/// U+00C0 to U+00FF.
-const latin1 = [64][]const u8{
-    "A", "A", "A", "A", "A", "A", "AE", "C", "E", "E", "E", "E", "I", "I", "I",  "I",
-    "D", "N", "O", "O", "O", "O", "O",  "x", "O", "U", "U", "U", "U", "Y", "Th", "ss",
-    "a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i",  "i",
-    "d", "n", "o", "o", "o", "o", "o",  "/", "o", "u", "u", "u", "u", "y", "th", "y",
-};
-
-/// Base letter of each codepoint from U+0100 to U+017F. The four ligatures in
-/// the block are handled separately; their entries here are never read.
-const latin_extended_a =
-    "AaAaAa" ++ "CcCcCcCc" ++ "DdDd" ++ "EeEeEeEeEe" ++ "GgGgGgGg" ++ "HhHh" ++
-    "IiIiIiIiIi" ++ "Ii" ++ "Jj" ++ "Kkk" ++ "LlLlLlLlLl" ++ "NnNnNnnNn" ++
-    "OoOoOo" ++ "Oo" ++ "RrRrRr" ++ "SsSsSsSs" ++ "TtTtTt" ++ "UuUuUuUuUuUu" ++
-    "Ww" ++ "YyY" ++ "ZzZzZz" ++ "s";
-
-comptime {
-    std.debug.assert(latin_extended_a.len == 0x80);
 }
 
 /// The notice in what was read from the pipe in one go: its last non-blank
@@ -279,7 +266,7 @@ pub const Pacer = struct {
     pub fn offer(self: *Pacer, n: Notice, default_duration: u32) void {
         self.waiting = .{ .duration = n.duration orelse default_duration };
         const w = &self.waiting.?;
-        w.len = foldToAscii(&w.buf, n.text).len;
+        w.len = foldToFont(&w.buf, n.text).len;
     }
 
     /// What to do to the panel now, if anything. Ask after every `offer` and
@@ -354,21 +341,13 @@ const testing = std.testing;
 
 fn expectFold(expected: []const u8, input: []const u8) !void {
     var buf: [max_len]u8 = undefined;
-    try testing.expectEqualStrings(expected, foldToAscii(&buf, input));
+    try testing.expectEqualStrings(expected, foldToFont(&buf, input));
 }
 
-test "Czech diacritics fold to their base letters" {
-    try expectFold(
-        "Prilis zlutoucky kun upel dabelske ody",
-        "Příliš žluťoučký kůň úpěl ďábelské ódy",
-    );
-    try expectFold("PRILIS ZLUTOUCKY KUN UPEL DABELSKE ODY", "PŘÍLIŠ ŽLUŤOUČKÝ KŮŇ ÚPĚL ĎÁBELSKÉ ÓDY");
-}
-
-test "other Latin scripts fold too" {
-    try expectFold("Strasse Muller", "Straße Müller");
-    try expectFold("Lodz", "Łódź");
-    try expectFold("OEuvre", "Œuvre");
+test "Czech, and every other Latin letter with a diacritic, stays as it is" {
+    try expectFold("Příliš žluťoučký kůň úpěl ďábelské ódy", "Příliš žluťoučký kůň úpěl ďábelské ódy");
+    try expectFold("PŘÍLIŠ ŽLUŤOUČKÝ KŮŇ ÚPĚL ĎÁBELSKÉ ÓDY", "PŘÍLIŠ ŽLUŤOUČKÝ KŮŇ ÚPĚL ĎÁBELSKÉ ÓDY");
+    try expectFold("Straße Müller Łódź Œuvre", "Straße Müller Łódź Œuvre");
 }
 
 test "typographic punctuation becomes its ASCII lookalike" {
@@ -385,15 +364,24 @@ test "whitespace collapses and is trimmed" {
     try expectFold("1 000", "1\u{A0}000");
 }
 
-test "what cannot be folded becomes a question mark" {
+test "what the fonts have not becomes a question mark" {
     try expectFold("? hi", "😀 hi");
     try expectFold("?", "\xff");
+    try expectFold("?", "中");
+    try expectFold("??? ???", "Ωμέ Жук");
 }
 
-test "folding stops at the buffer, never mid-expansion" {
+test "controls and marks that would forge or reorder a log line never get through" {
+    try expectFold("a?b", "a\u{9B}b");
+    try expectFold("a?b", "a\u{2028}b");
+    try expectFold("a?b", "a\u{202E}b");
+    try expectFold("a b", "a\u{1B}b");
+}
+
+test "folding stops at the buffer, never mid-character" {
     var buf: [5]u8 = undefined;
-    // "ss" would need a sixth byte.
-    try testing.expectEqualStrings("abcd", foldToAscii(&buf, "abcdß"));
+    // "ß" would need a sixth byte.
+    try testing.expectEqualStrings("abcd", foldToFont(&buf, "abcdß"));
 }
 
 test "plain text is a notice as it stands" {
@@ -513,8 +501,8 @@ test "folding what is already folded changes nothing" {
         sharp_s,
         degrees,
     }) |text| {
-        const once = foldToAscii(&once_buf, text);
-        try testing.expectEqualStrings(once, foldToAscii(&twice_buf, once));
+        const once = foldToFont(&once_buf, text);
+        try testing.expectEqualStrings(once, foldToFont(&twice_buf, once));
     }
 }
 
@@ -613,17 +601,18 @@ test "a repeat is told by what the panel shows, and for how long" {
     var p: Pacer = .{};
     try testing.expect(!arrive(&p, "Pračka hotová", 100).?.show.repeat);
 
-    // The panel has no diacritics, so this is the same notice again.
-    try testing.expect(arrive(&p, "Pracka hotova", 110).?.show.repeat);
+    // The panel draws whitespace as single spaces, so this is the same
+    // notice again.
+    try testing.expect(arrive(&p, "  Pračka\thotová \n", 110).?.show.repeat);
     try testing.expectEqual(@as(?i64, 30), p.secondsLeft(110));
 
     // The same text for another length of time is a change worth a log line.
-    p.offer(.{ .text = "Pracka hotova", .duration = 300 }, 30);
+    p.offer(.{ .text = "Pračka hotová", .duration = 300 }, 30);
     try testing.expect(!p.next(120).?.show.repeat);
 
     // And once it has come down, the same notice is a new one.
     try testing.expect(p.next(420).? == .expired);
-    p.offer(.{ .text = "Pracka hotova", .duration = 300 }, 30);
+    p.offer(.{ .text = "Pračka hotová", .duration = 300 }, 30);
     try testing.expect(!p.next(500).?.show.repeat);
 }
 
