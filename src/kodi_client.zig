@@ -205,15 +205,19 @@ pub const Client = struct {
         while (true) {
             _ = message_arena.reset(.retain_capacity);
             const now = nowMs(self.io);
-            // Judged only after a wait that brought nothing: after a long
-            // picture fetch, what came meanwhile is still to be read.
             const ping_at = last_ping + kodi.ping_interval_s * 1000;
             if (now >= ping_at) {
-                try conn.send(kodi.ping_request);
+                // While something plays, how far it is does for a ping, and
+                // puts right what counting on gets wrong and Kodi does not
+                // announce: a stream that stalls to buffer, a film resumed
+                // where it was left.
+                if (self.player) |p| try sendProperties(&conn, p.id) else try conn.send(kodi.ping_request);
                 last_ping = now;
                 continue;
             }
 
+            // Judged only after a wait that brought nothing: after a long
+            // picture fetch, what came meanwhile is still to be read.
             const text = (try conn.next(self, ping_at)) orelse {
                 if (nowMs(self.io) - last_heard > silence_limit_ms) return error.KodiSilent;
                 continue;
@@ -227,6 +231,10 @@ pub const Client = struct {
             };
             switch (kodi.parse(root)) {
                 .changed => try conn.send(kodi.players_request),
+                .seeked => |seek| if (self.mine.playback) |held| {
+                    self.mine.playback = kodi.seeked(held, seek, nowMs(self.io));
+                    self.publish();
+                } else try conn.send(kodi.players_request),
                 .stopped => self.setNothing(),
                 .players => |player| {
                     self.player = player;
@@ -235,10 +243,7 @@ pub const Client = struct {
                         continue;
                     };
                     try conn.send(kodi.labels_request);
-                    var buf: [256]u8 = undefined;
-                    var w: std.Io.Writer = .fixed(&buf);
-                    kodi.writePropertiesRequest(&w, p.id) catch unreachable;
-                    try conn.send(w.buffered());
+                    try sendProperties(&conn, p.id);
                 },
                 .labels => |labels| if (self.player) |p| self.onLabels(arena, p.kind, labels),
                 .properties => |properties| self.onProperties(properties),
@@ -246,6 +251,13 @@ pub const Client = struct {
                 .pong, .other => {},
             }
         }
+    }
+
+    fn sendProperties(conn: *Connection, player_id: i64) !void {
+        var buf: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        kodi.writePropertiesRequest(&w, player_id) catch unreachable;
+        try conn.send(w.buffered());
     }
 
     fn setNothing(self: *Client) void {
@@ -277,9 +289,14 @@ pub const Client = struct {
         self.publish();
     }
 
+    /// Take in how far playback is, unless it is where the panel has
+    /// counted on to already, which asked every half a minute it mostly is.
     fn onProperties(self: *Client, properties: kodi.Properties) void {
         const uri = if (self.mine.track) |t| t.uri else now_playing.Text{};
-        self.mine.playback = kodi.playbackOf(uri, properties, nowMs(self.io), self.watched_since);
+        const now = nowMs(self.io);
+        const fresh = kodi.playbackOf(uri, properties, now, self.watched_since);
+        if (!kodi.differs(self.mine.playback, fresh, now)) return;
+        self.mine.playback = fresh;
         self.publish();
     }
 

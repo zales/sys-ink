@@ -24,8 +24,13 @@ const Value = std.json.Value;
 pub const default_port = 9090;
 
 /// Kodi is pinged this often while nothing else is said, so that a TV
-/// switched off, which says nothing as it goes, is noticed.
+/// switched off, which says nothing as it goes, is noticed. While something
+/// plays, asking how far it is does for the ping.
 pub const ping_interval_s = 30;
+
+/// A position further than this from where the panel has counted on to is
+/// put right; nearer, it is left alone rather than redrawn for nothing.
+const max_drift_ms = 2000;
 
 /// What a reply answers, by the id its request was sent with.
 pub const Asked = enum(u8) {
@@ -145,9 +150,19 @@ pub const Properties = struct {
     live: bool,
 };
 
+/// Where a seek has taken playback, as Kodi says in announcing it.
+pub const Seek = struct {
+    time_ms: i64,
+    speed: f64,
+};
+
 pub const Message = union(enum) {
     /// Playback has changed: ask again what plays.
     changed,
+    /// Playback has been moved to where `Seek` says. Asking how far it is
+    /// would not do: Kodi announces a seek before it is done, and until then
+    /// still gives the time from before it.
+    seeked: Seek,
     /// Nothing plays any more.
     stopped,
     /// The reply to `players_request`: null when nothing the panel can show
@@ -165,7 +180,7 @@ pub const Message = union(enum) {
 
 pub fn parse(root: Value) Message {
     const obj = object(root) orelse return .other;
-    if (string(obj.get("method"))) |method| return notification(method);
+    if (string(obj.get("method"))) |method| return notification(method, obj.get("params"));
 
     const id = integer(obj.get("id")) orelse return .other;
     const asked = std.enums.fromInt(Asked, id) orelse return .other;
@@ -179,7 +194,11 @@ pub fn parse(root: Value) Message {
     };
 }
 
-fn notification(method: []const u8) Message {
+fn notification(method: []const u8, params: ?Value) Message {
+    if (std.mem.eql(u8, method, "Player.OnSeek")) {
+        if (seekOf(params)) |seek| return .{ .seeked = seek };
+        return .changed;
+    }
     const changes = [_][]const u8{
         "Player.OnPlay",  "Player.OnAVStart", "Player.OnResume",
         "Player.OnPause", "Player.OnSeek",    "Player.OnSpeedChanged",
@@ -188,6 +207,17 @@ fn notification(method: []const u8) Message {
     const ends = [_][]const u8{ "Player.OnStop", "System.OnQuit", "System.OnSleep" };
     for (ends) |name| if (std.mem.eql(u8, method, name)) return .stopped;
     return .other;
+}
+
+/// Where an OnSeek notification's `params` say playback went.
+fn seekOf(params: ?Value) ?Seek {
+    const outer = object(params) orelse return null;
+    const data = object(outer.get("data")) orelse return null;
+    const player = object(data.get("player")) orelse return null;
+    return .{
+        .time_ms = durationMs(player.get("time")) orelse return null,
+        .speed = number(player.get("speed")) orelse 1,
+    };
 }
 
 /// The first player playing video or music; a slideshow has nothing to show
@@ -440,6 +470,29 @@ pub fn playbackOf(uri: now_playing.Text, p: Properties, received_ms: i64, watche
     };
 }
 
+/// `held` moved to where `seek` says, at `received_ms`. A live stream's time
+/// is the panel's own, which a seek in it does not change.
+pub fn seeked(held: now_playing.Playback, seek: Seek, received_ms: i64) now_playing.Playback {
+    if (held.live) return held;
+    var moved = held;
+    moved.position_ms = std.math.clamp(seek.time_ms, 0, @max(held.duration_ms, 0));
+    moved.at_ms = received_ms;
+    moved.playing = seek.speed != 0;
+    moved.speed = seek.speed;
+    return moved;
+}
+
+/// Whether `fresh`, how Kodi says playback stands at `now_ms`, tells the
+/// panel anything `held` does not: something else playing, a pause or its
+/// end, or a position away from where `held` has been counted on to, as a
+/// stream that stalled to buffer leaves it.
+pub fn differs(held: ?now_playing.Playback, fresh: now_playing.Playback, now_ms: i64) bool {
+    const h = held orelse return true;
+    if (!h.uri.eql(&fresh.uri) or h.playing != fresh.playing or h.live != fresh.live) return true;
+    if (h.duration_ms != fresh.duration_ms) return true;
+    return @abs(h.positionAt(now_ms) - fresh.positionAt(now_ms)) > max_drift_ms;
+}
+
 // ----------------------------------------------------------------------------
 // Retrying
 // ----------------------------------------------------------------------------
@@ -553,10 +606,56 @@ test "notifications of a change in playback have it asked again, and a stop ends
     ;
     try testing.expectEqual(Message.changed, try parseText(arena, play));
     try testing.expectEqual(Message.changed, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Player.OnPause\",\"params\":{}}"));
+    // A seek that does not say where to is asked about.
+    try testing.expectEqual(Message.changed, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Player.OnSeek\",\"params\":{}}"));
+    try testing.expectEqual(Message.changed, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Player.OnSeek\",\"params\":[1]}"));
     try testing.expectEqual(Message.stopped, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Player.OnStop\",\"params\":{}}"));
     // Several of these come for one change; OnAVStart is the one asked on.
     try testing.expectEqual(Message.other, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Player.OnAVChange\",\"params\":{}}"));
     try testing.expectEqual(Message.other, try parseText(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"Playlist.OnAdd\",\"params\":{}}"));
+}
+
+test "a seek is taken to where Kodi says it went, not to where asking after it says" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Three minutes back, as Kodi 22 announced it on 2026-10-16.
+    const seek = try parseText(arena,
+        \\{"jsonrpc":"2.0","method":"Player.OnSeek","params":{"data":{"item":{"title":"Jsou mezi námi","type":"movie","year":2026},"player":{"playerid":1,"seekoffset":{"hours":0,"milliseconds":0,"minutes":-3,"seconds":0},"speed":1,"time":{"hours":0,"milliseconds":262,"minutes":27,"seconds":23}}},"sender":"xbmc"}}
+    );
+    try testing.expectEqual(@as(i64, 1_643_262), seek.seeked.time_ms);
+
+    const held: now_playing.Playback = .{ .uri = .init("kodi:x"), .playing = true, .position_ms = 1_800_000, .at_ms = 0, .duration_ms = 6_362_000 };
+    const moved = seeked(held, seek.seeked, 10_000);
+    try testing.expectEqual(@as(i64, 1_643_262), moved.positionAt(10_000));
+    try testing.expect(moved.playing);
+
+    // Asking right after, Kodi still gives the time from before the seek;
+    // the next ask, half a minute on, gives it right.
+    const stale = playbackOf(.init("kodi:x"), .{ .time_ms = 1_810_000, .total_ms = 6_362_000, .speed = 1, .live = false }, 10_000, 0);
+    try testing.expect(differs(moved, stale, 10_000));
+
+    var live = held;
+    live.live = true;
+    try testing.expectEqual(live.position_ms, seeked(live, seek.seeked, 10_000).position_ms);
+}
+
+test "what Kodi says of playback is taken only where it differs from what the panel counts" {
+    const uri: now_playing.Text = .init("kodi:x");
+    const held: now_playing.Playback = .{ .uri = uri, .playing = true, .position_ms = 60_000, .at_ms = 0, .duration_ms = 600_000 };
+    const at = struct {
+        fn of(u: now_playing.Text, time_ms: i64, speed: f64) now_playing.Playback {
+            return playbackOf(u, .{ .time_ms = time_ms, .total_ms = 600_000, .speed = speed, .live = false }, 30_000, 0);
+        }
+    }.of;
+
+    try testing.expect(differs(null, at(uri, 90_000, 1), 30_000));
+    try testing.expect(!differs(held, at(uri, 91_000, 1), 30_000));
+    // Stalled for ten seconds to buffer.
+    try testing.expect(differs(held, at(uri, 80_000, 1), 30_000));
+    try testing.expect(differs(held, at(uri, 90_000, 0), 30_000));
+    try testing.expect(differs(held, at(.init("kodi:y"), 90_000, 1), 30_000));
 }
 
 test "the active player is the first that plays video or music" {
