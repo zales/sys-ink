@@ -32,6 +32,9 @@ pub const scopes = "streaming user-read-playback-state user-read-currently-playi
 pub const accounts_host = "accounts.spotify.com";
 pub const apresolve_host = "apresolve.spotify.com";
 pub const image_host = "i.scdn.co";
+/// Spotify's embed player, and its oEmbed, both public and without a login:
+/// what the player shows, for anything `itemOf` takes.
+pub const embed_host = "open.spotify.com";
 
 /// Where the panel is sent to enter its code.
 pub const pair_url = "spotify.com/pair";
@@ -113,6 +116,28 @@ pub fn itemOf(uri: []const u8) ?Item {
     if (std.mem.eql(u8, kind, "track")) return .{ .kind = .track, .id = id };
     if (std.mem.eql(u8, kind, "episode")) return .{ .kind = .episode, .id = id };
     return null;
+}
+
+/// The path of `item`'s page in the embed player.
+pub fn embedPagePath(buf: []u8, item: Item) ?[]const u8 {
+    return std.mem.print(buf, "/embed/{t}/{s}", .{ item.kind, item.id }) catch null;
+}
+
+/// The JSON the embed player's page is built from, which is what it shows:
+/// the contents of its one `__NEXT_DATA__` script.
+pub fn embedPageData(html: []const u8) ?[]const u8 {
+    const open = "<script id=\"__NEXT_DATA__\" type=\"application/json\">";
+    const start = (std.mem.indexOf(u8, html, open) orelse return null) + open.len;
+    const end = std.mem.indexOfPos(u8, html, start, "</script>") orelse return null;
+    return html[start..end];
+}
+
+/// The path to ask oEmbed about `uri` at.
+pub fn embedPath(buf: []u8, uri: []const u8) ?[]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll("/oembed?url=") catch return null;
+    writeEscaped(&w, uri) catch return null;
+    return w.buffered();
 }
 
 /// The path of a cover on the image host.
@@ -334,6 +359,71 @@ pub fn describe(item: Item, uri: []const u8, root: Value) ?Described {
     return out;
 }
 
+/// What oEmbed says of `uri`: its title and its cover, and no more. Used for
+/// what the metadata service does not know, which is the case for some
+/// podcast episodes; it has no artist, and for an episode not its show.
+pub fn describeEmbed(uri: []const u8, root: Value) ?Described {
+    const obj = object(root) orelse return null;
+    const title = string(obj.get("title")) orelse return null;
+    var out: Described = .{ .track = .{ .uri = .init(uri), .title = .init(title) }, .cover = null };
+
+    if (string(obj.get("thumbnail_url"))) |url| out.cover = coverIdOf(url);
+    return out;
+}
+
+/// What the embed player shows of `uri`: its title, the line beneath it, which
+/// is the artists of a track and the show of an episode, and its cover. Used
+/// for what the metadata service does not know, which is the case for some
+/// podcast episodes.
+pub fn describeEmbedPage(uri: []const u8, root: Value) ?Described {
+    const entity = field(field(field(field(field(root, "props"), "pageProps"), "state"), "data"), "entity");
+    const obj = object(entity) orelse return null;
+    const title = string(obj.get("title")) orelse string(obj.get("name")) orelse return null;
+    var out: Described = .{ .track = .{ .uri = .init(uri), .title = .init(title) }, .cover = null };
+
+    if (string(obj.get("subtitle"))) |subtitle| {
+        out.track.artist = .init(subtitle);
+    } else {
+        var artists: [now_playing.max_text]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&artists);
+        for (array(obj.get("artists")) orelse &.{}, 0..) |artist, i| {
+            const name = string(field(artist, "name")) orelse continue;
+            if (i > 0) w.writeAll(", ") catch break;
+            w.writeAll(name) catch break;
+        }
+        out.track.artist = .init(w.buffered());
+    }
+
+    // The nearest to the size drawn, as `pickCover` chooses; larger rather
+    // than smaller.
+    var best_distance: i64 = std.math.maxInt(i64);
+    for (array(field(obj.get("visualIdentity"), "image")) orelse &.{}) |image| {
+        const id = coverIdOf(string(field(image, "url")) orelse continue) orelse continue;
+        const width = integer(field(image, "maxWidth")) orelse 300;
+        const distance = if (width >= now_playing.cover_side) width - now_playing.cover_side else 4 * (now_playing.cover_side - width);
+        if (distance < best_distance) {
+            best_distance = distance;
+            out.cover = id;
+        }
+    }
+    return out;
+}
+
+/// The cover's ID an image address ends in: the image host serves it as well
+/// as the CDN the address names.
+fn coverIdOf(url: []const u8) ?[40]u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, url, '/') orelse return null;
+    const id = url[slash + 1 ..];
+    return if (isFileId(id)) id[0..40].* else null;
+}
+
+/// Forty hex digits, as a cover's ID is: it goes into a URL path.
+fn isFileId(id: []const u8) bool {
+    if (id.len != 40) return false;
+    for (id) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
+}
+
 /// The cover nearest in size to the one drawn: 300 pixels is `DEFAULT`, and
 /// the panel's is 128.
 fn pickCover(images: []const Value) ?[40]u8 {
@@ -341,9 +431,7 @@ fn pickCover(images: []const Value) ?[40]u8 {
     var best_distance: i64 = std.math.maxInt(i64);
     images: for (images) |image| {
         const id = string(field(image, "file_id")) orelse continue;
-        // Goes into a URL path: forty hex digits and nothing else.
-        if (id.len != 40) continue;
-        for (id) |c| if (!std.ascii.isHex(c)) continue :images;
+        if (!isFileId(id)) continue :images;
         const width = integer(field(image, "width")) orelse 300;
         // Smaller than drawn is upscaled and blurs; prefer larger.
         const distance = if (width >= now_playing.cover_side) width - now_playing.cover_side else 4 * (now_playing.cover_side - width);
@@ -642,6 +730,66 @@ test "a cover ID that is not one is not used" {
     ;
     const uri = "spotify:track:2xuBAESQMeELjRS53SUTTL";
     try testing.expect(describe(itemOf(uri).?, uri, try parse(&arena, metadata)).?.cover == null);
+}
+
+test "the embed player's page gives an episode its show, and a track its artists" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    var buf: [128]u8 = undefined;
+    const episode_uri = "spotify:episode:4XtgZryCRAoEd1wEMbwgXf";
+    try testing.expectEqualStrings("/embed/episode/4XtgZryCRAoEd1wEMbwgXf", embedPagePath(&buf, itemOf(episode_uri).?).?);
+
+    // Cut down from the page as it was on 2026-10-16.
+    const page =
+        \\<!DOCTYPE html><html><head><title>Spotify Embed</title></head><body>
+        \\<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{
+        \\"type":"episode","name":"Film: Street Fighter - 40 %","title":"Film: Street Fighter - 40 %","subtitle":"Fukocast",
+        \\"visualIdentity":{"image":[
+        \\{"url":"https://image-cdn-fa.spotifycdn.com/image/ab67656300005f1f6eb6e6843ae20c040fd87832","maxWidth":300},
+        \\{"url":"https://image-cdn-fa.spotifycdn.com/image/ab6765630000ba8a6eb6e6843ae20c040fd87832","maxWidth":640},
+        \\{"url":"https://image-cdn-fa.spotifycdn.com/image/ab6765630000f68d6eb6e6843ae20c040fd87832","maxWidth":64}]}}}}}}}</script>
+        \\</body></html>
+    ;
+    const json = embedPageData(page).?;
+    const episode = describeEmbedPage(episode_uri, try parse(&arena, json)).?;
+    try testing.expectEqualStrings("Film: Street Fighter - 40 %", episode.track.title.slice());
+    try testing.expectEqualStrings("Fukocast", episode.track.artist.slice());
+    try testing.expectEqualStrings("ab67656300005f1f6eb6e6843ae20c040fd87832", &episode.cover.?);
+
+    const track_uri = "spotify:track:2xuBAESQMeELjRS53SUTTL";
+    const track = describeEmbedPage(track_uri, try parse(&arena,
+        \\{"props":{"pageProps":{"state":{"data":{"entity":{"type":"track","title":"Vzpomínka na samotu",
+        \\"artists":[{"name":"Vladimír Mišík"},{"name":"Etc..."}],"visualIdentity":{"image":[]}}}}}}}
+    )).?;
+    try testing.expectEqualStrings("Vladimír Mišík, Etc...", track.track.artist.slice());
+    try testing.expect(track.cover == null);
+
+    try testing.expect(embedPageData("<html>no data</html>") == null);
+    try testing.expect(describeEmbedPage(track_uri, try parse(&arena, "{\"props\":{}}")) == null);
+}
+
+test "oEmbed gives an episode its title and cover, and nothing that is not an ID becomes a path" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const uri = "spotify:episode:4XtgZryCRAoEd1wEMbwgXf";
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/oembed?url=spotify%3Aepisode%3A4XtgZryCRAoEd1wEMbwgXf", embedPath(&buf, uri).?);
+
+    const d = describeEmbed(uri, try parse(&arena,
+        \\{"title":"Film: Street Fighter - 40 %","thumbnail_url":"https://image-cdn-ak.spotifycdn.com/image/ab67656300005f1f6eb6e6843ae20c040fd87832","type":"rich"}
+    )).?;
+    try testing.expectEqualStrings("Film: Street Fighter - 40 %", d.track.title.slice());
+    try testing.expectEqualStrings("", d.track.artist.slice());
+    try testing.expectEqualStrings(uri, d.track.uri.slice());
+    try testing.expectEqualStrings("ab67656300005f1f6eb6e6843ae20c040fd87832", &d.cover.?);
+
+    const odd = describeEmbed(uri, try parse(&arena,
+        \\{"title":"x","thumbnail_url":"https://example.com/image/../../etc/passwd"}
+    )).?;
+    try testing.expect(odd.cover == null);
+    try testing.expect(describeEmbed(uri, try parse(&arena, "{\"type\":\"rich\"}")) == null);
 }
 
 test "the state file is read back as it was written" {

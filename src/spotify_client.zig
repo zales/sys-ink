@@ -321,8 +321,12 @@ pub const Client = struct {
         self.publish();
     }
 
-    /// Look up what `uri` is called and its cover. What cannot be found out
-    /// is left out, and not asked again until something else plays.
+    /// Look up what `uri` is called and its cover: from the metadata service,
+    /// or failing that from the embed player's page, or from oEmbed, which
+    /// has no artist or show but is published. What cannot be found out is
+    /// left out, the
+    /// cover of what played before included, and not asked again until
+    /// something else plays.
     fn describe(self: *Client, arena: std.mem.Allocator, spclient: spotify.HostPort, token: []const u8, uri: []const u8) void {
         self.mine.track = .{ .uri = .init(uri) };
         const item = spotify.itemOf(uri) orelse {
@@ -330,23 +334,13 @@ pub const Client = struct {
             return;
         };
 
-        var path_buf: [128]u8 = undefined;
-        const path = item.metadataPath(&path_buf) orelse return;
-        const headers = std.fmt.allocPrint(arena, "Authorization: Bearer {s}\r\nAccept: application/json\r\n", .{token}) catch return;
-        const reply = self.request(arena, .{ .method = "GET", .host = spclient, .path = path, .headers = headers }) catch |err| {
-            // Cut short by the daemon stopping: nothing went wrong.
-            if (err != error.Stopped) log.warn("Spotify: cannot look up {s}: {t}", .{ uri, err });
+        const described = self.lookUp(arena, spclient, token, item, uri) orelse
+            self.lookUpEmbedPage(arena, item, uri) orelse
+            self.lookUpEmbed(arena, uri) orelse {
+            log.warn("Spotify: cannot find out what {s} is", .{uri});
+            self.setCover(arena, null);
             return;
         };
-        if (reply.status != .ok) {
-            log.warn("Spotify: looking up {s} was answered {d}", .{ uri, @backingInt(reply.status) });
-            return;
-        }
-        const root = std.json.parseFromSliceLeaky(Value, arena, reply.body, .{}) catch {
-            log.warn("Spotify: what {s} is came back as something other than JSON", .{uri});
-            return;
-        };
-        const described = spotify.describe(item, uri, root) orelse return;
         self.mine.track = described.track;
         log.debug("Spotify: playing {s} - {s} ({s})", .{
             described.track.artist.slice(),
@@ -354,6 +348,72 @@ pub const Client = struct {
             described.track.album.slice(),
         });
         self.setCover(arena, described.cover);
+    }
+
+    /// What the metadata service says of `item`. It does not know every
+    /// podcast episode: some it answers 404.
+    fn lookUp(self: *Client, arena: std.mem.Allocator, spclient: spotify.HostPort, token: []const u8, item: spotify.Item, uri: []const u8) ?spotify.Described {
+        var path_buf: [128]u8 = undefined;
+        const path = item.metadataPath(&path_buf) orelse return null;
+        const headers = std.fmt.allocPrint(arena, "Authorization: Bearer {s}\r\nAccept: application/json\r\n", .{token}) catch return null;
+        const reply = self.request(arena, .{ .method = "GET", .host = spclient, .path = path, .headers = headers }) catch |err| {
+            // Cut short by the daemon stopping: nothing went wrong.
+            if (err != error.Stopped) log.debug("Spotify: cannot look up {s}: {t}", .{ uri, err });
+            return null;
+        };
+        if (reply.status != .ok) {
+            log.debug("Spotify: looking up {s} was answered {d}", .{ uri, @backingInt(reply.status) });
+            return null;
+        }
+        const root = std.json.parseFromSliceLeaky(Value, arena, reply.body, .{}) catch return null;
+        return spotify.describe(item, uri, root);
+    }
+
+    /// What the embed player's page shows of `item`: a title, the artists or
+    /// the show, and a cover.
+    fn lookUpEmbedPage(self: *Client, arena: std.mem.Allocator, item: spotify.Item, uri: []const u8) ?spotify.Described {
+        var path_buf: [128]u8 = undefined;
+        const path = spotify.embedPagePath(&path_buf, item) orelse return null;
+        const reply = self.request(arena, .{
+            .method = "GET",
+            .host = .{ .host = spotify.embed_host, .port = 443 },
+            .path = path,
+            .headers = "Accept: text/html\r\n",
+        }) catch |err| {
+            if (err != error.Stopped) log.debug("Spotify: cannot fetch the embed page of {s}: {t}", .{ uri, err });
+            return null;
+        };
+        if (reply.status != .ok) {
+            log.debug("Spotify: the embed page of {s} was answered {d}", .{ uri, @backingInt(reply.status) });
+            return null;
+        }
+        const json = spotify.embedPageData(reply.body) orelse {
+            log.debug("Spotify: the embed page of {s} has no data in it", .{uri});
+            return null;
+        };
+        const root = std.json.parseFromSliceLeaky(Value, arena, json, .{}) catch return null;
+        return spotify.describeEmbedPage(uri, root);
+    }
+
+    /// What oEmbed says of `uri`: a title and a cover.
+    fn lookUpEmbed(self: *Client, arena: std.mem.Allocator, uri: []const u8) ?spotify.Described {
+        var path_buf: [128]u8 = undefined;
+        const path = spotify.embedPath(&path_buf, uri) orelse return null;
+        const reply = self.request(arena, .{
+            .method = "GET",
+            .host = .{ .host = spotify.embed_host, .port = 443 },
+            .path = path,
+            .headers = "Accept: application/json\r\n",
+        }) catch |err| {
+            if (err != error.Stopped) log.debug("Spotify: cannot ask oEmbed about {s}: {t}", .{ uri, err });
+            return null;
+        };
+        if (reply.status != .ok) {
+            log.debug("Spotify: oEmbed answered {d} about {s}", .{ @backingInt(reply.status), uri });
+            return null;
+        }
+        const root = std.json.parseFromSliceLeaky(Value, arena, reply.body, .{}) catch return null;
+        return spotify.describeEmbed(uri, root);
     }
 
     /// Fetch, decode and scale the cover `id`, unless it is the one already

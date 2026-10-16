@@ -809,9 +809,11 @@ WebSocket Spotify pushes playback changes down. The panel registers there as a
 device that plays nothing and asks to be left out of device lists, and is told
 of every change as it happens: nothing is polled. What a track is called,
 and its cover, it then looks up itself, since the device playing it may not
-say. None of this is a published API. It was checked against Spotify itself
-when written, and if Spotify changes it, the log says so and the dashboard
-stays up.
+say: from Spotify's metadata service, or, for what that does not know, as
+some podcast episodes, from the page of Spotify's public embed player, where
+an episode has its show's name beside its own. None of this is a published
+API. It was checked against Spotify itself when written, and if Spotify
+changes it, the log says so and the dashboard stays up.
 
 The time played is counted on by the panel between changes, so the bar moves
 without asking Spotify anything.
