@@ -7,7 +7,7 @@ would not learn from the file it happens to be editing.
 ## What this is
 
 A daemon for a Raspberry Pi with a Waveshare 2.9" e-paper panel (V2), written
-in Zig 0.17.0. It takes readings from the machine, draws a dashboard, puts it
+in Zig 0.17.1. It takes readings from the machine, draws a dashboard, puts it
 on the panel over SPI and GPIO, publishes the readings over MQTT, serves a
 preview and a small HTTP API, and shows notices sent to it.
 

@@ -237,7 +237,7 @@ gcc -o fontgen $(pkg-config --cflags cairo freetype2) tools/fontgen.c $(pkg-conf
 
 ### Prerequisites
 
-- [Zig Compiler](https://ziglang.org/download/) 0.17.0
+- [Zig Compiler](https://ziglang.org/download/) 0.17.1
 - Network access on the first build: `zig build` fetches the
   [translate-c](https://codeberg.org/ziglang/translate-c) package pinned in
   `build.zig.zon`, which turns the libc headers in `src/c.h` into Zig.

@@ -145,6 +145,7 @@ pub const Client = struct {
             .interface = undefined,
             .state = .ready,
             .max_head_len = 16 * 1024,
+            .side = .response,
         };
         const head = std.http.Client.Response.Head.parse(try conn.mapRead(http_reader.receiveHead())) catch return error.UnexpectedReply;
         const status = head.status;

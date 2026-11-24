@@ -1,7 +1,7 @@
 //! A TCP connect that gives up after a deadline.
 //!
 //! `net.IpAddress.ConnectOptions` has a `timeout` field, which is what this
-//! should be. It is not implemented as of Zig 0.17.0:
+//! should be. It is not implemented as of Zig 0.17.1:
 //! `Io.Threaded.netConnectIpPosix` panics with "TODO implement
 //! netConnectIpPosix with timeout", which only shows up at runtime. Until that
 //! lands, an unbounded connect to a host that drops SYNs rather than refusing
@@ -128,7 +128,7 @@ fn clearNonBlocking(fd: std.posix.fd_t) Error!void {
 /// writable only while at least a third of the send buffer is free, several
 /// kilobytes, and nothing sent through this is larger than one.
 ///
-/// std's `Socket.sendTimeout` is not a replacement as of Zig 0.17.0, tried
+/// std's `Socket.sendTimeout` is not a replacement as of Zig 0.17.1, tried
 /// against a peer that had stopped reading. On Linux it sends without
 /// blocking, and a packet that only partly fits comes back as
 /// `error.MessageOversize` with its first part already on the wire. On macOS,

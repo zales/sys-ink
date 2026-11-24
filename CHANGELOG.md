@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Built with Zig 0.17.1**, and no longer with 0.17.0: `std.http.Reader` is
+  now told whether it reads a request or a reply, in a field 0.17.0 does not
+  have. Only affects building from source.
+
 ## [1.14.1] — 2026-10-16
 
 ### Fixed
