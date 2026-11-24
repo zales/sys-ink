@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | What changed | What to do |
 |---------|--------------|------------|
+| 1.14.2 | Requires Zig 0.17.1 to build. | Only affects building from source. |
 | 1.13.0 | `/frame.bmp` and the file `EXPORT_BMP` writes are four-bit BMPs with a palette of four greys, about 19 kB a frame; they were one bit a pixel, about 5 kB. | Nothing for an image viewer or a library that reads BMPs. A client that took the pixels as one bit each has to read four. |
 | 1.12.0 | The APT count is stale after an `apt update` that failed: drawn faded on the panel, listed under `stale` in `/api/status`, and withheld from MQTT, so its Home Assistant entity goes unavailable. Before, it was reported as current. | Nothing where `apt update` works. Where it fails, the log gives the reason on a line starting `apt update failed`; once that is put right the count is current again. |
 | 1.11.0 | `/api/status`: `cpu_load`, `cpu_temp`, `memory`, `disk_usage`, `download_bytes_per_second` and `upload_bytes_per_second` can be `null`, like every other reading, and a reading that could not be refreshed is listed under the new `stale` object. | A client that assumed those six were always numbers needs to allow for `null`. |
@@ -28,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
+
+## [1.14.2] — 2026-11-25
 
 ### Changed
 - **Built with Zig 0.17.1**, and no longer with 0.17.0: `std.http.Reader` is
@@ -680,6 +683,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: Waveshare 2.9" e-Paper support, font generation tool, display
   layout, CPU and NVMe temperature path caching, and a release workflow.
 
+[1.14.2]: https://github.com/zales/sys-ink/releases/tag/v1.14.2
 [1.14.1]: https://github.com/zales/sys-ink/releases/tag/v1.14.1
 [1.14.0]: https://github.com/zales/sys-ink/releases/tag/v1.14.0
 [1.13.0]: https://github.com/zales/sys-ink/releases/tag/v1.13.0
