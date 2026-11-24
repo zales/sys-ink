@@ -36,9 +36,11 @@ pub const std_options: std.Options = .{
 
 /// A minimal panic handler. The default one pulls ELF/DWARF parsing and
 /// stack-trace rendering into the binary — roughly 90 KB that can never produce
-/// a useful trace here, because release builds are stripped. Zig 0.17.0's own
-/// minimal one, `std.debug.simple_panic`, does not compile (a regression listed
-/// in its release notes), so this is the same thing by hand.
+/// a useful trace here, because release builds are stripped. std's own minimal
+/// one, `std.debug.simple_panic`, did not compile in Zig 0.17.0, which is why
+/// this was written by hand. It does again in 0.17.1, and this one stays for
+/// what it says: "index out of bounds: index 5, len 3" where that one says
+/// "index out of bounds", for about 10 KB of the binary.
 pub const panic = std.debug.FullPanic(panicMessage);
 
 fn panicMessage(msg: []const u8, first_trace_addr: ?usize) noreturn {
