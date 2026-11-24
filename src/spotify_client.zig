@@ -745,6 +745,7 @@ const Dealer = struct {
             .interface = undefined,
             .state = .ready,
             .max_head_len = 16 * 1024,
+            .side = .response,
         };
         const head = try self.conn.mapRead(http_reader.receiveHead());
         const status = statusOf(head) orelse return error.UnexpectedReply;

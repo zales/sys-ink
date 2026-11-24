@@ -2,7 +2,7 @@
     .name = .sys_ink,
     .version = "1.14.1",
     .fingerprint = 0x27c5c27c3f59d95b,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .translate_c = .{
             .url = "git+https://codeberg.org/ziglang/translate-c?ref=2.0.0#0da7a16c3235b935b82421646076e0657cda21f6",
